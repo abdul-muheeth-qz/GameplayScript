@@ -1,0 +1,6 @@
+# config.json holds the obs-websocket password -- keep it local.
+config.json
+
+captures/
+__pycache__/
+*.pyc

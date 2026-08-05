@@ -1,0 +1,3 @@
+# OBS Studio WebSocket 5.x client (pulls in websocket-client).
+# Everything else -- window focus, key injection -- uses ctypes against user32.dll.
+obsws-python>=1.6,<2
