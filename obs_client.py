@@ -1,9 +1,8 @@
-"""Thin wrapper over obsws-python for the spin capture loop.
+"""Thin wrapper over obsws-python: open OBS if needed, then screenshot a source.
 
-Screenshots come from OBS rather than a desktop grab, which matters for two reasons:
-the scene's Window Capture source is configured for client-area-only with no cursor,
-so the PNG is exactly the game surface; and it is the same pixels OBS puts in the
-video, so screenshots and recording can't disagree.
+Screenshots come from OBS rather than a desktop grab because the scene's Window Capture source
+is configured for client-area-only with no cursor, so the PNG is exactly the game surface --
+and it stays right whatever window happens to be on top of the game at the time.
 """
 
 from __future__ import annotations
@@ -41,7 +40,9 @@ class ObsError(RuntimeError):
     pass
 
 
-def _clamp(value: int) -> int:
+def clamp_dim(value: int) -> int:
+    """A screenshot dimension OBS will accept. Public because the caller's fallback size
+    (the game window's own client area) has to be clamped the same way."""
     return max(MIN_DIM, min(MAX_DIM, int(value)))
 
 
@@ -83,7 +84,6 @@ class ObsSession:
         self.password = password
         self.timeout = timeout
         self._cl = None
-        self._we_started_recording = False
         self.version = ""
         self.supported_formats: list[str] = []
 
@@ -249,7 +249,7 @@ class ObsSession:
             return None
         if width < MIN_DIM or height < MIN_DIM:
             return None
-        return _clamp(width), _clamp(height)
+        return clamp_dim(width), clamp_dim(height)
 
     def screenshot(
         self,
@@ -284,83 +284,3 @@ class ObsSession:
                 "write to that folder?"
             )
         return path
-
-    # -- recording ---------------------------------------------------------
-
-    def is_recording(self) -> bool:
-        try:
-            return bool(getattr(self._cl.get_record_status(), "output_active", False))
-        except Exception:
-            LOG.debug("GetRecordStatus failed", exc_info=True)
-            return False
-
-    def timecode(self) -> str | None:
-        """Recording position, e.g. "00:00:14.183", or None when not recording."""
-        try:
-            status = self._cl.get_record_status()
-        except Exception:
-            LOG.debug("GetRecordStatus failed", exc_info=True)
-            return None
-        if not getattr(status, "output_active", False):
-            return None
-        return getattr(status, "output_timecode", None)
-
-    def start_recording(self) -> bool:
-        """Start recording unless OBS is already recording.
-
-        Returns whether we started it -- we only stop what we started, so a recording
-        you began by hand survives this script.
-        """
-        if self.is_recording():
-            LOG.warning("OBS was already recording; leaving it alone (it won't be stopped either)")
-            self._we_started_recording = False
-            return False
-        try:
-            self._cl.start_record()
-        except Exception as exc:
-            raise ObsError(f"StartRecord failed: {exc}") from exc
-        self._we_started_recording = True
-
-        # StartRecord is accepted before the output is really running, and until it is there
-        # is no timecode -- which would leave the first spin unable to point at the video.
-        deadline = time.monotonic() + 5.0
-        while not self.is_recording() and time.monotonic() < deadline:
-            time.sleep(0.2)
-        if not self.is_recording():
-            LOG.warning("OBS accepted StartRecord but the output is still not active; the "
-                        "first screenshots may have no timecode")
-        LOG.info("recording started")
-        return True
-
-    def stop_recording(self, timeout: float = 5.0) -> str | None:
-        """Stop recording if we started it. Returns the output file path if known.
-
-        Retries, because StartRecord is accepted before the output is really running: a run
-        that fails in its first second would otherwise ask OBS to stop a recording it
-        doesn't consider active yet, be refused, and leave it recording indefinitely --
-        which is the one thing this method exists to prevent.
-        """
-        if not self._we_started_recording:
-            return None
-        self._we_started_recording = False
-
-        deadline = time.monotonic() + timeout
-        while True:
-            if self.is_recording():
-                try:
-                    resp = self._cl.stop_record()
-                except Exception as exc:
-                    if time.monotonic() >= deadline:
-                        LOG.error("StopRecord failed -- check OBS, it may still be "
-                                  "recording: %s", exc)
-                        return None
-                    time.sleep(0.3)
-                    continue
-                path = getattr(resp, "output_path", None)
-                LOG.info("recording stopped%s", f" -> {path}" if path else "")
-                return path
-            if time.monotonic() >= deadline:
-                LOG.warning("we started a recording but OBS never reported it active, so "
-                            "there was nothing to stop")
-                return None
-            time.sleep(0.3)

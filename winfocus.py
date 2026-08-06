@@ -1,7 +1,11 @@
-"""Find the Unity game window and put it in the foreground.
+"""Find the game window and the i-Deck window, and measure them.
 
 Matching is done on executable name + window class, never on the title: Unity window
 titles change (build labels, FPS counters), the class `UnityWndClass` does not.
+
+Nothing here takes the foreground. A minimised window has to be restored, because it produces
+no frames for OBS to capture, but stealing focus is a separate and more disruptive thing --
+and clicking the i-Deck by posted message doesn't need it.
 
 Also holds `process_running`, used to check whether OBS is up before launching it.
 """
@@ -11,7 +15,6 @@ from __future__ import annotations
 import ctypes
 import logging
 import ntpath
-import time
 from ctypes import wintypes
 
 LOG = logging.getLogger("spin.winfocus")
@@ -20,7 +23,6 @@ user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
-SW_SHOW = 5
 SW_RESTORE = 9
 TH32CS_SNAPPROCESS = 0x00000002
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -41,11 +43,7 @@ user32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
 user32.ClientToScreen.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT))
 user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
-user32.BringWindowToTop.argtypes = (wintypes.HWND,)
 user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
-user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
-user32.GetForegroundWindow.restype = wintypes.HWND
 
 kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
 kernel32.OpenProcess.restype = wintypes.HANDLE
@@ -58,7 +56,6 @@ kernel32.QueryFullProcessImageNameW.argtypes = (
 )
 kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 kernel32.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 
@@ -127,10 +124,6 @@ def _pid_of(hwnd) -> int:
     return pid.value
 
 
-def _thread_of(hwnd) -> int:
-    return user32.GetWindowThreadProcessId(hwnd, None)
-
-
 def _process_image_name(pid: int) -> str:
     """Full path of a process image, or "" if it can't be read."""
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -147,9 +140,7 @@ def _process_image_name(pid: int) -> str:
 
 
 def list_windows() -> list[Window]:
-    """Every visible top-level window, largest client area first. Useful for
-    --list-windows when the game's executable name or window class isn't what
-    config.json expects."""
+    """Every visible top-level window, largest client area first."""
     found: list[Window] = []
 
     def _visit(hwnd, _lparam):
@@ -213,48 +204,6 @@ def ensure_restored(window: Window) -> None:
         user32.ShowWindow(window.hwnd, SW_RESTORE)
 
 
-def is_focused(window: Window) -> bool:
-    return user32.GetForegroundWindow() == window.hwnd
-
-
-def focus(window: Window, attempts: int = 10, delay: float = 0.1) -> bool:
-    """Bring `window` to the foreground. Returns whether it actually got focus.
-
-    Windows refuses SetForegroundWindow from a process that doesn't already own the
-    foreground, so we fall back to briefly attaching to the target's input queue,
-    which makes the call legal.
-    """
-    for attempt in range(1, attempts + 1):
-        if is_focused(window):
-            return True
-
-        if user32.IsIconic(window.hwnd):
-            user32.ShowWindow(window.hwnd, SW_RESTORE)
-
-        user32.SetForegroundWindow(window.hwnd)
-        if is_focused(window):
-            return True
-
-        our_tid = kernel32.GetCurrentThreadId()
-        target_tid = _thread_of(window.hwnd)
-        if target_tid and target_tid != our_tid:
-            attached = user32.AttachThreadInput(our_tid, target_tid, True)
-            try:
-                user32.ShowWindow(window.hwnd, SW_SHOW)
-                user32.BringWindowToTop(window.hwnd)
-                user32.SetForegroundWindow(window.hwnd)
-            finally:
-                if attached:
-                    user32.AttachThreadInput(our_tid, target_tid, False)
-            if is_focused(window):
-                return True
-
-        LOG.debug("focus attempt %d/%d did not take", attempt, attempts)
-        time.sleep(delay)
-
-    return is_focused(window)
-
-
 class _TOKEN_ELEVATION(ctypes.Structure):
     _fields_ = [("TokenIsElevated", wintypes.DWORD)]
 
@@ -276,12 +225,11 @@ def _is_elevated(process_handle) -> bool | None:
         kernel32.CloseHandle(token)
 
 
-def elevation_warning(window: Window, what: str = "keystrokes") -> str | None:
-    """Explain an elevation mismatch that would make injected input vanish.
+def elevation_warning(window: Window) -> str | None:
+    """Explain an elevation mismatch that would make a posted click vanish.
 
-    UIPI silently drops both injected input and posted window messages aimed at a
-    higher-integrity window, and SendInput/PostMessage still report success -- so this check
-    is the only warning available before the fact.
+    UIPI silently drops window messages aimed at a higher-integrity window, and PostMessage
+    still reports success -- so this check is the only warning available before the fact.
     """
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, window.pid)
     if handle:
@@ -295,7 +243,7 @@ def elevation_warning(window: Window, what: str = "keystrokes") -> str | None:
     if _is_elevated(kernel32.GetCurrentProcess()) is False and theirs is not False:
         detail = "is running elevated" if theirs else "could not be inspected (likely elevated)"
         return (f"{window.process} {detail} but this script is not. Windows (UIPI) will "
-                f"silently discard the {what}. Re-run from a terminal started with "
+                "silently discard the button clicks. Re-run from a terminal started with "
                 "'Run as administrator'.")
     return None
 

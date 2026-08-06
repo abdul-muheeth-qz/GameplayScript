@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """The i-Deck: the "Virtual OLED" button panel.
 
 `OledPanelSvc.exe` draws a cabinet's OLED button panel into an SDL window so a developer can
@@ -6,7 +5,24 @@ click it. Repeat Bet on that panel starts a spin.
 
 The button map is not hardcoded. It is parsed from the same layout file the service itself
 reads, `virtual_oled.xml`, found through the CABINET_MODULE environment variable -- so it
-stays right for a different cabinet, and --map always shows what is really there.
+stays right for a different cabinet, and the report always shows what is really there.
+
+What the panel will and won't tell you:
+
+  * **Its geometry, exactly** -- 14 buttons, their rectangles, and the physical position each
+    one is logged under. From the layout file.
+  * **Every press, after the fact** -- `C:\\logs\\OledPanelSvc.log` records
+    "Button Pressed ID=<hex>" whatever caused it, which is what makes a click verifiable.
+  * **Its current mode, indirectly** -- the game logs `BetButtonPanelLayout.ButtonPanelStateChanged`
+    on every relabel and logs the state machines that decide the labels, so the mode is
+    inferable (see gamelog.current_state).
+  * **Not the label text.** Checked three ways: `OledPanelSvc.log` logs no text at all
+    (`HandleDisplayText` never fires; only a ~60 s `HandleInvertDisplayPixels` for OLED
+    burn-in); no OLED or button-panel config exists in the game tree, because
+    `BetButtonPanelLayout` is compiled into the Unity assemblies; and the labels are *rendered
+    from strings* with a bitmap font (`arial_15_oled.fnt` plus a PNG atlas) rather than picked
+    from a set of images, so there is no asset id to read back. So "Repeat Bet" vs "Collect
+    Win" is known from the game's state, not from the panel.
 
 Getting a click to land took some finding out, and all four of these are load-bearing:
 
@@ -26,34 +42,25 @@ Getting a click to land took some finding out, and all four of these are load-be
    lands the click a whole column to the left. Staying unaware keeps the layout file, posted
    messages and SetCursorPos all in one coordinate space, with no DPI arithmetic anywhere.
 
-Every press is confirmed against the service log, which records "Button Pressed ID=<hex>".
-That closes the gap that makes injected input so awkward to debug: without it a click that
-landed nowhere is indistinguishable from one that worked.
-
-    python ideck.py --map            # print the button map; presses nothing
-    python ideck.py --watch          # name each button as you click it by hand
-    python ideck.py --press Hold1    # press one button
+Every press is confirmed against the service log. That closes the gap that makes injected input
+so awkward to debug: without it, a click that landed nowhere is indistinguishable from one that
+worked.
 """
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import ctypes
-import json
 import logging
 import os
 import re
-import sys
 import time
 import xml.etree.ElementTree as ET
 from ctypes import wintypes
 
-import gamelog
 import logtail
 import winfocus
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("spin.ideck")
 
 DEFAULT_PROCESS = "OledPanelSvc.exe"
@@ -72,11 +79,14 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+SPI_GETSCREENSAVERRUNNING = 0x0072
 
 user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 user32.PostMessageW.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
 user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
+user32.SystemParametersInfoW.argtypes = (wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                                         wintypes.UINT)
 
 
 class IdeckError(RuntimeError):
@@ -97,8 +107,8 @@ class Button:
     checked against the log on every press.
 
     The name is fixed by the cabinet. What the button *does* changes with game state -- the
-    bottom row is currently credit multipliers, and Rebet reads "Take Win" while a win is
-    pending -- so use --watch to see what is what in a state you haven't met.
+    bottom row is currently credit multipliers, and Rebet reads "Collect Win" while a win is
+    pending -- which is why the mode is reported from the game's state alongside this map.
     """
 
     __slots__ = ("name", "position", "x", "y", "width", "height")
@@ -230,6 +240,7 @@ class PressWatcher:
             raise IdeckError(f"the OLED service log {path} does not exist, so presses "
                              "cannot be confirmed. Set \"ideck.log\" in config.json.")
         self._tail = logtail.LogTail(path)
+        self.mark()  # so a poll before the first press can't return the whole file's history
 
     def mark(self) -> None:
         """Note where the log ends. Call before clicking."""
@@ -254,14 +265,35 @@ class PressWatcher:
 # -- pressing --------------------------------------------------------------
 
 
+def input_blocked() -> str | None:
+    """Why a click cannot be delivered right now, or None if it can.
+
+    A running screensaver owns the input desktop, so `SetCursorPos` is refused outright with
+    ERROR_ACCESS_DENIED and the click never happens. Measured here: policy sets a 10-minute
+    blank screensaver, and eight consecutive runs failed on it. Worth checking before a run
+    starts rather than after the first screenshot has been taken.
+    """
+    running = wintypes.BOOL()
+    if user32.SystemParametersInfoW(SPI_GETSCREENSAVERRUNNING, 0, ctypes.byref(running), 0) \
+            and running.value:
+        return ("a screensaver is running and owns the input desktop, so no click can be "
+                "delivered. Dismiss it at the machine -- and note that policy here asks for the "
+                "password on resume, so it has to be unlocked by hand")
+    return None
+
+
 @contextlib.contextmanager
 def _cursor_parked(screen_xy: tuple[int, int], settle_ms: int = 20):
     """Put the cursor on the button for the duration, then put it back."""
     before = wintypes.POINT()
     restore = bool(user32.GetCursorPos(ctypes.byref(before)))
     if not user32.SetCursorPos(int(screen_xy[0]), int(screen_xy[1])):
+        # Read the code before input_blocked(): it makes its own use_last_error call, which
+        # resets the thread's saved error to 0 and would report the failure as no failure.
+        error = ctypes.get_last_error()
+        reason = input_blocked() or "is the session locked?"
         raise IdeckError(f"could not move the cursor to {screen_xy} "
-                         f"(GetLastError={ctypes.get_last_error()}). Is the session locked?")
+                         f"(GetLastError={error}): {reason}")
     time.sleep(settle_ms / 1000.0)  # the panel must see the move before the press
     try:
         yield
@@ -321,98 +353,60 @@ def press(panel: Panel, window, spec, hold_ms: int = 80,
                    "mouse mid-press, or the panel is minimised."
                    if logged is None else
                    f"the log reported position {logged} (0x{logged:x}) instead of "
-                   f"{button.position}. {panel.source} disagrees with the running panel -- "
-                   "cross-check with: python ideck.py --watch")
+                   f"{button.position}, so {panel.source} is not the layout the running "
+                   "panel loaded. Check \"ideck.layout\" in config.json against CABINET_MODULE.")
             )
     LOG.debug("pressed %s (position %d)", button.name, button.position)
     return button
 
 
-# -- CLI -------------------------------------------------------------------
+# -- reporting what the panel is ------------------------------------------
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="ideck.py",
-                                     description="Press buttons on the Virtual OLED i-Deck.")
-    action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--map", action="store_true", help="print the button map; press nothing")
-    action.add_argument("--watch", action="store_true",
-                       help="name each button as it is pressed; press nothing")
-    action.add_argument("--press", metavar="NAME",
-                       help='button to press: an action ("spin"), a name ("Hold1"), or an id')
-    action.add_argument("--state", action="store_true",
-                       help="what the deck currently offers, from the game's state; press nothing")
-    parser.add_argument("--config", default=os.path.join(HERE, "config.json"))
-    parser.add_argument("-v", "--verbose", action="store_true")
-    args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(message)s")
+def report(panel: Panel, state: dict | None = None) -> list[str]:
+    """Everything knowable about the panel, as lines to log.
 
-    try:
-        try:
-            with open(args.config, encoding="utf-8") as fh:
-                whole = json.load(fh)
-        except FileNotFoundError:
-            whole = {}
-        cfg = whole.get("ideck", {}) or {}
-        panel = load_panel(cfg.get("layout"), cfg.get("actions"))
+    `state` is a gamelog.current_state() dict, which supplies the one thing the panel itself
+    cannot: what it is currently offering.
+    """
+    lines = [f"{panel.name}: {panel.width}x{panel.height}, {len(panel.buttons)} buttons",
+             f"layout: {panel.source}"]
+    if state:
+        lines.append(f"deck now: {state['deck']}")
+        lines.append(f"          (game idle state {state['idle']}, gamble {state['gamble']}"
+                     # The last feature *seen in the log tail* -- history, not necessarily live.
+                     + (f", last feature seen {state['feature']}" if state.get("feature") else "")
+                     + f", as of {state['at'] or 'no transitions in the log'})")
 
-        if args.state:
-            state = gamelog.current_state(
-                (whole.get("gamelog", {}) or {}).get("path", gamelog.DEFAULT_LOG))
-            print(f"{panel.name}: {state['deck']}")
-            print(f"as of:  {state['at'] or 'no state transitions in the log'}"
-                  f"   (game state {state['idle']}, gamble {state['gamble']})")
-            if state["feature"]:
-                print(f"feature: {state['feature']}")
-            # The panel never logs its labels, so name the button an action maps to rather than
-            # claiming to know what it currently reads.
-            print()
-            for alias, target in sorted(panel.aliases.items()):
-                button = panel.button(target)
-                print(f"{alias:<10} -> {button.name} (position {button.position})")
-            return 0
-
-        watcher = PressWatcher(cfg.get("log", DEFAULT_LOG))
-
-        if args.map:
-            print(f"{panel.name}: {panel.width}x{panel.height}, {len(panel.buttons)} buttons")
-            print(f"layout: {panel.source}\n")
-            actions: dict[str, list[str]] = {}
-            for alias, target in panel.aliases.items():
-                actions.setdefault(target.lower(), []).append(alias)
-            print(f"{'name':<10} {'position':>8} {'in log':>7}  {'centre':<12} actions")
-            for b in panel.buttons:
-                print(f"{b.name:<10} {b.position:>8} {'0x' + f'{b.position:x}':>7}  "
-                      f"{str(b.center):<12} {', '.join(sorted(actions.get(b.name.lower(), [])))}")
-            return 0
-
-        if args.watch:
-            names = {b.position: b.name for b in panel.buttons}
-            print(f"watching {watcher.path}\npress buttons on the panel; Ctrl+C to stop")
-            watcher.mark()
-            while True:
-                for position in watcher.poll():
-                    # flush: this streams live, and stdout is buffered when not a tty.
-                    print(f"  {names.get(position, '<not in the layout file>')} "
-                          f"(position {position}, 0x{position:x})", flush=True)
-                time.sleep(0.05)
-
-        window = find_window(cfg.get("process", DEFAULT_PROCESS),
-                            cfg.get("window_class", DEFAULT_WINDOW_CLASS))
-        button = press(panel, window, args.press,
-                       hold_ms=int(cfg.get("click_hold_ms", 80)), watcher=watcher,
-                       confirm_timeout=float(cfg.get("confirm_timeout_s", 2.0)))
-        print(f"pressed {button.name} -- confirmed position {button.position}")
-        return 0
-
-    except (IdeckError, gamelog.GameLogError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        print("\nstopped", file=sys.stderr)
-        return 0
+    actions: dict[str, list[str]] = {}
+    for alias, target in panel.aliases.items():
+        actions.setdefault(target.lower(), []).append(alias)
+    lines.append(f"  {'name':<10} {'position':>8} {'in log':>7}  {'centre':<12} does")
+    for button in panel.buttons:
+        lines.append(f"  {button.name:<10} {button.position:>8} "
+                     f"{'0x' + f'{button.position:x}':>7}  {str(button.center):<12} "
+                     f"{', '.join(sorted(actions.get(button.name.lower(), [])))}")
+    # The panel never logs its label text, so say what an action maps to rather than claiming to
+    # know what the button currently reads.
+    lines.append("  note: the panel does not log its label text, so the button names above are "
+                 "the cabinet's, not what is drawn on them right now")
+    return lines
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def describe(panel: Panel, window, state: dict | None = None) -> dict:
+    """The same information as a JSON-serialisable record for spin.json."""
+    record = {
+        "panel": panel.name,
+        "size": f"{panel.width}x{panel.height}",
+        "layout": panel.source,
+        "window": repr(window),
+        "buttons": [{"name": b.name, "position": b.position, "centre": list(b.center),
+                     "size": [b.width, b.height]} for b in panel.buttons],
+        "actions": dict(panel.aliases),
+    }
+    if state:
+        record["deck_mode"] = state["deck"]
+        record["game_state"] = {"idle": state["idle"], "gamble": state["gamble"],
+                                "last_feature_seen": state["feature"],
+                                "as_of": state["at"].isoformat() if state.get("at") else None}
+    return record

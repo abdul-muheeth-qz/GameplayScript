@@ -30,10 +30,6 @@ class LogTail:
         """Note where the log currently ends. Call before the action you want to see."""
         self._offset = self._size()
 
-    def to_start(self) -> None:
-        """Read from the beginning of the file instead of from now."""
-        self._offset = 0
-
     def read_new(self) -> str:
         """Whole lines appended since the last mark/read. Empty string if there are none."""
         if self._size() < self._offset:  # rotated, so start again on the new file

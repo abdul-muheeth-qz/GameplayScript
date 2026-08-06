@@ -1,50 +1,44 @@
-#!/usr/bin/env python
 """Game events, read live out of the game's own log.
 
 `HuffNPuffLink.exe` logs both its server and client threads to
 `C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log` at INFO, which makes it an oracle
-for what the game is actually doing -- including the one thing the capture loop most needs:
-the moment the reels come to rest.
+for what the game is actually doing -- including the one thing capturing a spin most needs: the
+moment the spin is genuinely over.
 
-That replaces a fixed sleep. Measured on this machine, an ordinary spin runs 3.3 s from press to
-game over, while a Hold & Spin feature ran 53 s across 23 free spins. No single delay is right
-for both, so the game is asked instead of guessed.
+That is why there is no fixed delay anywhere in this tool. Measured on this machine, an ordinary
+spin runs 3.3 s from press to game over, while a Hold & Spin ran 53 s across 23 free spins. No
+single number is right for both, so the game is asked instead of guessed.
 
-The markers below are copied from real lines. The log is verbose -- ~500 lines during a spin,
-most of it progressive broadcasts -- so matching is deliberately narrow.
+Two traps in this file, both of which cost an afternoon to find:
 
-    python gamelog.py --watch          # name each event as the game emits it
-    python gamelog.py --state          # what the game (and so the deck) is doing right now
-    python gamelog.py --replay 12:06   # parse a window already on disk, for checking markers
+  * **Its directory timestamp lies.** The game holds the handle open, so `LastWriteTime` read
+    11:04 while the file was being appended to at 14:31. Judge liveness by reading the tail,
+    never by `os.path.getmtime`.
+  * **It rotates** at ~20 MB into `HuffNPuffLink_Theme-YYYYMMDD-HHMMSS.log`. `logtail` handles
+    that; a reader holding a byte offset would seek past the end and go quietly silent.
+
+The markers below are copied from real lines, not guessed. The log is verbose -- ~500 lines
+during a spin, most of it progressive broadcasts -- so matching is deliberately narrow.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
-import logging
 import os
 import re
-import sys
 import time
 from datetime import datetime
 
 import logtail
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-LOG = logging.getLogger("spin.gamelog")
-
 DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
 
-# What ends a spin, from the capture loop's point of view: the outcome is on screen and the game
-# is waiting for input again.
+# What ends a spin: the outcome is on screen and the game is waiting for input again.
 #
 # `win` has to be in here. A win leaves the game parked on the collect/gamble offer and it does
 # not emit `game_over` until that is resolved -- and the thing that resolves it is the *next*
-# press, because Repeat Bet reads Collect Win in that state and means "collect, then bet again".
-# So one press really does advance one spin, and waiting for `game_over` on a winning spin would
-# mean waiting for a press this loop hasn't made yet. Measured: pressing to collect separately
-# started an extra spin and put the loop one behind for the rest of the run.
+# press, because Repeat Bet reads "Collect Win" in that state and means "collect, then bet
+# again". So waiting for `game_over` on a winning spin would mean waiting for a press this script
+# is never going to make.
 TERMINAL = ("game_over", "win")
 
 # "08/05/26 12:06:37.163 19 HuffNPuffLink:19540 INF: ..." -- the game's own clock, which is what
@@ -52,31 +46,20 @@ TERMINAL = ("game_over", "win")
 _STAMP_RE = re.compile(r"^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d\d\d)\s")
 _STAMP_FORMAT = "%m/%d/%y %H:%M:%S.%f"
 
-# Ordered: the first pattern that matches a line wins, so put the specific ones first.
+# Ordered: the first pattern that matches a line wins, so the specific ones come first.
 EVENTS: list[tuple[str, re.Pattern]] = [
-    # -- what the player set up before spinning
-    #    `Did denom Change[True]` is the discriminator: the same line is logged on every spin
-    #    with [False], so matching UpdateDenom alone would call every spin a denom change. Note
-    #    it spells out True/False here while the rest of the log uses [T]/[F].
-    ("denom_changed", re.compile(
-        r"\[WagerGameApp\.UpdateDenom\] New denom\[(?P<denom>[\d.]+)\] Did denom Change\[True\]")),
-    #    reasonForChange[Attract] is the attract loop cycling bets by itself, not the player.
-    ("bet_changed", re.compile(
-        r"\[Game\.BetConfigurationChanged\] betChangedFlags\[(?P<changed>[^\]]+)\] "
-        r"reasonForChange\[Player\]")),
-
     # -- the spin itself
     ("bet_locked", re.compile(
-        r"\[GameEngine\.LockBet\] totalBetValue\[(?P<total_bet>[\d.]+)\].*?denom\[(?P<denom>[\d.]+)\]")),
+        r"\[GameEngine\.LockBet\] totalBetValue\[(?P<total_bet>[\d.]+)\].*?"
+        r"denom\[(?P<denom>[\d.]+)\]")),
     ("spin_started", re.compile(r"msg\[GDK\.Common\.ServerAPI\.SpinMsg\]")),
     ("reels_spinning", re.compile(
         r"StateMachine\[SlotGameStateMachine\] transitioned from \[stateSetup\] to \[stateSpin\]")),
-    # The reels are down. This is the marker that replaces the fixed delay.
     ("reels_stopped", re.compile(
         r"\[SlotGameEngine\.HandleInternalSlotReelsStoppedMsg\] lastStops\[(?P<stops>[\d ]+)\]")),
 
-    # -- what landed. This game has no wilds or scatters; the equivalents are a mystery-symbol
-    #    reveal and Cash-on-Reels coin symbols.
+    # -- what landed. This game has no wilds or scatters (0 occurrences of either word); the
+    #    equivalents are a mystery-symbol reveal and Cash-on-Reels coin symbols.
     ("mystery_reveal", re.compile(
         r"StateMachine\[MysterySymbolStateMachine\w*\].*to \[statePerformMysterySymbolReveal\]")),
     ("cash_symbol", re.compile(r"msg\[CashOnReels\.Common\.SymbolValueMsg\]")),
@@ -103,26 +86,25 @@ EVENTS: list[tuple[str, re.Pattern]] = [
 
     # -- jackpot / progressive award
     ("jackpot_awarded", re.compile(r"\[ProgressiveFeature\.AwardLevels\]")),
-    ("jackpot_celebration", re.compile(
-        r"\[ProgressiveFeature\.CreateCelebrationWinInfoAndPay\]")),
+    ("jackpot_celebration", re.compile(r"\[ProgressiveFeature\.CreateCelebrationWinInfoAndPay\]")),
 
-    # -- money. A win puts the gamble/collect offer up, which is also the moment the i-Deck
-    #    relabels Repeat Bet to Collect Win. Verified both ways: it fires 0.6 s after the reels
-    #    stop on the spin that paid 300.00, and not at all on three spins that paid nothing.
+    # -- the win. A win puts the gamble/collect offer up, which is also the moment the i-Deck
+    #    relabels Repeat Bet to Collect Win. Verified both ways: it fires 0.58 s after the reels
+    #    stop on the spin that paid 300.00, and not at all on spins that paid nothing.
     #
     #    Two markers that look like wins and are not, both ruled out by measurement:
-    #      [GameStateMachine.PayWin]  -- an unconditional state-machine step, logged exactly
-    #          once per spin win or lose (163 of them against 163 GameOverMsg).
+    #      [GameStateMachine.PayWin]  -- an unconditional state-machine step, logged exactly once
+    #          per spin win or lose (163 of them against 163 GameOverMsg).
     #      SyncWinAmountMessage       -- redraws the WIN meter, so it also fires while idle when
-    #          the denom changes; seen twice between two spins, belonging to neither.
+    #          the denomination changes; seen twice between two spins, belonging to neither.
     ("win", re.compile(
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[\w+\] to \[offerState\]")),
     ("progressive_level", re.compile(
         r"\[ProgressiveFeature\.EvaluateCurrentResults\] win level\[(?P<level>\d+)\]")),
 
-    # -- which button the player chose once the win was offered. Both leave `playDecisionState`,
-    #    so the destination is the answer. These must be matched before the general
-    #    `gamble_state` rule below, which would otherwise swallow the same lines.
+    # -- which button resolved the win. Both leave `playDecisionState`, so the destination is the
+    #    answer. These must be matched before the general `gamble_state` rule below, which would
+    #    otherwise swallow the same lines.
     ("take_win", re.compile(
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[playDecisionState\] "
         r"to \[dontplaystate\]")),
@@ -136,8 +118,8 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("game_over", re.compile(r"msg\[GDK\.Common\.ServerAPI\.GameOverMsg\]")),
     ("new_game_allowed", re.compile(r"msg\[GDK\.Common\.ServerAPI\.NewGameAllowedMsg\]")),
 
-    # -- the i-Deck. The panel's labels are never logged, but the game logs every relabel and
-    #    the state machines that decide them, which is what makes --state possible.
+    # -- the i-Deck. The panel's labels are never logged anywhere, but the game logs every
+    #    relabel and the state machines that decide them, which is what makes current_state work.
     ("deck_changed", re.compile(r"BetButtonPanelLayout\.ButtonPanelStateChanged")),
     ("idle_state", re.compile(
         r"StateMachine\[IdleStateMachine\] transitioned from \[\w+\] to \[(?P<state>\w+)\]")),
@@ -146,7 +128,8 @@ EVENTS: list[tuple[str, re.Pattern]] = [
 ]
 
 # What the game's idle state means for the deck. The names are the game's own; the descriptions
-# are what the panel offers in each, and are the reason --state is useful without reading pixels.
+# are what the panel offers in each, and are the reason the deck's mode can be reported without
+# reading a single pixel.
 DECK_MODES = {
     "stateIdleWithCredits": "idle with credits -- spin available",
     "stateWaitForPlay": "bet chosen, waiting for the spin press",
@@ -161,19 +144,38 @@ GAMBLE_MODES = {
                   "here until it is pressed",
 }
 
+# Plain English for the console and spin.json, so a timeline can be read without this file open.
+NOTES = {
+    "spin_started": "spin started",
+    "reels_spinning": "reels spinning",
+    "mystery_reveal": "mystery symbol revealed",
+    "cash_symbol": "a cash-on-reels coin symbol landed",
+    "hold_and_spin_prompt": "Hold & Spin waiting to be started",
+    "hold_and_spin_started": "Hold & Spin started",
+    "wager_saver_offered": "wager saver offered",
+    "wager_saver_accepted": "wager saver accepted",
+    "jackpot_awarded": "JACKPOT awarded",
+    "jackpot_celebration": "jackpot celebration",
+    "win": "WIN -- collect/gamble offered, and the deck now reads Collect Win",
+    "take_win": "chose TAKE WIN",
+    "gamble_played": "chose GAMBLE",
+    "game_over": "spin complete",
+    "new_game_allowed": "ready for another spin",
+    "deck_changed": "the i-Deck relabelled its buttons",
+}
+
 
 class GameLogError(RuntimeError):
     pass
 
 
 class Event:
-    __slots__ = ("name", "at", "fields", "line")
+    __slots__ = ("name", "at", "fields")
 
-    def __init__(self, name: str, at: datetime | None, fields: dict, line: str):
+    def __init__(self, name: str, at: datetime | None, fields: dict):
         self.name = name
         self.at = at
         self.fields = fields
-        self.line = line
 
     @property
     def stops(self) -> list[int] | None:
@@ -184,6 +186,23 @@ class Event:
         extra = " ".join(f"{k}={v}" for k, v in self.fields.items())
         when = self.at.strftime("%H:%M:%S.%f")[:-3] if self.at else "?"
         return f"{when} {self.name}" + (f" ({extra})" if extra else "")
+
+
+def describe(event: Event) -> str:
+    """A one-line human reading of an event."""
+    if event.name == "bet_locked":
+        return f"bet locked at {event.fields.get('total_bet')} (denom {event.fields.get('denom')})"
+    if event.name == "reels_stopped":
+        return f"reels stopped at {event.fields.get('stops')}"
+    if event.name == "final_grid":
+        return f"final grid {event.fields.get('stops')}"
+    if event.name == "feature_triggered":
+        return f"feature started: {event.fields.get('feature')}"
+    if event.name == "progressive_level":
+        return f"progressive win level {event.fields.get('level')}"
+    if event.name in ("idle_state", "gamble_state"):
+        return f"{event.name} -> {event.fields.get('state')}"
+    return NOTES.get(event.name, event.name)
 
 
 def _parse(text: str) -> list[Event]:
@@ -201,7 +220,7 @@ def _parse(text: str) -> list[Event]:
                 except ValueError:
                     pass
             fields = {k: v for k, v in (match.groupdict() or {}).items() if v is not None}
-            events.append(Event(name, at, fields, line.rstrip()))
+            events.append(Event(name, at, fields))
             break  # one event per line
     return events
 
@@ -213,9 +232,8 @@ class GameLogWatcher:
         self.path = path
         if not os.path.isfile(path):
             raise GameLogError(
-                f"the game log {path} does not exist, so spin events cannot be read. Set "
-                "\"gamelog.path\" in config.json, or pass --no-gamelog to fall back to a "
-                "fixed delay.")
+                f"the game log {path} does not exist, so there is no way to tell when a spin "
+                "has finished. Set \"gamelog.path\" in config.json.")
         self._tail = logtail.LogTail(path)
         self.mark()
 
@@ -227,19 +245,9 @@ class GameLogWatcher:
         """Events logged since the last mark/poll, in order."""
         return _parse(self._tail.read_new())
 
-    def wait_for(self, names, timeout: float) -> Event | None:
-        """The first event with one of these names, or None if none arrives in time."""
-        wanted = {names} if isinstance(names, str) else set(names)
-        for event in self.drain(timeout, timeout):
-            if event.name in wanted:
-                return event
-        return None
-
     def drain(self, idle_timeout: float, ceiling: float, interval: float = 0.05):
         """Yield events as they appear, until the game goes quiet or the ceiling is hit.
 
-        The runner's main primitive: a screenshot can be taken from inside the loop, so a
-        mid-spin moment (reels stopped, feature triggered) is caught while the spin continues.
         Stopping is the caller's decision -- it `break`s when it has what it wants. Deciding
         here instead looks tidier and is wrong: the caller sometimes needs to *ignore* an event
         it would otherwise stop on, and a generator that has already returned cannot be resumed.
@@ -265,8 +273,8 @@ class GameLogWatcher:
 def current_state(path: str = DEFAULT_LOG, limit: int = 512 * 1024) -> dict:
     """What the game is doing now, from the state transitions already in the log.
 
-    Reads history rather than waiting for the next change, so it answers immediately even if
-    the game has been sitting idle.
+    Reads history rather than waiting for the next change, so it answers immediately even if the
+    game has been sitting idle for hours.
     """
     if not os.path.isfile(path):
         raise GameLogError(f"the game log {path} does not exist. Set \"gamelog.path\".")
@@ -286,71 +294,5 @@ def current_state(path: str = DEFAULT_LOG, limit: int = 512 * 1024) -> dict:
         if event.at:
             state["at"] = event.at
     # A pending win wins over the idle state: that is what the deck is showing.
-    state["deck"] = (GAMBLE_MODES.get(state["gamble"])
-                     or DECK_MODES.get(state["idle"], "unknown"))
+    state["deck"] = GAMBLE_MODES.get(state["gamble"]) or DECK_MODES.get(state["idle"], "unknown")
     return state
-
-
-# -- CLI -------------------------------------------------------------------
-
-
-def _configured_path(config: str) -> str:
-    try:
-        with open(config, encoding="utf-8") as fh:
-            return json.load(fh).get("gamelog", {}).get("path") or DEFAULT_LOG
-    except (OSError, ValueError):
-        return DEFAULT_LOG
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--config", default=os.path.join(HERE, "config.json"))
-    parser.add_argument("--log", help="game log to read (default: from config.json)")
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--watch", action="store_true", help="name each event as it happens")
-    mode.add_argument("--state", action="store_true", help="what the game is doing right now")
-    mode.add_argument("--replay", metavar="HH:MM",
-                     help="parse events already logged in that minute, without waiting")
-    args = parser.parse_args(argv)
-
-    path = args.log or _configured_path(args.config)
-    try:
-        if args.state:
-            state = current_state(path)
-            print(f"game log:   {path}")
-            print(f"as of:      {state['at'] or 'no state transitions found'}")
-            print(f"idle state: {state['idle']}")
-            print(f"gamble:     {state['gamble']}")
-            print(f"feature:    {state['feature'] or '-'}")
-            print(f"last stops: {state['last_stops'] or '-'}")
-            print(f"deck:       {state['deck']}")
-            return 0
-
-        if args.replay:
-            text = logtail.LogTail(path).tail(64 * 1024 * 1024)
-            hits = [e for e in _parse(text)
-                    if e.at and e.at.strftime("%H:%M").startswith(args.replay)]
-            if not hits:
-                print(f"no events logged in {args.replay}", file=sys.stderr)
-                return 1
-            for event in hits:
-                print(event)
-            span = (hits[-1].at - hits[0].at).total_seconds()
-            print(f"\n{len(hits)} events spanning {span:.3f}s")
-            return 0
-
-        watcher = GameLogWatcher(path)
-        print(f"watching {path} -- Ctrl+C to stop", flush=True)
-        while True:
-            for event in watcher.poll():
-                print(event, flush=True)
-            time.sleep(0.05)
-    except GameLogError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    except KeyboardInterrupt:
-        return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
