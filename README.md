@@ -1,13 +1,20 @@
-# Capture one spin of HuffNPuffLink
+# Capturing HuffNPuffLink
 
-One script. It opens OBS if OBS isn't open, finds the game window and the i-Deck (Virtual OLED)
-window, screenshots the screen, clicks Repeat Bet, waits for the **game** to say the spin is
-finished, screenshots the result, and stops.
+Two entry points over the same parts. [spin.py](spin.py) **causes** one spin and captures it;
+[watch.py](watch.py) **presses nothing** and captures whatever a person does at the cabinet. Both
+open OBS if it isn't open, find the game window, and take the game's own log as the authority on
+when something is finished.
 
 ```powershell
-python spin.py                 # the real thing
+python spin.py                 # the real thing: before, press Repeat Bet, wait, after
 python spin.py --dry-run       # check everything and shoot one frame, press nothing
+python spin.py --no-record     # skip the video; capture only the two frames
+
+python watch.py                # watch a person play until Ctrl-C, capturing every action
 ```
+
+Most of this document is about `spin.py`, which came first and explains the machinery both share.
+[Watching a whole session](#watching-a-whole-session-instead--watchpy) covers `watch.py`.
 
 Everything it produces lands in one folder per run under `captures/`:
 
@@ -15,6 +22,7 @@ Everything it produces lands in one folder per run under `captures/`:
 captures/2026-08-05_224937/
     before.png      the screen before the press
     after.png       the screen once the game reported the spin over
+    spin.mp4        OBS's video of the whole run (the container is whatever OBS is set to)
     spin.json       what happened, with the game's own timestamps
     run.log         the full log of the run
 ```
@@ -37,7 +45,47 @@ titles change, `UnityWndClass` does not.
 A minimised window is restored, because it gives OBS no frames to capture — but nothing here
 takes the foreground.
 
-**3. The spin.** `before.png`, then Repeat Bet, then wait for the game, then `after.png`.
+**3. The spin.** Start recording, `before.png`, then Repeat Bet, then wait for the game, then
+`after.png`, then stop recording.
+
+## The video, and how much resolution there is to be had
+
+The two are less alike than they look, and the difference is worth knowing before judging either.
+
+**A screenshot is rendered from the source**, so it is exactly the game's client area at its own
+pixel size, whatever the scene does with it and whatever is on top of it. On this cabinet that
+is **612x961** — the game runs in a portrait window that size, and a `before.png` is 612x961
+lossless PNG. That is already every pixel the window has: nothing in OBS can add detail that was
+never rendered. The knobs, in order of how much good they do:
+
+| | |
+|---|---|
+| **make the game window bigger** | the only thing that produces *more* detail. Resize it, or run the game fullscreen at the display's resolution |
+| `capture.scale`, `capture.width`/`height` | asks OBS to render the source at another size. Above native this is an upscale — bigger files, no more detail — and the run warns when it is one. `"width": 1080` gives frames that match what the scene draws |
+| `capture.quality` | −1 (default), or 0–100. PNG is lossless either way, so this only trades file size; it matters for `"format": "jpg"` |
+
+Only one of the two is capped: OBS refuses a screenshot dimension over 4096 px, and a request
+over it is scaled down on **both** axes together rather than squashed.
+
+**A recording is the program output** — the whole canvas, at the Output (Scaled) Resolution in
+OBS's own Video settings, into the folder its own profile names. So `Recording` points that folder
+at the run for the length of it and puts it back afterwards, and renames OBS's timestamped file to
+`spin.mp4`. Two consequences the run reports rather than leaves to be discovered:
+
+- **The video shows what the scene shows, not what the source is.** Here the source is stretched
+  to 1080x1920 bounds on a 1920x1080 canvas, so the video is cropped top and bottom while every
+  screenshot is perfect. The fix is in OBS: right-click the source → *Resize output to source*, or
+  Transform → *Fit to screen*.
+- **`StartRecord` returns before anything is being written.** Measured here, the output went active
+  1.8 s after the request and the timecode only began moving at 2.0 s. So the run waits for frames
+  to actually be flowing before it presses anything — otherwise the press and most of a 3.3 s spin
+  would land in front of a recording that had not started, which is the one way this can look like
+  it worked and not have.
+
+Nothing about the video may end a run: the frames are the point. OBS already recording (someone
+else's recording, not ours to stop), a refused folder change, a failed start, a file that never
+appears — each is a warning, and the spin is captured anyway. `record.enabled: false` or
+`--no-record` turns it off; `--dry-run` never records, since it presses nothing.
 
 ## What is knowable about the Virtual OLED
 
@@ -135,10 +183,22 @@ Every marker below was copied from real log lines and checked against history.
 | `jackpot_awarded` / `jackpot_celebration` / `progressive_level` | a progressive/jackpot award |
 | **`win`** | the collect/gamble offer is up — this is the win marker |
 | `take_win` / `gamble_played` | which button resolved a win |
+| `gamble_pick` / `gamble_result` / `gamble_over` | inside the double-up round: the card the player picked, the result, the end |
 | `final_grid` | the whole 15-cell grid at game over |
 | `game_over` | the spin is complete |
 | `deck_changed` | the i-Deck relabelled its buttons |
-| `idle_state` / `gamble_state` | the state machines behind the deck's mode |
+| `idle_state` / `gamble_state` | the state machines behind the deck's mode. `via` names the message that caused the transition, which is how an action gets traced back to the input behind it |
+| `game_started` | the client (re)started — a new window for OBS to find |
+
+And what the *player* asked for, which is what [watch.py](watch.py) needs and `spin.py` never had
+to ask, since it did the pressing itself:
+
+| Event | What it means |
+|---|---|
+| `bet_config_changed` | the bet or denomination changed, with `flags` saying which and `reason` saying whether a **player** or attract mode did it |
+| `bet_button` | a Line/Hold/Maxbet button was pressed. On this cabinet that places the bet *and* spins |
+| `touch` | the touchscreen was touched — the only record of it anywhere |
+| `denom_changed` / `bet_changed` | the new denomination (with a `changed` flag: it is logged on every spin, usually `False`) and the new total bet |
 
 This game has **no wilds and no scatters** — zero occurrences of either word in its logs. Its
 mechanics are mystery-symbol replacement, Cash-on-Reels coin values, Hold & Spin free spins,
@@ -192,9 +252,10 @@ same 5 — no false positives, no false negatives.
 ## What `spin.json` holds
 
 The full record: the OBS version, both windows, the whole panel description and the deck's mode,
-the button pressed with the wall clock of the press, the before and after shots, the measured
-duration, which event ended the spin — and the event timeline, each entry carrying the **game's
-own timestamp** rather than when we happened to read the line.
+the button pressed with the wall clock of the press, the before and after shots, the video with its
+own duration and how it was framed, the size asked for against the source's native size, the
+measured duration, which event ended the spin — and the event timeline, each entry carrying the
+**game's own timestamp** rather than when we happened to read the line.
 
 Plus a summary of what kind of spin it was. The kinds are not exclusive — a Hold & Spin can award
 a jackpot and still end on a gamble offer — so each is reported independently rather than picking
@@ -214,6 +275,175 @@ one label:
 `chose` is `gamble`, `take_win`, or `null` when the choice wasn't reached — a win offered but not
 yet resolved leaves it `null`, because resolving it is the next press.
 
+## Watching a whole session instead — `watch.py`
+
+`spin.py` causes one spin and captures it. `watch.py` presses nothing: a person plays the cabinet
+by hand and every action they take gets captured — spin, denomination change, bet change, collect,
+gamble, bonus, Hold & Spin.
+
+```powershell
+python watch.py                          # watch until Ctrl-C
+python watch.py --dry-run                # check everything, shoot one frame, exit
+python watch.py --duration 900 --max-rounds 40
+python watch.py --no-milestones          # one frame at each end instead of one per milestone
+```
+
+Ctrl-C is the normal way to stop, and exits `0`.
+
+**One folder is one whole round** — the bet, the reels, any feature, the win offer, and the
+gamble or collect that answers it:
+
+```
+captures/watch_2026-08-06_170314/
+    session.json                  rewritten after every round, so an interruption costs nothing
+    run.log
+    rounds/
+      003_spin+win+collect/
+        before.png                the standing frame from just before the press
+        trigger.png               taken the moment the round was noticed
+        m01_reels_stopped.png     one per milestone — a Hold & Spin has twenty-odd
+        m03_take_win.png
+        after.png                 once the game says it is finished
+        round.json
+```
+
+No video here, deliberately: `record` is per run, and a watch runs for hours — one file for a whole
+session would be enormous and would not line up with any round. The frames are per round instead.
+
+The game draws that boundary itself: it does not log `GameOverMsg` until a win has been collected
+or gambled, so following a round to `game_over` keeps the collect in the same folder as the spin
+that won it. (`gamelog.TERMINAL` stops at the win because `spin.py` has to — the press that
+resolves it is one `spin.py` will never make. This is watching the person who is about to make
+it.) Things that are not part of a round — a denomination change, a bet change — get their own
+folder.
+
+A player can also leave a win uncollected indefinitely; one here sat **3.2 hours**. The game has
+no timeout there and neither does this: **the round stays open**, one folder with one `after`
+frame, until the player answers it. An earlier version closed the round after `long_wait_s` and
+then reopened it for the collect, which produced a second `resumedNN.png` and `afterNN.png` in the
+same folder and reported one spin as two — that is gone. See
+[When an action is over](#when-an-action-is-over).
+
+### Recognising an action
+
+`spin.py` knows what a spin is because it caused one. This has to read it off the logs, and needs
+both of them: `OledPanelSvc.log` says **which button** was pressed but not what it did, and the
+game log says what happened but not what was touched — and a collect made on the touchscreen never
+reaches the panel log at all.
+
+An i-Deck press is one trigger. The rest come from markers in the game log that only appear
+because a person did something:
+
+| Marker | Action |
+|---|---|
+| `Button Pressed ID=<hex>` (panel log) | that button, by name |
+| `[Game.BetConfigurationChanged] betChangedFlags[…] reasonForChange[Player]` | denomination or bet change |
+| `[BetManager.HandleBetButtonPressed]` | a Line/Hold/Maxbet button |
+| `msg[…ServerAPI.TouchMsg]` | the touchscreen — the only record anywhere that the glass was touched |
+| `GambleStateMachine … on event [RED_BLACK_*_CARD]` | a gamble pick, and which card |
+| `[GameEngine.LockBet]` / `SpinMsg` | a spin is away |
+| `HoldNSpinTouchToStart → stateTouched` | a Hold & Spin respin was started |
+
+`reasonForChange` matters: the cabinet cycles its own denomination in attract mode
+(`reasonForChange[Attract]`, 8 occurrences in one log against 41 `Player` ones), and those are not
+player actions. A bet "change" that re-bets the same amount isn't one either, so the new total is
+compared against the old rather than trusting the flag.
+
+The transitions also carry the message that caused them (`on event [SpinButtonMsg]`,
+`[double_up_offer_decline]`), which is how `caused_by` in `action.json` can say the collect was
+made on the glass rather than on the deck.
+
+### When an action is over
+
+Same principle as `spin.py` — ask the game, never sleep a fixed amount — with four windows
+instead of one, because "the log went quiet" means different things:
+
+| | | |
+|---|---|---|
+| `watch.idle_timeout_s` | 35 s | the default: the game is busy, or might be. Restarts on every event |
+| `watch.quiet_s` | 2 s | only for an action that is complete the moment it stops logging — a bet or denomination change, which has no outcome to wait for |
+| `watch.long_wait_s` | 90 s | the game has announced something it will get on with by itself: a bonus intro playing (`BonusTriggerMsg` fires when the reels stop; the feature started 68.4 s later) |
+| `watch.player_wait_s` | **0 = as long as it takes** | the game is waiting for the *person*: a win on the collect/gamble offer, a Hold & Spin respin prompt, a gamble waiting for a card |
+
+The last one is 0 on purpose. The game has no timeout at those points — one player left a respin
+prompt 51.8 s, one left a win **3.2 hours**, one first gamble pick took 36 s — so any bound is a
+guess, and a wrong guess splits one spin across two folders and gives it a second `after`. So the
+round is simply held open, and the player's next input moves it on. Set it to a positive number to
+restore a bounded wait, which closes the round and files whatever they eventually do as a new one.
+
+Three things keep "unbounded" from meaning "stuck":
+
+- **A held round is out of the ceiling's reach.** `action_timeout_s` asks whether a round has been
+  *running* too long, and time parked on an offer is not running — otherwise a round held for an
+  hour is over the ceiling the instant the player answers, and closes before the game logs the
+  game over.
+- **The game moving on ends it.** A client restart (`game_started`) or a second `bet_locked` means
+  the answer is never coming. Without that, a win left standing when the cabinet restarted
+  swallowed the next 11 hours into one folder — measured, replaying real logs. Free spins and
+  respins don't stake, and across 525 replayed rounds none logged `bet_locked` twice.
+- **It says so.** A round held open reports itself on the console once a minute, so it never looks
+  like a hung tool. `--duration` and `--max-rounds` also stop against a held round rather than
+  waiting for it, and the round is closed on the way out exactly as Ctrl-C closes it.
+
+35 s rather than `spin.py`'s 8 because the silences inside a feature are much longer than they
+look: a jackpot celebration whose two award bursts are 8.9 s apart, Hold & Spin endings that take
+17–20 s to log their win, one spin that went 28.9 s from its last reel stop to its game over. It
+is nearly free here in a way it would not be in `spin.py` — **93% of actions are closed by the
+game's own terminal event**, not by this timeout, and an action still waiting on it closes the
+instant the player does anything else. The only price is how late the last action before a pause
+gets written.
+
+The short window is deliberately narrow. "Nothing more has been logged" is not "nothing more is
+coming": a touch that started a free spin round was followed by 13 s of silence before the reels
+moved, and treating an unanswered touch as finished orphaned the whole round.
+
+That the next action ends the previous one is load-bearing. Measured here, the press after a
+spin's game over came **0.44 s** later — sooner than the 0.8 s the after shot waits for the
+screen to settle. So once the game has declared an action finished, the next thing the player
+does ends it immediately, after shot and all; otherwise that press and everything it caused would
+be filed under the previous spin.
+
+All of this was tuned by replaying 11 hours of real logged play through `actions.py`: **485
+rounds**, 22 of which had to be resumed for a late collect, and **no spin outcome at all** left
+outside a round — bar the one round already in flight when each log file begins, which nothing
+can help. At the first settings tried, 49 fell outside.
+
+Removing the resume was replayed the same way, over both of this cabinet's log files (**525
+rounds**, 10 hours of play). The round boundaries come out the same in number, and the contents
+better: winning rounds with their collect in a *different* folder went from 18 to 2 (the two are
+wins that were genuinely never collected), rounds ending with no `game_over` from 61 to 45, and
+spin outcomes landing outside every round from 39 to 15. No round anywhere contains two spins.
+That replay also turned up a rule that had never once fired as intended — see `waiting_for` in
+[actions.py](actions.py): `win` is both an announcement and one of the things that resolves a
+gamble, so scanning backwards for "a resolution of anything" made every win resolve itself the
+moment it was logged.
+
+### What comes out
+
+`round.json` per round and `session.json` for the lot: the trigger, the buttons pressed with their
+positions, what the bet and denomination were before and after, the frames with their wall clocks,
+and the same event timeline `spin.json` carries. Anything with `spin` in `kinds` also gets the
+full `spin.json` summary (`won`, `free_spins`, `jackpot`, `final_stops`, `outcome`, and `chose` —
+which is now populated, because the collect is in the round).
+
+`kinds` lists everything the round was, in the order it happened, because a round is routinely
+several things at once and picking one label would throw the rest away. The folder name is the
+same list, so it reads as the story of the round:
+
+```
+004_spin
+005_spin+win+collect
+006_spin+hold-and-spin+free-spins-coinonreelfs+jackpot+win+collect
+007_denomination-change
+```
+
+This game has no wilds or scatters — zero occurrences of either word in its logs. Its equivalents
+are the mystery-symbol reveal and Cash-on-Reels coin symbols, and both are milestones, so they get
+their own frame inside the round.
+
+`unattributed_events` counts game events that arrived while no round was open. It should stay
+small; a player action this tool doesn't recognise yet would show up there first.
+
 ## Configuration
 
 `config.json`, git-ignored because it holds the obs-websocket password. `OBS_WS_PASSWORD` in the
@@ -224,9 +454,12 @@ drops the SDK's plaintext-password line exists for exactly that.
 |---|---|---|
 | `obs` | `host`, `port`, `password`, `exe_path` | plus `launch_wait_s` 40, `launch_settle_s` 3 |
 | `capture` | `scene`, `source`, `format` | the OBS scene and Window Capture source |
+| | `scale` 1, `width`/`height` null, `quality` −1 | the size and compression to ask OBS for — see [the video and the resolution](#the-video-and-how-much-resolution-there-is-to-be-had) |
+| `record` | `enabled` true, `name` "spin", `start_wait_s` 10, `stop_wait_s` 20 | the video. `name` is what OBS's timestamped file is renamed to; the waits are for an output that starts and finishes lazily |
 | `target` | `process`, `window_class` | the game window |
 | `spin` | `timeout_s` 180, `after_delay_ms` 800 | the ceiling, and the settle before the after shot |
 | `gamelog` | `path`, `idle_timeout_s` 8 | the game's log, and the real wait |
+| `watch` | `idle_timeout_s` 35, `quiet_s` 2, `long_wait_s` 90, `player_wait_s` 0, `after_delay_ms` 800, `tail_quiet_s` 1, `action_timeout_s` 300, `poll_interval_ms` 50, `preroll_s` 1, `milestone_shots` true, `milestone_min_gap_ms` 400 | `watch.py` only; `preroll_s: 0` turns off the standing before-frame, `player_wait_s: 0` holds a round open for as long as the game waits for the player |
 | `ideck` | `process`, `window_class`, `log`, `layout`, `button`, `actions` | `layout: null` means find it via `%CABINET_MODULE%` |
 | `output` | `dir` | base folder that run folders are created in |
 
@@ -237,11 +470,13 @@ Rebet on this cabinet and something else on another.
 
 | File | |
 |---|---|
-| [spin.py](spin.py) | the whole run: OBS, the windows, before, press, wait, after |
+| [spin.py](spin.py) | one spin, caused and captured: OBS, the windows, before, press, wait, after |
+| [watch.py](watch.py) | a whole session, captured and never touched: the loop, the frames, the record |
+| [actions.py](actions.py) | what the player just did, from the logs — triggers, boundaries, labels |
 | [ideck.py](ideck.py) | the Virtual OLED — layout, the button map, clicking, press confirmation |
 | [gamelog.py](gamelog.py) | the game's events, and what the deck's mode currently is |
 | [logtail.py](logtail.py) | tailing a live log: byte offsets, partial lines, rotation |
-| [obs_client.py](obs_client.py) | opening OBS, connecting, screenshotting |
+| [obs_client.py](obs_client.py) | opening OBS, connecting, screenshotting, recording the run |
 | [winfocus.py](winfocus.py) | finding and measuring the two windows |
 | [config.json](config.json) | settings (git-ignored) |
 
@@ -258,4 +493,8 @@ Rebet on this cabinet and something else on another.
 | `the log reported position N instead of M` | the layout file disagrees with the running panel |
 | `no press reached the panel` | something moved the mouse mid-press, or the panel is minimised |
 | `the game logged nothing for 8s without reporting an outcome` | the shot was taken anyway and may be mid-animation; `terminal_event` is `null` in `spin.json` |
+| `OBS is already recording` | someone else started it; this run won't stop it, and there is no video in the run folder. Stop it in OBS and re-run |
+| `OBS would not change its recording folder` | needs obs-websocket 5.3+ (OBS 30+). The video is still made, in OBS's own folder — the warning names it |
+| `the game is drawn larger than the canvas` | the video will be cropped; the screenshots won't be. Right-click the source in OBS → Resize output to source |
+| `that is larger than the source, so OBS is upscaling` | `capture.scale`/`width` is above the game window's own size. Harmless, but it buys file size, not detail |
 | `UIPI will silently discard the button clicks` | the panel service runs elevated and this doesn't; re-run from an administrator terminal |

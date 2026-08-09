@@ -1,8 +1,13 @@
-"""Thin wrapper over obsws-python: open OBS if needed, then screenshot a source.
+"""Thin wrapper over obsws-python: open OBS if needed, screenshot a source, record the run.
 
 Screenshots come from OBS rather than a desktop grab because the scene's Window Capture source
 is configured for client-area-only with no cursor, so the PNG is exactly the game surface --
 and it stays right whatever window happens to be on top of the game at the time.
+
+The video is the other way round. A screenshot can be pointed at a source; a recording cannot --
+OBS records its *program output*, the scene, at the resolution its own Output settings name, into
+the folder its own profile names. So `Recording` points that folder at the run for the length of
+it and puts it back afterwards, rather than trying to move the file from underneath OBS.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import os
 import socket
 import subprocess
 import time
+from datetime import datetime
 
 import winfocus
 
@@ -284,3 +290,297 @@ class ObsSession:
                 "write to that folder?"
             )
         return path
+
+    # -- video and recording -----------------------------------------------
+
+    def video_settings(self) -> dict | None:
+        """OBS's canvas and output resolution, or None if it wouldn't say.
+
+        Screenshots are rendered straight from the source and are unaffected by any of this. The
+        *recording* is the program output, so `output` is the resolution the video is written at
+        -- which is why it is worth reporting: a 1920x1080 game recorded through a canvas scaled
+        to 1280x720 comes out soft, and nothing else in the run would mention it.
+        """
+        try:
+            resp = self._cl.get_video_settings()
+        except Exception:
+            LOG.debug("could not read OBS's video settings", exc_info=True)
+            return None
+        try:
+            fps = (float(getattr(resp, "fps_numerator", 0) or 0)
+                   / float(getattr(resp, "fps_denominator", 1) or 1))
+        except ZeroDivisionError:
+            fps = 0.0
+        return {"base": [int(getattr(resp, "base_width", 0) or 0),
+                         int(getattr(resp, "base_height", 0) or 0)],
+                "output": [int(getattr(resp, "output_width", 0) or 0),
+                           int(getattr(resp, "output_height", 0) or 0)],
+                "fps": round(fps, 3)}
+
+    def framing(self, scene: str, source: str) -> dict | None:
+        """How big the source is drawn in the scene, against the canvas it is drawn on.
+
+        Only the recording cares. A screenshot is rendered from the source itself, so it is right
+        whatever the scene does -- but the video is the canvas, and a portrait game stretched to
+        1080x1920 bounds on a 1920x1080 canvas records with its top and bottom cut off while
+        every screenshot looks perfect. That is worth one warning.
+        """
+        video = self.video_settings()
+        if not video:
+            return None
+        try:
+            item_id = getattr(self._cl.get_scene_item_id(scene, source), "scene_item_id", None)
+            if item_id is None:
+                return None
+            transform = getattr(self._cl.get_scene_item_transform(scene, item_id),
+                                "scene_item_transform", None) or {}
+        except Exception:
+            LOG.debug("could not read the scene item transform", exc_info=True)
+            return None
+        # With bounds set, the bounding box is what gets drawn; without, the scaled source is.
+        if str(transform.get("boundsType", "OBS_BOUNDS_NONE")) != "OBS_BOUNDS_NONE":
+            drawn = [transform.get("boundsWidth") or 0, transform.get("boundsHeight") or 0]
+        else:
+            drawn = [transform.get("width") or 0, transform.get("height") or 0]
+        return {"drawn": [round(float(drawn[0])), round(float(drawn[1]))],
+                "canvas": video["base"], "output": video["output"], "fps": video["fps"]}
+
+    def record_status(self) -> dict:
+        """Whether the record output is running, and how long it has been. Never raises: this is
+        asked on the way out of a run, where an exception would mask the real outcome."""
+        try:
+            resp = self._cl.get_record_status()
+        except Exception:
+            LOG.debug("could not read the record status", exc_info=True)
+            return {}
+        return {"active": bool(getattr(resp, "output_active", False)),
+                "paused": bool(getattr(resp, "output_paused", False)),
+                "timecode": getattr(resp, "output_timecode", None),
+                "bytes": getattr(resp, "output_bytes", None)}
+
+    def recording(self) -> bool:
+        return bool(self.record_status().get("active"))
+
+    def record_directory(self) -> str | None:
+        try:
+            return getattr(self._cl.get_record_directory(), "record_directory", None)
+        except Exception:
+            LOG.debug("could not read the record directory", exc_info=True)
+            return None
+
+    def set_record_directory(self, path: str, attempts: int = 3, delay: float = 0.5) -> bool:
+        """Point OBS's recording folder somewhere else. False if it wouldn't.
+
+        Retried, because OBS answers this with a 500 for a second or two after a recording stops
+        -- it is still finalising the file (measured here: one refusal immediately after a stop,
+        three successes half a second later). Not fatal when it fails for good:
+        SetRecordDirectory arrived in obs-websocket 5.3, and either way the video still gets made,
+        it just lands in OBS's own folder, which the caller says out loud.
+        """
+        for attempt in range(1, attempts + 1):
+            try:
+                self._cl.set_record_directory(os.path.abspath(path))
+                return True
+            except Exception as exc:
+                LOG.debug("SetRecordDirectory refused (%d/%d): %s", attempt, attempts, exc)
+                if attempt < attempts:
+                    time.sleep(delay)
+        return False
+
+    def start_record(self) -> None:
+        try:
+            self._cl.start_record()
+        except Exception as exc:
+            raise ObsError(f"OBS refused to start recording: {exc}") from exc
+
+    def stop_record(self) -> str | None:
+        """Stop the record output. Returns the file OBS says it wrote, if it named one."""
+        try:
+            return getattr(self._cl.stop_record(), "output_path", None)
+        except Exception as exc:
+            raise ObsError(f"OBS refused to stop recording: {exc}") from exc
+
+
+class Recording:
+    """OBS's own video of a run, left in the run folder next to the frames.
+
+    Two things are deliberately left alone rather than forced:
+
+      * **OBS already recording.** That is someone else's recording and stopping it is not ours
+        to do, so the run says so and records nothing itself.
+      * **A record folder OBS won't change.** The video is still made; it lands in OBS's own
+        folder and the path is reported instead.
+
+    Nothing in here may end a run. The frames are the point and the video is a bonus, so every
+    failure is a warning and `active` goes False.
+
+    Both ends are asynchronous, and both are waited out rather than assumed: StartRecord answers
+    about two seconds before any frame is written (`_rolling`), and StopRecord answers before the
+    file is closed, with muxing still to finish (`_settled`).
+    """
+
+    def __init__(self, obs: ObsSession, folder: str, name: str = "recording",
+                 stop_wait_s: float = 20.0, start_wait_s: float = 10.0):
+        self.obs = obs
+        self.folder = os.path.abspath(folder)
+        self.name = name
+        self.stop_wait_s = float(stop_wait_s)
+        self.start_wait_s = float(start_wait_s)
+        self.active = False
+        self.foreign = False              # OBS was already recording; not ours to stop
+        self.started_at = ""
+        self.framing: dict | None = None
+        self.restore_dir: str | None = None
+        self.info: dict | None = None
+
+    def start(self, scene: str | None = None, source: str | None = None) -> bool:
+        """Begin recording. Returns whether this run now owns a recording.
+
+        `scene`/`source` are only used to report what the video will actually contain, which is
+        not the same question a screenshot answers.
+        """
+        if self.obs.recording():
+            self.foreign = True
+            LOG.warning("WARNING: OBS is already recording, so this run leaves that recording "
+                        "running rather than stopping someone else's -- there will be no video "
+                        "in the run folder")
+            return False
+
+        os.makedirs(self.folder, exist_ok=True)
+        current = self.obs.record_directory()
+        if self.obs.set_record_directory(self.folder):
+            self.restore_dir = current
+        else:
+            LOG.warning("WARNING: OBS would not change its recording folder, so the video will "
+                        "be written to %s instead of the run folder. That needs obs-websocket "
+                        "5.3 or newer (OBS 30+).", current or "OBS's own folder")
+
+        try:
+            self.obs.start_record()
+        except ObsError as exc:
+            LOG.warning("WARNING: %s -- carrying on without a video", exc)
+            self._restore()
+            return False
+
+        self.active = True
+        self._rolling()
+        self.started_at = datetime.now().isoformat(timespec="milliseconds")
+        self.framing = self.obs.framing(scene, source) if scene and source else None
+        if self.framing:
+            LOG.info("recording at %dx%d at %g fps; the game is drawn %dx%d on a %dx%d canvas",
+                     *self.framing["output"], self.framing["fps"], *self.framing["drawn"],
+                     *self.framing["canvas"])
+            drawn_w, drawn_h = self.framing["drawn"]
+            canvas_w, canvas_h = self.framing["canvas"]
+            if canvas_w and canvas_h and (drawn_w > canvas_w or drawn_h > canvas_h):
+                LOG.warning("WARNING: the game is drawn larger than the canvas, so the video "
+                            "will be cropped -- the screenshots will not be. In OBS: right-click "
+                            "the source -> Resize output to source, or Transform -> Fit to "
+                            "screen.")
+        else:
+            LOG.info("recording")
+        return True
+
+    def stop(self) -> dict | None:
+        """Stop the recording and return what was written. Idempotent, so the run can stop it
+        where the record is built and the teardown can stop it again after a failure."""
+        if not self.active:
+            return self.info
+        self.active = False
+        # Read the timecode first: once the output is stopped there is nothing left to ask.
+        status = self.obs.record_status()
+        try:
+            path = self.obs.stop_record()
+        except ObsError as exc:
+            LOG.warning("WARNING: %s", exc)
+            self._restore()
+            return None
+
+        path = self._settled(path)
+        if path and os.path.isfile(path):
+            path = self._rename(path)
+        self._restore()
+
+        if not path or not os.path.isfile(path):
+            LOG.warning("WARNING: OBS stopped recording but no file turned up%s",
+                        f" at {path}" if path else "")
+            return None
+        self.info = {"file": os.path.basename(path),
+                     "path": path,
+                     "bytes": os.path.getsize(path),
+                     "duration": status.get("timecode"),
+                     "started_at": self.started_at,
+                     "stopped_at": datetime.now().isoformat(timespec="milliseconds"),
+                     "framing": self.framing}
+        LOG.info("video: %s (%.1f MB%s)", self.info["file"], self.info["bytes"] / 1048576,
+                 f", {self.info['duration']}" if self.info["duration"] else "")
+        return self.info
+
+    # -- the fussy parts ---------------------------------------------------
+
+    def _rolling(self) -> bool:
+        """Wait until frames are actually being written, and say so if they never are.
+
+        StartRecord answers instantly and the output is not running yet: measured here, it went
+        active 1.8 s later and the timecode only began moving at 2.0 s. Returning before that
+        would put the press -- and most of a 3.3 s spin -- in front of a recording that had not
+        started, which is the one way this feature can look like it worked and not have.
+        """
+        deadline = time.monotonic() + self.start_wait_s
+        started = time.monotonic()
+        while time.monotonic() < deadline:
+            status = self.obs.record_status()
+            # Active is not enough: it flipped 0.2 s before the timecode began to move.
+            moving = any(char not in "0:." for char in status.get("timecode") or "")
+            if status.get("active") and moving:
+                LOG.debug("the recording was rolling after %.2fs", time.monotonic() - started)
+                return True
+            time.sleep(0.1)
+        LOG.warning("WARNING: OBS accepted the recording but it was not writing frames after "
+                    "%.0fs (record.start_wait_s). Carrying on -- the video may be short or "
+                    "missing.", self.start_wait_s)
+        return False
+
+    def _settled(self, path: str | None) -> str | None:
+        """Wait for OBS to finish writing: output inactive, then a size that stops changing."""
+        deadline = time.monotonic() + self.stop_wait_s
+        while time.monotonic() < deadline and self.obs.recording():
+            time.sleep(0.2)
+        if not path:
+            return None
+        last = -1
+        while time.monotonic() < deadline:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = -1
+            if size > 0 and size == last:
+                return path
+            last = size
+            time.sleep(0.3)
+        LOG.debug("%s was still growing after %.0fs", path, self.stop_wait_s)
+        return path
+
+    def _rename(self, path: str) -> str:
+        """Give the file our own name, so a run folder reads before / after / spin.mkv.
+
+        OBS's own name is a timestamp, which is the run folder's name already. Keeps whatever
+        container OBS is configured for rather than assuming .mkv.
+        """
+        target = os.path.join(os.path.dirname(path), self.name + os.path.splitext(path)[1])
+        if os.path.abspath(target) == os.path.abspath(path):
+            return path
+        for _ in range(10):
+            try:
+                os.replace(path, target)
+                return target
+            except OSError as exc:
+                # OBS can hold the handle for a moment after remuxing.
+                LOG.debug("could not rename %s yet: %s", path, exc)
+                time.sleep(0.3)
+        return path
+
+    def _restore(self) -> None:
+        if self.restore_dir:
+            self.obs.set_record_directory(self.restore_dir)
+            self.restore_dir = None

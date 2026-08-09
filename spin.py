@@ -10,13 +10,18 @@ What it does, in order:
 2. Finds the game window and the i-Deck window (the "Virtual OLED"), and reports everything
    knowable about the panel -- its layout file, its 14 buttons with the positions the service
    logs them under, and what the deck is currently offering, read out of the game's own log.
-3. Screenshots the screen before the spin, clicks Repeat Bet on the i-Deck, then waits for the
-   *game* to say the spin is finished -- however long that takes -- screenshots the result, and
-   stops.
+3. Starts OBS recording into the run folder, screenshots the screen before the spin, clicks
+   Repeat Bet on the i-Deck, then waits for the *game* to say the spin is finished -- however
+   long that takes -- screenshots the result, stops the recording, and stops.
 
 The wait is the point. An ordinary spin takes ~3.3 s but a Hold & Spin feature ran 53 s over 23
 free spins, so no fixed delay can be right for both; the game log is asked instead. Every event
 it reports is written to spin.json with the game's own timestamp.
+
+The video covers the same stretch as the two frames and a little either side, and lands beside
+them as spin.mkv (whatever container OBS is set to). It is a bonus, not the point: every way it
+can fail is a warning, and the run carries on without it. `--no-record` or `"record": {"enabled":
+false}` turns it off.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from datetime import datetime
 import gamelog
 import ideck
 import winfocus
-from obs_client import ObsError, ObsSession, clamp_dim
+from obs_client import MAX_DIM, ObsError, ObsSession, Recording, clamp_dim
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("spin")
@@ -56,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true",
                        help="check everything and save one screenshot, without spinning")
+    parser.add_argument("--no-record", action="store_true",
+                       help="skip the OBS video recording; capture only the two frames")
     parser.add_argument("--out", help="base folder that run folders are created in")
     parser.add_argument("--config", default=os.path.join(HERE, "config.json"))
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -127,7 +134,7 @@ def prune_empty(run_dir: str) -> None:
 
 
 def capture_size(obs: ObsSession, scene: str, source: str, window, attempts=12, delay=0.5):
-    """Ask OBS how big the capture source is, once it is genuinely capturing.
+    """The capture source's own native size, once it is genuinely capturing.
 
     Don't trust the first answer. A source still acquiring the window reports a transient
     garbage size -- 185x9 was seen right after an OBS cold start, which clears OBS's own 8px
@@ -143,7 +150,7 @@ def capture_size(obs: ObsSession, scene: str, source: str, window, attempts=12, 
             # OBS reports physical pixels, so with display scaling it can report *more* than
             # the logical client size; only guard against it reporting far less.
             if last and last[0] >= client_w // 2 and last[1] >= client_h // 2:
-                LOG.info("capturing %r at %dx%d", source, *last)
+                LOG.info("source %r is capturing at %dx%d", source, *last)
                 return last
         LOG.debug("attempt %d/%d: window client %dx%d, OBS reports %s",
                   attempt, attempts, client_w, client_h, last)
@@ -160,10 +167,59 @@ def capture_size(obs: ObsSession, scene: str, source: str, window, attempts=12, 
                        "looks minimised or still starting, so OBS has nothing to capture")
 
 
-def shot(obs: ObsSession, source: str, path: str, size, img_format: str) -> dict:
+def requested_size(native, capture_cfg: dict) -> tuple[int, int]:
+    """The size to ask OBS for, from the source's native size and the capture settings.
+
+    OBS renders the source into a texture of whatever size the request names, independently of
+    the scene and the canvas -- so a screenshot is never limited by the OBS output resolution,
+    only by OBS's own 4096 px ceiling and by what the window actually has. Past `native`,
+    `capture.scale` buys bigger pixels rather than more detail; genuinely sharper frames come
+    from a bigger game window or a higher desktop resolution. Both are said out loud rather than
+    left for someone to discover from a blurry PNG.
+
+    `capture.width`/`capture.height` win over `capture.scale`, and giving only one of them keeps
+    the source's aspect ratio instead of stretching it.
+    """
+    native_w, native_h = int(native[0]), int(native[1])
+    width, height = native_w, native_h
+    explicit_w = capture_cfg.get("width") or 0
+    explicit_h = capture_cfg.get("height") or 0
+    scale = float(capture_cfg.get("scale") or 1)
+
+    if explicit_w and explicit_h:
+        width, height = int(explicit_w), int(explicit_h)
+    elif explicit_w:
+        width = int(explicit_w)
+        height = round(native_h * width / native_w) if native_w else native_h
+    elif explicit_h:
+        height = int(explicit_h)
+        width = round(native_w * height / native_h) if native_h else native_w
+    elif scale != 1:
+        width, height = round(native_w * scale), round(native_h * scale)
+
+    if max(width, height) > MAX_DIM:
+        # Both axes by the same factor: clamping them independently would squash the picture.
+        factor = MAX_DIM / max(width, height)
+        size = clamp_dim(round(width * factor)), clamp_dim(round(height * factor))
+        LOG.warning("WARNING: OBS caps a screenshot at %d px, so %dx%d was scaled to %dx%d",
+                    MAX_DIM, width, height, *size)
+    else:
+        size = clamp_dim(width), clamp_dim(height)
+    if size != (native_w, native_h):
+        LOG.info("capturing at %dx%d (source is %dx%d)", *size, native_w, native_h)
+        if size[0] > native_w or size[1] > native_h:
+            LOG.warning("WARNING: that is larger than the source, so OBS is upscaling -- bigger "
+                        "files, no more detail. For genuinely sharper frames make the game "
+                        "window bigger (or raise the desktop resolution) and leave "
+                        "capture.scale at 1.")
+    return size
+
+
+def shot(obs: ObsSession, source: str, path: str, size, img_format: str,
+         quality: int = -1) -> dict:
     # Stamped just before the request, which is as close as we can get to the frame OBS grabs.
     entry = {"wall_clock": datetime.now().isoformat(timespec="milliseconds")}
-    obs.screenshot(source, path, *size, img_format)
+    obs.screenshot(source, path, *size, img_format, quality)
     entry["file"] = os.path.basename(path)
     entry["bytes"] = os.path.getsize(path)
     return entry
@@ -286,10 +342,12 @@ def run(args) -> int:
     spin_cfg = cfg.get("spin", {})
     gamelog_cfg = cfg.get("gamelog", {})
     ideck_cfg = cfg.get("ideck", {})
+    record_cfg = cfg.get("record", {})
 
     scene = capture_cfg.get("scene", "Scene")
     source = capture_cfg.get("source", "Window Capture")
     img_format = capture_cfg.get("format", "png")
+    quality = int(capture_cfg.get("quality", -1))
     idle_timeout = float(gamelog_cfg.get("idle_timeout_s", 8.0))
     ceiling = float(spin_cfg.get("timeout_s", 180.0))
     after_delay = float(spin_cfg.get("after_delay_ms", 800)) / 1000.0
@@ -308,6 +366,12 @@ def run(args) -> int:
                      password=obs_cfg.get("password", ""),
                      timeout=float(obs_cfg.get("timeout", 5)))
     exit_code = EXIT_OK
+    # A dry run presses nothing, so there is nothing to film.
+    recorder = None
+    if record_cfg.get("enabled", True) and not args.no_record and not args.dry_run:
+        recorder = Recording(obs, run_dir, name=record_cfg.get("name", "spin"),
+                             stop_wait_s=float(record_cfg.get("stop_wait_s", 20.0)),
+                             start_wait_s=float(record_cfg.get("start_wait_s", 10.0)))
 
     try:
         # 1. OBS, opened if it isn't already.
@@ -352,20 +416,23 @@ def run(args) -> int:
 
         button_spec = ideck_cfg.get("button", "spin")
         button = panel.button(button_spec)
-        size = capture_size(obs, scene, source, game)
+        native = capture_size(obs, scene, source, game)
+        size = requested_size(native, capture_cfg)
 
         if args.dry_run:
             path = obs.screenshot(source, os.path.join(run_dir, f"dryrun.{img_format}"),
-                                  *size, img_format)
+                                  *size, img_format, quality)
             LOG.info("saved %s", path)
             LOG.info("dry run OK -- OBS, both windows, the panel layout, the game log and "
                      "screenshotting all work. It would press %s (position %d). Next: run it "
                      "without --dry-run", button.name, button.position)
             return EXIT_OK
 
-        # 3. Before, spin, wait for the game to finish it, after.
+        # 3. Rolling, before, spin, wait for the game to finish it, after.
+        if recorder is not None:
+            recorder.start(scene, source)
         before = shot(obs, source, os.path.join(run_dir, f"before.{img_format}"),
-                      size, img_format)
+                      size, img_format, quality)
 
         # A win left uncollected -- by a previous run or by hand -- changes what our press does.
         carry = state.get("gamble") == "offerState"
@@ -399,8 +466,11 @@ def run(args) -> int:
         # of it is still being drawn. On a win the meter may still be counting up.
         time.sleep(after_delay)
         after = shot(obs, source, os.path.join(run_dir, f"after.{img_format}"),
-                     size, img_format)
+                     size, img_format, quality)
         measured = round(time.monotonic() - started, 3)
+        # Stopped here rather than in the teardown, so the video's own details make it into
+        # spin.json. Stopping it twice is harmless.
+        video = recorder.stop() if recorder is not None else None
 
         summary = classify(events)
         record = {
@@ -411,6 +481,10 @@ def run(args) -> int:
             "game_log": watcher.path,
             "press_log": press_log.path,
             "capture_size": f"{size[0]}x{size[1]}",
+            "native_size": f"{native[0]}x{native[1]}",
+            "image_format": img_format,
+            "image_quality": quality,
+            "video": video,
             "button": {"name": button.name, "position": button.position,
                        "pressed_at": pressed_at},
             "collected_a_pending_win": carry,
@@ -441,6 +515,10 @@ def run(args) -> int:
         LOG.exception("unexpected failure")
         exit_code = EXIT_ERROR
     finally:
+        # Before closing the socket, and before pruning: a recording still running would keep
+        # writing into a folder that is about to go away.
+        if recorder is not None:
+            recorder.stop()
         obs.close()
         # Prune first, then point at the folder only if it survived -- naming a path that was
         # just deleted is worse than saying nothing.

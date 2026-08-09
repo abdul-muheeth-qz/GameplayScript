@@ -19,6 +19,12 @@ Two traps in this file, both of which cost an afternoon to find:
 
 The markers below are copied from real lines, not guessed. The log is verbose -- ~500 lines
 during a spin, most of it progressive broadcasts -- so matching is deliberately narrow.
+
+Some of these markers describe what the game *did*; a few describe what the player *asked for*
+(`bet_button`, `bet_config_changed`, `denom_changed`, `touch`, and the `via` field on the state
+transitions). Those exist for watch.py, which has no press of its own to time from and has to
+recognise a manual action from the log alone. They are also the only place the cabinet records
+that a human touched the screen rather than the button deck.
 """
 
 from __future__ import annotations
@@ -48,6 +54,21 @@ _STAMP_FORMAT = "%m/%d/%y %H:%M:%S.%f"
 
 # Ordered: the first pattern that matches a line wins, so the specific ones come first.
 EVENTS: list[tuple[str, re.Pattern]] = [
+    # -- what the player asked for. These are the log's only record of a human doing something,
+    #    and each is a line shape no other rule here matches, so their order doesn't matter.
+    #
+    #    `bet_config_changed` is the good one: it names what changed *and* who changed it.
+    #    reasonForChange[Attract] is the cabinet cycling denominations to itself while nobody is
+    #    playing (8 of them in one log against 41 Player ones), so the reason has to be read
+    #    before treating this as an action.
+    ("bet_config_changed", re.compile(
+        r"\[Game\.BetConfigurationChanged\] betChangedFlags\[(?P<flags>[^\]]*)\] "
+        r"reasonForChange\[(?P<reason>\w+)\]")),
+    ("bet_button", re.compile(r"\[BetManager\.HandleBetButtonPressed\]")),
+    #    The touchscreen. Nothing else in either log knows a touch happened, so without this a
+    #    collect or a Hold & Spin start made by hand is invisible until its consequence lands.
+    ("touch", re.compile(r"\[GameSession\.MsgToServer\].*msg\[GDK\.Common\.ServerAPI\.TouchMsg\]")),
+
     # -- the spin itself
     ("bet_locked", re.compile(
         r"\[GameEngine\.LockBet\] totalBetValue\[(?P<total_bet>[\d.]+)\].*?"
@@ -66,6 +87,14 @@ EVENTS: list[tuple[str, re.Pattern]] = [
 
     # -- features. `feature` names which one: CoinOnReelFS is the Hold & Spin free spins,
     #    FreeSpinBonus the ordinary ones, SuperFreeSpinBonus the upgraded round.
+    #    The bonus is announced the instant the reels stop, and then a long intro presentation
+    #    plays before `feature_triggered`: measured at 27.7 s and 68.4 s on this machine, with
+    #    the log genuinely silent for 29 s of it. Nothing else says a feature is coming, so
+    #    without this a watcher has no way to tell that silence from a finished spin.
+    #    Verified 1:1 against `feature_triggered` in both logs here (8 and 8, 1 and 1). Note the
+    #    negative case `NoBonusTriggerMsg` is logged on every ordinary spin (855 of them) -- the
+    #    `ServerAPI\.` prefix is what keeps this from matching it.
+    ("bonus_triggered", re.compile(r"msg\[GDK\.Common\.ServerAPI\.BonusTriggerMsg\]")),
     ("feature_triggered", re.compile(
         r"StateMachine\[FreeSpinStateMachine(?P<feature>\w+)\] transitioned from \[stateIdle\] "
         r"to \[stateStart\]")),
@@ -102,6 +131,20 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("progressive_level", re.compile(
         r"\[ProgressiveFeature\.EvaluateCurrentResults\] win level\[(?P<level>\d+)\]")),
 
+    # -- inside the gamble. GambleStateMachine is the double-up round itself and is a different
+    #    machine from GambleOfferStateMachine below, which only offers it; nothing here collides
+    #    with the `gamble_state` rule. The pick is the player's -- the game names the card they
+    #    chose -- and is the only thing in the round a person does.
+    ("gamble_pick", re.compile(
+        r"StateMachine\[GambleStateMachine\] transitioned from \[waitForPickState\] to \[\w+\] "
+        r"on event \[RED_BLACK_(?P<pick>\w+)_CARD\]")),
+    ("gamble_result", re.compile(
+        r"StateMachine\[GambleStateMachine\] transitioned from \[pickedState\] "
+        r"to \[displayResultsState\]")),
+    ("gamble_over", re.compile(
+        r"StateMachine\[GambleStateMachine\] transitioned from \[displayResultsState\] "
+        r"to \[waitForEndGameAnimState\]")),
+
     # -- which button resolved the win. Both leave `playDecisionState`, so the destination is the
     #    answer. These must be matched before the general `gamble_state` rule below, which would
     #    otherwise swallow the same lines.
@@ -112,6 +155,15 @@ EVENTS: list[tuple[str, re.Pattern]] = [
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[playDecisionState\] "
         r"to \[playState\]")),
 
+    # -- the wager. `denom_changed` is logged on every activation as well as on a real change,
+    #    hence the flag; `bet_changed` carries the new total, which is what a report wants to
+    #    quote. Both land ~600 ms after the bet_config_changed above.
+    ("denom_changed", re.compile(
+        r"\[WagerGameApp\.UpdateDenom\] New denom\[(?P<denom>[\d.]+)\] "
+        r"Did denom Change\[(?P<changed>\w+)\]")),
+    ("bet_changed", re.compile(
+        r"\[BetManager\.UpdateCurrentBet\]\[CurrentBet .*?TotalBetValue:(?P<total_bet>[\d.]+)")),
+
     # -- end of spin
     ("final_grid", re.compile(
         r"\[SlotGameEngine\.HandleGameOverForGameMode\] LastStops\[(?P<stops>[\d ]+)\]")),
@@ -121,10 +173,22 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     # -- the i-Deck. The panel's labels are never logged anywhere, but the game logs every
     #    relabel and the state machines that decide them, which is what makes current_state work.
     ("deck_changed", re.compile(r"BetButtonPanelLayout\.ButtonPanelStateChanged")),
+    #    `via` is the message that caused the transition, and it is how a state change is traced
+    #    back to the input that caused it -- SpinButtonMsg, BetValueButtonMsg and
+    #    MaxBetButtonMsg are the deck; double_up_offer_decline/accept is the touchscreen
+    #    answering the collect/gamble offer. It is captured as an optional field rather than as
+    #    a rule of its own on purpose: a separate rule would match these same lines first and
+    #    current_state() would stop seeing the transitions it reads the deck's mode from.
     ("idle_state", re.compile(
-        r"StateMachine\[IdleStateMachine\] transitioned from \[\w+\] to \[(?P<state>\w+)\]")),
+        r"StateMachine\[IdleStateMachine\] transitioned from \[(?P<from_state>\w+)\] "
+        r"to \[(?P<state>\w+)\](?: on event \[(?P<via>[\w.]+)\])?")),
     ("gamble_state", re.compile(
-        r"StateMachine\[GambleOfferStateMachine\] transitioned from \[\w+\] to \[(?P<state>\w+)\]")),
+        r"StateMachine\[GambleOfferStateMachine\] transitioned from \[(?P<from_state>\w+)\] "
+        r"to \[(?P<state>\w+)\](?: on event \[(?P<via>[\w.]+)\])?")),
+
+    # -- the process itself. A denomination change reloads the game's scene, and occasionally the
+    #    whole client restarts, which gives OBS a new window to capture.
+    ("game_started", re.compile(r"-{5,} (?P<theme>\S+) Client Start -{5,}")),
 ]
 
 # What the game's idle state means for the deck. The names are the game's own; the descriptions
@@ -146,9 +210,12 @@ GAMBLE_MODES = {
 
 # Plain English for the console and spin.json, so a timeline can be read without this file open.
 NOTES = {
+    "bet_button": "a bet button was pressed",
+    "touch": "the screen was touched",
     "spin_started": "spin started",
     "reels_spinning": "reels spinning",
     "mystery_reveal": "mystery symbol revealed",
+    "bonus_triggered": "a bonus was triggered -- its intro is playing",
     "cash_symbol": "a cash-on-reels coin symbol landed",
     "hold_and_spin_prompt": "Hold & Spin waiting to be started",
     "hold_and_spin_started": "Hold & Spin started",
@@ -159,6 +226,8 @@ NOTES = {
     "win": "WIN -- collect/gamble offered, and the deck now reads Collect Win",
     "take_win": "chose TAKE WIN",
     "gamble_played": "chose GAMBLE",
+    "gamble_result": "the gamble round was decided",
+    "gamble_over": "the gamble ended",
     "game_over": "spin complete",
     "new_game_allowed": "ready for another spin",
     "deck_changed": "the i-Deck relabelled its buttons",
@@ -200,8 +269,22 @@ def describe(event: Event) -> str:
         return f"feature started: {event.fields.get('feature')}"
     if event.name == "progressive_level":
         return f"progressive win level {event.fields.get('level')}"
+    if event.name == "bet_config_changed":
+        who = event.fields.get("reason")
+        return (f"bet configuration changed ({event.fields.get('flags')}), "
+                + ("by the player" if who == "Player" else f"reason {who}"))
+    if event.name == "denom_changed":
+        changed = event.fields.get("changed") == "True"
+        return (f"denomination {'changed to' if changed else 'is'} {event.fields.get('denom')}")
+    if event.name == "bet_changed":
+        return f"bet now {event.fields.get('total_bet')}"
+    if event.name == "gamble_pick":
+        return f"gambled on {str(event.fields.get('pick', '')).lower()}"
+    if event.name == "game_started":
+        return f"{event.fields.get('theme')} client started"
     if event.name in ("idle_state", "gamble_state"):
-        return f"{event.name} -> {event.fields.get('state')}"
+        return (f"{event.name} -> {event.fields.get('state')}"
+                + (f" (on {event.fields['via']})" if event.fields.get("via") else ""))
     return NOTES.get(event.name, event.name)
 
 
@@ -278,12 +361,18 @@ def current_state(path: str = DEFAULT_LOG, limit: int = 512 * 1024) -> dict:
     """
     if not os.path.isfile(path):
         raise GameLogError(f"the game log {path} does not exist. Set \"gamelog.path\".")
-    state = {"idle": None, "gamble": None, "feature": None, "last_stops": None, "at": None}
+    state = {"idle": None, "gamble": None, "feature": None, "last_stops": None, "at": None,
+             "bet": None, "denom": None}
     for event in _parse(logtail.LogTail(path).tail(limit)):
         if event.name == "idle_state":
             state["idle"] = event.fields.get("state")
         elif event.name == "gamble_state":
             state["gamble"] = event.fields.get("state")
+        elif event.name in ("bet_changed", "bet_locked"):
+            state["bet"] = event.fields.get("total_bet")
+            state["denom"] = event.fields.get("denom") or state["denom"]
+        elif event.name == "denom_changed":
+            state["denom"] = event.fields.get("denom")
         elif event.name == "win":
             # `win` matches the offerState line before `gamble_state` can, so put it back.
             state["gamble"] = "offerState"
