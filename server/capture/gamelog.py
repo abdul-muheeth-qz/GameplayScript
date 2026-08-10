@@ -47,6 +47,26 @@ DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
 # is never going to make.
 TERMINAL = ("game_over", "win")
 
+# What says the meters have stopped moving, once a terminal event has been reached.
+#
+# `win` is logged at the *start* of the win meter's count-up, not the end of it, so it is the one
+# terminal event that fires while the screen is still changing. Measured over 520 rounds in the two
+# logs on this machine, `win` -> `results_done` is 0.33 s median but 6.3 s at p90 and 44.8 s at
+# worst -- so 28% of winning spins were shot before the meter had finished, and one real run
+# recorded a win of **1.49** on a spin that paid **12.00** (run 2026-08-10_163826: `win` at
+# 16:38:32.987, after shot at 16:38:33.826, meters settled at 16:38:39.300).
+#
+# Ordered most specific first, and both are here because they answer different halves:
+#   win_bang_done -- the count-up itself finishing. 115/115 winning rounds, 6/405 losing ones.
+#   results_done  -- the whole results presentation finishing. 519/520 rounds, win or lose, and
+#       never earlier than win_bang_done (0-18 ms after it). That makes it the marker that
+#       answers "are the meters settled" for a losing spin too, which is what `win_bang_done`
+#       alone cannot do.
+#
+# `game_over` needs none of this: on a loss it already lands *after* `results_done` (0.17 s
+# median, 404/404 losing rounds), so a spin that ends the ordinary way is settled by definition.
+SETTLED = ("win_bang_done", "results_done")
+
 # "08/05/26 12:06:37.163 19 HuffNPuffLink:19540 INF: ..." -- the game's own clock, which is what
 # event times should be reported in rather than when we happened to read the line.
 _STAMP_RE = re.compile(r"^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d\d\d)\s")
@@ -164,6 +184,18 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("bet_changed", re.compile(
         r"\[BetManager\.UpdateCurrentBet\]\[CurrentBet .*?TotalBetValue:(?P<total_bet>[\d.]+)")),
 
+    # -- the meters catching up. See SETTLED above for why the after shot waits for this and what
+    #    it read when it didn't. `stateResultsWithInterrupt` is the presentation being allowed to
+    #    be cut short by a press; the transition out of it is the game saying the results display
+    #    is finished, whether it ran to the end or was interrupted.
+    #
+    #    Anchored to `GameStateMachine` on purpose. `stateResultsDone` also appears twice per
+    #    free-spin round on the FreeSpinStateMachines, which is a different thing entirely -- the
+    #    feature finishing its own results, mid-spin.
+    ("results_done", re.compile(
+        r"StateMachine\[GameStateMachine\] transitioned from \[stateResultsWithInterrupt\] "
+        r"to \[stateResultsDone\]")),
+
     # -- end of spin
     ("final_grid", re.compile(
         r"\[SlotGameEngine\.HandleGameOverForGameMode\] LastStops\[(?P<stops>[\d ]+)\]")),
@@ -185,6 +217,20 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("gamble_state", re.compile(
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[(?P<from_state>\w+)\] "
         r"to \[(?P<state>\w+)\](?: on event \[(?P<via>[\w.]+)\])?")),
+
+    #    The win meter's count-up finishing. Below `idle_state` deliberately, and this is the one
+    #    rule in this list whose position costs something. Of the 126 lines in the two logs here
+    #    that match it, 125 are `IdleStateMachine [Non-queued] [WinBangDone] not handled by state
+    #    [statePlaying]` and collide with nothing -- but one was `IdleStateMachine transitioned
+    #    from [stateBangup] to [stateDisabled] on event [WinBangDone]`, and matching that first
+    #    would hide an idle transition from current_state(), which is the one thing this list must
+    #    never do. So that line is read as `idle_state` and this event is missed on it. Nothing
+    #    breaks: `results_done` above is what the after shot waits for, and it fires either way.
+    #
+    #    `\[WinBangDone\]` and not `WinBangDone`: the leading bracket is what keeps it off the 181
+    #    `[FreeSpinWinBangDone_<feature>]` lines, which are one count-up per *free spin* inside a
+    #    feature rather than the spin's own.
+    ("win_bang_done", re.compile(r"\[WinBangDone\]")),
 
     # -- the process itself. A denomination change reloads the game's scene, and occasionally the
     #    whole client restarts, which gives OBS a new window to capture.
@@ -224,6 +270,8 @@ NOTES = {
     "jackpot_awarded": "JACKPOT awarded",
     "jackpot_celebration": "jackpot celebration",
     "win": "WIN -- collect/gamble offered, and the deck now reads Collect Win",
+    "win_bang_done": "the win meter finished counting up",
+    "results_done": "the results display finished -- the meters have stopped moving",
     "take_win": "chose TAKE WIN",
     "gamble_played": "chose GAMBLE",
     "gamble_result": "the gamble round was decided",
@@ -318,15 +366,32 @@ class GameLogWatcher:
                 f"the game log {path} does not exist, so there is no way to tell when a spin "
                 "has finished. Set \"gamelog.path\" in config.json.")
         self._tail = logtail.LogTail(path)
+        self._pending: list[Event] = []
         self.mark()
 
     def mark(self) -> None:
         """Note where the log ends. Call before triggering the spin."""
+        self._pending.clear()
         self._tail.mark()
+
+    def _fill(self) -> None:
+        """Read the log and queue whatever it has added.
+
+        The queue is what makes it safe for a caller to `break` out of `drain` and then start a
+        second one -- which is exactly what waiting for SETTLED past a terminal event does. One
+        read of the log yields a *batch* of events while the byte offset advances past all of
+        them, so a caller that stopped part-way through a batch used to lose the remainder for
+        good. `win` and `results_done` are 43 ms apart at their closest, well inside one 50 ms
+        poll, which makes the event the second drain is waiting for the one most likely to have
+        been in the discarded remainder.
+        """
+        self._pending.extend(_parse(self._tail.read_new()))
 
     def poll(self) -> list[Event]:
         """Events logged since the last mark/poll, in order."""
-        return _parse(self._tail.read_new())
+        self._fill()
+        batch, self._pending = self._pending, []
+        return batch
 
     def drain(self, idle_timeout: float, ceiling: float, interval: float = 0.05):
         """Yield events as they appear, until the game goes quiet or the ceiling is hit.
@@ -334,6 +399,10 @@ class GameLogWatcher:
         Stopping is the caller's decision -- it `break`s when it has what it wants. Deciding
         here instead looks tidier and is wrong: the caller sometimes needs to *ignore* an event
         it would otherwise stop on, and a generator that has already returned cannot be resumed.
+
+        Events are taken off `_pending` one at a time rather than out of a local batch, so a
+        caller that breaks part-way through leaves the rest queued for the next drain instead of
+        dropping them -- see `_fill`.
 
         Two limits, because one number cannot serve both cases. `idle_timeout` is the real one:
         it restarts on every event, so a feature that keeps emitting events is followed for as
@@ -344,8 +413,9 @@ class GameLogWatcher:
         started = time.monotonic()
         quiet_until = started + idle_timeout
         while True:
-            for event in self.poll():
-                yield event
+            self._fill()
+            while self._pending:
+                yield self._pending.pop(0)
                 quiet_until = time.monotonic() + idle_timeout
             now = time.monotonic()
             if now >= quiet_until or now - started >= ceiling:

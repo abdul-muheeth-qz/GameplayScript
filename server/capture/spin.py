@@ -18,6 +18,12 @@ The wait is the point. An ordinary spin takes ~3.3 s but a Hold & Spin feature r
 free spins, so no fixed delay can be right for both; the game log is asked instead. Every event
 it reports is written to spin.json with the game's own timestamp.
 
+There are two waits, not one, because a win is *announced* before it is *displayed*: the game logs
+the collect/gamble offer at the start of the win meter's count-up, so a spin that ends on a win
+waits a second time for the game to say the meters have stopped moving (`await_meters`). Without
+it, 28% of winning spins were photographed mid-count-up, and one recorded a win of 1.49 on a spin
+that paid 12.00.
+
 The video covers the same stretch as the two frames and a little either side, and lands beside
 them as spin.mkv (whatever container OBS is set to). It is a bonus, not the point: every way it
 can fail is a warning, and the run carries on without it. `--no-record` or `"record": {"enabled":
@@ -224,6 +230,15 @@ def shot(obs: ObsSession, source: str, path: str, size, img_format: str,
 # -- following the spin ----------------------------------------------------
 
 
+def _row(event: gamelog.Event) -> dict:
+    """One game-log event as a JSON-serialisable row, with the game's own clock."""
+    row = {"event": event.name,
+           "game_clock": event.at.strftime("%H:%M:%S.%f")[:-3] if event.at else None,
+           "note": gamelog.describe(event)}
+    row.update(event.fields)
+    return row
+
+
 def follow_spin(watcher: gamelog.GameLogWatcher, idle_timeout: float, ceiling: float,
                 carry: bool) -> tuple[list[dict], str | None]:
     """Read the game log until the spin is over. Returns its events and the terminal one.
@@ -247,10 +262,7 @@ def follow_spin(watcher: gamelog.GameLogWatcher, idle_timeout: float, ceiling: f
     seen: list[dict] = []
     terminal = None
     for event in watcher.drain(idle_timeout, ceiling):
-        record = {"event": event.name,
-                  "game_clock": event.at.strftime("%H:%M:%S.%f")[:-3] if event.at else None,
-                  "note": gamelog.describe(event)}
-        record.update(event.fields)
+        record = _row(event)
 
         if carry and event.name not in SPIN_BEGINS:
             record["belongs_to"] = "the previous, uncollected win"
@@ -265,6 +277,41 @@ def follow_spin(watcher: gamelog.GameLogWatcher, idle_timeout: float, ceiling: f
             terminal = event.name
             break
     return seen, terminal
+
+
+def await_meters(watcher: gamelog.GameLogWatcher,
+                 settle_s: float) -> tuple[list[dict], str | None]:
+    """Keep reading until the game says the meters have stopped moving. Only used after a `win`.
+
+    `win` -- the collect/gamble offer -- is logged when the win is *announced*, at the start of the
+    win meter's count-up rather than the end of it, so it is the one terminal event that fires
+    while the screen is still changing. Measured over the 520 rounds in this cabinet's two logs,
+    `win` to `results_done` is 0.33 s median, 6.3 s at p90 and 44.8 s at worst: comfortably inside
+    `after_delay_ms` most of the time, and outside it on **28%** of winning spins. Run
+    2026-08-10_163826 is what that costs -- `win` at 16:38:32.987, the after shot 839 ms later,
+    the meters settling at 16:38:39.300, and a recorded win of 1.49 on a spin that paid 12.00.
+
+    Raising `after_delay_ms` is the wrong fix twice over: 45 s of sleep on every spin to cover the
+    worst case, and still no guarantee. So the game is asked, the same way the spin itself is.
+
+    Nothing here can hang waiting for a press we never make. `results_done` arrived before the
+    player's collect in 112/113 winning rounds that were collected at all, and the one exception
+    beat it by 2 ms -- a player interrupting the count-up, which the spin button is documented to
+    do. It is also why this is bounded by a flat `settle_s` rather than by an idle timeout that
+    restarts: this waits for **one specific marker** that measurement says arrives within 44.8 s,
+    not for an open-ended feature, and the log went silent for 43.8 s of one of those waits, which
+    any idle timeout worth having would have given up on.
+    """
+    seen: list[dict] = []
+    settled = None
+    for event in watcher.drain(settle_s, settle_s):
+        record = _row(event)
+        seen.append(record)
+        LOG.info("   %s  %s", record["game_clock"], record["note"])
+        if event.name in gamelog.SETTLED:
+            settled = event.name
+            break
+    return seen, settled
 
 
 def classify(events: list[dict]) -> dict:
@@ -348,6 +395,10 @@ def run(args) -> int:
     idle_timeout = float(gamelog_cfg.get("idle_timeout_s", 8.0))
     ceiling = float(spin_cfg.get("timeout_s", 180.0))
     after_delay = float(spin_cfg.get("after_delay_ms", 800)) / 1000.0
+    # How long to keep reading past a `win` for the meters to settle. 90 s against a measured
+    # worst case of 44.8 s. 0 turns it off and restores the old behaviour of shooting
+    # `after_delay_ms` after the win was announced.
+    meter_settle = float(spin_cfg.get("meter_settle_s", 90.0))
     if args.run_dir:
         # Named by the caller, so it can find the artefacts without racing the timestamp.
         run_dir = args.run_dir if os.path.isabs(args.run_dir) else os.path.join(ROOT,
@@ -463,8 +514,21 @@ def run(args) -> int:
                 LOG.warning("WARNING: the game logged nothing for %.0fs without reporting an "
                             "outcome (gamelog.idle_timeout_s). Shooting anyway; the frame may "
                             "be mid-animation.", idle_timeout)
+        # A win is announced at the *start* of the meter's count-up, so `win` on its own is not
+        # "the spin is over" -- see await_meters. A `game_over` needs none of this: it already
+        # lands after the results display finished, on 404/404 losing rounds replayed here.
+        settled = None
+        if terminal == "win" and meter_settle > 0:
+            LOG.info("the win meter is counting up; waiting for the game to say it has finished")
+            extra, settled = await_meters(watcher, meter_settle)
+            events.extend(extra)
+            if settled is None:
+                LOG.warning("WARNING: the game never said the meters had settled within %.0fs "
+                            "(spin.meter_settle_s). Shooting anyway; the WIN meter may still be "
+                            "counting up, so treat the amount in after.%s as unverified.",
+                            meter_settle, img_format)
         # The terminal event fires when the game decides the spin is over, while the last frame
-        # of it is still being drawn. On a win the meter may still be counting up.
+        # of it is still being drawn.
         time.sleep(after_delay)
         after = shot(obs, source, os.path.join(run_dir, f"after.{img_format}"),
                      size, img_format, quality)
@@ -493,16 +557,21 @@ def run(args) -> int:
             "after": after,
             "measured_s": measured,
             "terminal_event": terminal,
+            # None on a losing spin (nothing to wait for) and on a win the game never settled.
+            "meters_settled_by": settled,
             "idle_timeout_s": idle_timeout,
             "ceiling_s": ceiling,
+            "meter_settle_s": meter_settle,
             **summary,
             "events": events,
         }
         with open(os.path.join(run_dir, "spin.json"), "w", encoding="utf-8") as fh:
             json.dump(record, fh, indent=2)
 
-        LOG.info("spin finished in %.2fs on %s: %s%s", measured, terminal or "a timeout",
-                 summary["outcome"],
+        # `measured` now includes the wait for the meters, which on a big win is most of it --
+        # so say so, or a 50 s spin looks like a hang rather than a count-up.
+        LOG.info("spin finished in %.2fs on %s%s: %s%s", measured, terminal or "a timeout",
+                 f" then {settled}" if settled else "", summary["outcome"],
                  f", stops {summary['final_stops']}" if summary["final_stops"] else "")
 
     except KeyboardInterrupt:

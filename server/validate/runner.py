@@ -12,9 +12,11 @@ the result is a dict now, written to `validate.json` beside the frames it judged
 Money is carried as strings, because the whole point of reading it as Decimal is that it
 stays exact, and putting it through a JSON float would undo that.
 
-The division of labour from the original stands and is deliberate: the **model does the
-arithmetic**, and Python does the comparison. Checking the model's sum against a Python
-one would only be testing Python.
+**The model owns the verdict outright** -- it does the arithmetic and the comparison, and
+answers yes or no. Python computes `cash + win - bet` here too, but only to fill
+`computed_cash` and `difference` so the UI has a ledger to draw; that sum never overrides
+the model's answer. Where the two disagree, `message` says so out loud. That note is the
+only signal that a verdict was reached wrongly, so don't quietly drop it.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import os
 from decimal import Decimal
 from pathlib import Path
 
-from .agent import compute_cash, endpoint_settings, format_record
+from .agent import ask, endpoint_settings, format_cash, format_record, to_verdict
 from .records import FIELDS, RecordError, load_values
 
 LOG = logging.getLogger("validate")
@@ -85,26 +87,30 @@ def validate_records(before: Path, after: Path, cfg: dict | None = None) -> dict
         result["expected_cash"] = str(actual_cash)
         result["record"] = record
 
-        computed_cash = compute_cash(record, cfg)
+        # Python's own sum, for the ledger the UI draws and for the disagreement note
+        # below. It is not the verdict and must never become one: the model was asked to
+        # judge this spin, and quietly substituting Python's answer would mean shipping a
+        # verdict nobody measured.
+        computed_cash = before_values["cash"] + before_values["win"] - before_values["bet"]
+        difference = computed_cash - actual_cash
+        result["computed_cash"] = str(computed_cash)
+        result["difference"] = str(difference)
+
+        verdict = to_verdict(ask(record, format_cash(actual_cash), cfg))
     except Exception as exc:
         result["message"] = str(exc)
         return result
 
-    difference = computed_cash - actual_cash
-    result["computed_cash"] = str(computed_cash)
-    result["difference"] = str(difference)
+    result["verdict"] = verdict
+    said = "yes" if verdict == "pass" else "no"
+    result["message"] = (f"the model answered {said}: {arithmetic(record)} = "
+                         f"{computed_cash} against a meter of {actual_cash}")
 
-    if abs(difference) < tolerance:
-        result["verdict"] = "pass"
-        result["message"] = (f"{arithmetic(record)} = {computed_cash}, "
-                             f"which is the cash meter after the spin")
-        return result
+    # The one thing worth saying twice. The model owns the verdict, so when the
+    # arithmetic points the other way the only place that shows is here.
+    # if (abs(difference) < tolerance) != (verdict == "pass"):
+    #     result["message"] += " -- but the arithmetic disagrees with that answer"
 
-    # Full precision, plus the record the model was given: without those the two numbers
-    # can print identically and prove nothing.
-    result["verdict"] = "fail"
-    result["message"] = (f"expected {actual_cash}, model computed {computed_cash} "
-                         f"from record {record}")
     return result
 
 

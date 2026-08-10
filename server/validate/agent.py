@@ -1,33 +1,43 @@
-"""LangChain agent that computes a slot spin's cash value.
+"""LangChain agent that validates a slot spin. No tools -- the model itself
+computes the cash value and answers yes or no.
 
-The agent reads the three amounts out of the record and calls one tool, `cash_after_spin`,
-which does the arithmetic in Decimal. It used to have no tools at all and add the numbers
-itself, and that is why it has one now: measured against the local qwen2.5-7b on twelve
-records, the model alone got 5/12 right with the original terse prompt and 10/12 when
-allowed to show its working. It reliably dropped the `- bet` term -- 1175.76 + 20.00 -
-40.00 came back as 1195.76 every single time, deterministically, which is the sample data
-this project ships. With the tool it is 12/12, and the tool arguments were parsed
-correctly from the record in all twelve.
+The model owns the whole judgement: it adds, it compares, and its one word becomes the
+verdict. `runner.py` also computes `cash + win - bet` in `Decimal`, but only to fill the
+ledger the UI draws -- that number never overrides the model. When the two disagree the
+message says so, which is the only warning you get that the answer was reached wrongly.
 
-That distinction matters more than it looks: a Fail is supposed to mean the spin's meters
-don't add up. A model that cannot subtract turns every spin into a Fail, and the verdict
-stops carrying any information at all. The model still does the part it is good at --
-reading three numbers out of a record and deciding what to do with them -- and the answer
-taken as authoritative is the tool's return value, not the model's echo of it.
+Know the cost before trusting a verdict from this. Measured against the local qwen2.5-7b
+over twelve records, the model doing the arithmetic alone scored 5/12 and dropped the
+`- bet` term deterministically; folding the comparison in as well puts the arithmetic
+*and* the judgement in a single forced token, which is where a small model is least
+reliable. If the verdicts stop being trustworthy, `git log` has two better-measured
+designs: the model returning a bare number with Python comparing (the same 5/12
+arithmetic, but a comparison that cannot be wrong), and a `cash_after_spin` tool doing
+the sum in `Decimal` (12/12).
 
-Everything else the original was careful about is kept: temperature 0, no client-side
-retries, a strict numeric parser, and a reply that hit the token cap reported rather than
-parsed as though it were whole.
+Three things differ from the standalone script this came from, and all three are what let
+it run inside the server rather than from a shell:
+
+- `endpoint_settings()` reads config.json's "validate" section, with the LMSTUDIO_*
+  environment variables still winning over the file. `server/api.py`'s /api/health imports
+  it to check LM Studio is serving the configured model.
+- `build_agent` is keyed on those settings rather than on module constants, so a server
+  picking up an edited config.json builds a new client instead of quietly going on talking
+  to the old endpoint.
+- `FIELDS` comes from `records.py`, which is also where the extract step's keys are named,
+  so there is one definition of the record's shape.
+
+Everything the original was careful about is kept: temperature 0, no client-side retries,
+an empty reply reported with the reason rather than as '', and a reply that is neither
+yes nor no raised rather than guessed at.
 """
 
 import os
-import re
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from functools import lru_cache
 from urllib.parse import urlsplit
 
 from langchain.agents import create_agent
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from .records import FIELDS
@@ -65,63 +75,40 @@ def endpoint_settings(cfg: dict | None = None) -> tuple[str, str, str, float]:
     return model, base_url, api_key, float(validate_cfg["timeout_s"])
 
 
-# Room for one tool call and a short answer, and no more. 16 was enough when the reply
-# was a bare number; a tool call does not fit in it. A reply that hits the cap is still
-# reported rather than parsed as though it were complete.
-MAX_TOKENS = 200
+# One word is the whole answer. Small enough that a model minded to explain itself gets
+# cut off rather than talked round, and `to_verdict` reads only the first word anyway.
+MAX_TOKENS = 8
 
+# Written for a 7B: the formula is spelled out as an arithmetic procedure rather than
+# stated as algebra, which measurably improves reliability. Plain ASCII subscripts, and
+# the bracket around the addition, are both there to stop the model dropping the `- bet`
+# term -- the one error it makes deterministically.
+#
+# Record 2 is its cash value alone, not the cash,win,bet triple record 1 uses: step 3
+# only needs cash2, and the after-spin frame's WIN and BET meters genuinely read blank,
+# so there is nothing honest to put in them.
+SYSTEM_PROMPT = f"""You validate slot machine records using this formula:
 
-@tool
-def cash_after_spin(cash: str, win: str, bet: str) -> str:
-    """Compute the cash meter expected after a spin, as cash + win - bet.
+Cₙ = (Cₙ₋₁ + Wₙ₋₁) − Bₙ₋₁
 
-    Pass the three amounts exactly as they appear in the record, as plain decimal
-    strings without currency symbols or thousands separators.
-    """
-    # Decimal, not float: these are currency amounts being compared against another
-    # currency amount within half a cent, and 0.1 + 0.2 is famously not 0.3.
-    return str(Decimal(cash) + Decimal(win) - Decimal(bet))
+C = cash amount, W = win amount, B = bet amount, n = iteration number.
 
+Record 1 is given as: {",".join(FIELDS)}
+Record 2 is given as its cash value alone.
 
-TOOL_NAME = cash_after_spin.name
+You will be given record 1 and record 2. Do this:
+1. Take cash, win and bet from record 1.
+2. Compute: cash1 + win1 - bet1
+3. Compare the result with cash2 (the cash value of record 2).
+4. If they are equal, the answer is yes. If not, the answer is no.
 
-# Written for a 7B, and deliberately short. The formula is named once; the model's job
-# is to pull three numbers out of the record and hand them over in the right order,
-# which it does reliably. "Never do the arithmetic yourself" is load-bearing -- without
-# it the model sometimes answers straight from its head and skips the tool.
-SYSTEM_PROMPT = f"""You check a slot machine's cash meter.
-
-You are given three amounts read off the meters before a spin, in this order:
-
-    {",".join(FIELDS)}
-
-The cash meter after the spin should be cash + win - bet.
-
-Call the {TOOL_NAME} tool with those three numbers, passing each one exactly as it
-appears in the record. Then reply with only the number the tool returned -- no words,
-no currency symbol, no thousands separators.
-
-Never do the arithmetic yourself. The tool's answer is the only correct one."""
-
-# --- Reply parsing ---------------------------------------------------------
-# An optional sign, digits, one optional decimal point. Deliberately strict,
-# because Decimal() also accepts "nan", "inf", "1e3" and "1_155.76".
-_NUMBER = re.compile(r"[+-]?\d+(?:\.\d+)?\Z")
-
-# "1,155.76" is a thousands separator. "1155,76" is a decimal comma and means
-# a hundred times less, so only the unambiguous grouped form is stripped.
-_GROUPED = re.compile(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?\Z")
-
-# Currency symbols and Unicode dashes a model may decorate an amount with.
-# Whitespace is only stripped from the ends: removing it from the middle would
-# glue "11 55.76" into a number the model never said.
-_CURRENCY = re.compile(r"[$€£¥]")
-_MINUS = str.maketrans({"−": "-", "–": "-", "—": "-"})
+Your answer must be exactly one word: yes or no.
+Do not show your working. Do not add punctuation or any other text."""
 
 
 @lru_cache(maxsize=4)
 def build_agent(model: str, base_url: str, api_key: str, timeout: float):
-    """The agent and its one tool, built once per endpoint and reused.
+    """A LangChain agent with an empty tool list, built once per endpoint and reused.
 
     Keyed on the settings rather than cached on module constants, so the server
     picking up an edited config.json builds a new client instead of quietly going on
@@ -139,11 +126,11 @@ def build_agent(model: str, base_url: str, api_key: str, timeout: float):
         timeout=timeout,
     )
 
-    return create_agent(llm, [cash_after_spin], system_prompt=SYSTEM_PROMPT)
+    return create_agent(llm, [], system_prompt=SYSTEM_PROMPT)
 
 
 def format_record(values: dict[str, Decimal]) -> str:
-    """Render the before-spin values as the record the prompt describes.
+    """Render the before-spin values as record 1: the cash,win,bet triple.
 
     Values go out exact, padded to two decimals. Rounding here would be
     charged to the model, which can only answer from the digits it is handed:
@@ -151,6 +138,11 @@ def format_record(values: dict[str, Decimal]) -> str:
     and three roundings outrun the tolerance meant to absorb them.
     """
     return ",".join(_pad(values[field]) for field in FIELDS)
+
+
+def format_cash(value: Decimal) -> str:
+    """Render the after-spin cash as record 2, on the same terms as record 1."""
+    return _pad(value)
 
 
 def _pad(value: Decimal) -> str:
@@ -161,74 +153,58 @@ def _pad(value: Decimal) -> str:
     return f"{whole}.{fraction.ljust(2, '0')}"
 
 
-def compute_cash(record: str, cfg: dict | None = None) -> Decimal:
-    """Send the before-spin record to the agent, return the computed Cₙ.
+def ask(record_1: str, record_2: str, cfg: dict | None = None) -> str:
+    """Send both records to the model and return its raw reply."""
+    question = (
+        f"1. {record_1}\n"
+        f"2. {record_2}\n\n"
+        "Do records 1 and 2 satisfy the validation formula?"
+    )
 
-    The answer is the tool's return value, read back out of the message history --
-    not the model's closing sentence. The model does agree with the tool in practice
-    (12/12 on the measured records), but where the two can differ the arithmetic is
-    the tool's and only the tool's, and a disagreement is worth raising rather than
-    silently resolving.
-    """
-    question = f"{record}\n\nCompute the cash value."
+    print("question",question)
 
     state = build_agent(*endpoint_settings(cfg)).invoke({"messages": [("user", question)]})
     message = state["messages"][-1]
 
-    if message.response_metadata.get("finish_reason") == "length":
-        raise ValueError(
-            f"model reply hit the {MAX_TOKENS} token cap and may be cut off, "
-            f"it said: {str(message.text)!r}"
-        )
-
-    computed = _tool_result(state)
-    if computed is None:
-        raise ValueError(
-            f"the model answered without calling {TOOL_NAME}, so nothing computed the "
-            f"arithmetic. It said: {str(message.text)!r}"
-        )
-
     # .text concatenates plain string content and content blocks alike, so a
-    # number split across blocks survives.
-    reply = str(message.text).strip()
-    try:
-        echoed = to_decimal(reply) if reply else None
-    except ValueError:
-        # Closing prose rather than a bare number ("The cash value is 1155.76.").
-        # The tool has already answered, so this is not worth failing over.
-        echoed = None
+    # reply split across blocks survives.
+    reply = str(message.text)
 
-    if echoed is not None and echoed != computed:
-        raise ValueError(
-            f"the model reported {reply!r} but {TOOL_NAME} computed {computed} from "
-            f"record {record} -- refusing to guess which is meant"
+    print("reply",reply)
+
+    if not reply.strip():
+        raise ValueError(f"model returned {_why_empty(message)}")
+
+    return reply.strip()
+
+
+def _why_empty(message) -> str:
+    """Say why a reply carried no text, rather than reporting ''."""
+    if getattr(message, "tool_calls", None):
+        return "a tool call, but this agent has no tools"
+
+    if message.additional_kwargs.get("reasoning_content"):
+        return (
+            "reasoning but no answer -- a reasoning model needs more than the "
+            f"{MAX_TOKENS} token cap"
         )
 
-    return computed
+    return "an empty reply"
 
 
-def _tool_result(state) -> Decimal | None:
-    """The last value cash_after_spin returned, or None if it was never called."""
-    for message in reversed(state["messages"]):
-        if getattr(message, "type", None) == "tool" and message.name == TOOL_NAME:
-            try:
-                return Decimal(str(message.content).strip())
-            except InvalidOperation as exc:
-                raise ValueError(
-                    f"{TOOL_NAME} returned something that is not a number: "
-                    f"{message.content!r}"
-                ) from exc
-    return None
+def to_verdict(reply: str) -> str:
+    """Map the model's yes/no onto the verdict vocabulary."""
+    # The first word, compared whole. A `startswith("no")` prefix test -- which is what
+    # this used to be -- reads "not sure" and "none of them" as a confident Fail, and a
+    # wrong verdict that looks certain is the one failure this stage must not produce.
+    words = reply.strip().lower().split()
+    answer = words[0].strip(".,;:!?\"'") if words else ""
 
+    print("answer=======================>",answer)
 
-def to_decimal(reply: str) -> Decimal:
-    """Parse the model's numeric reply, rejecting anything ambiguous."""
-    cleaned = _CURRENCY.sub("", reply.translate(_MINUS)).strip()
+    if answer == "yes":
+        return "pass"
+    if answer == "no":
+        return "fail"
 
-    if _GROUPED.match(cleaned):
-        cleaned = cleaned.replace(",", "")
-
-    if not _NUMBER.match(cleaned):
-        raise ValueError(f"model did not answer with a plain number, it said: {reply!r}")
-
-    return Decimal(cleaned)
+    raise ValueError(f"model did not answer yes or no, it said: {reply!r}")

@@ -190,8 +190,49 @@ this machine: an ordinary spin runs **3.3 s** from press to game over, while a H
 - **Ceiling, 180 s** (`spin.timeout_s`) — a backstop against a game that logs forever, not the
   normal wait.
 - **`after_delay_ms`, 800** — the terminal event fires when the game *decides* the spin is over,
-  while the last frame is still being drawn. On a win the meter may still be counting up when the
-  shot is taken; raise this if you want it fully settled.
+  while the last frame is still being drawn. The sole deliberate sleep in the tool.
+- **Meter settle, 90 s** (`spin.meter_settle_s`) — the second wait, and only on a win. See below.
+
+#### A win is announced before it is displayed
+
+`win` — the collect/gamble offer — is logged at the **start** of the win meter's count-up, not the
+end of it, which makes it the one terminal event that fires while the screen is still changing. So
+after a `win`, `spin.py` keeps reading the log for `win_bang_done` / `results_done` before it takes
+the after shot, and only then sleeps `after_delay_ms`.
+
+Measured over the 520 rounds in this cabinet's two logs, `win` → `results_done` is:
+
+| | median | p90 | worst |
+|---|---|---|---|
+| `win` → meters settled | 0.33 s | 6.3 s | 44.8 s |
+
+Inside `after_delay_ms` most of the time, and outside it on **28% of winning spins**. Run
+`2026-08-10_163826` is what that cost: `win` at 16:38:32.987, the after shot 839 ms later, the
+meters settling at 16:38:39.300 — and a recorded win of **1.49** on a spin that actually paid
+**12.00**, which the *next* run's before-frame reveals. A confident, plausible, wrong number, of
+exactly the kind [the OCR suffix rule](#never-take-a-suffix-of-a-malformed-number) also guards
+against.
+
+Raising `after_delay_ms` is the wrong fix twice over: it would sleep 45 s on every spin to cover
+the worst case, and still not guarantee it. So the game is asked, the same way the spin itself is.
+
+Three measurements say this cannot hang waiting for a press the script never makes:
+
+- `results_done` arrived **before** the player's collect in 112/113 winning rounds that were
+  collected at all. The one exception beat it by 2 ms — a player interrupting the count-up, which
+  the spin button is documented to do.
+- On a **loss** nothing changes: `game_over` already lands *after* `results_done` (0.17 s median,
+  404/404 losing rounds), so an ordinary spin is settled by definition. This is the answer to
+  "does that marker fire when there is no win?" — `win_bang_done` mostly does not (115/115 winning
+  rounds, 6/405 losing ones), but `results_done` fires on 519/520 rounds either way.
+- `spin.meter_settle_s` is a flat bound and not an idle timeout that restarts, because this waits
+  for **one specific marker** measurement says arrives within 44.8 s, not for an open-ended
+  feature — and the log went silent for 43.8 s of one of those waits, which any idle timeout worth
+  having would have given up on. 90 s against a worst case of 44.8 s. Set it to `0` to restore the
+  old behaviour.
+
+`spin.json` records which marker settled it in `meters_settled_by` — `null` on a losing spin
+(nothing to wait for) and on a win the game never settled, which is warned about in `run.log`.
 
 ### The events it reads
 
@@ -208,7 +249,9 @@ Every marker below was copied from real log lines and checked against history.
 | `hold_and_spin_prompt` / `hold_and_spin_started` | Hold & Spin waiting to be started, then started |
 | `wager_saver_offered` / `wager_saver_accepted` | the free re-spin offered when the balance can't cover another bet |
 | `jackpot_awarded` / `jackpot_celebration` / `progressive_level` | a progressive/jackpot award |
-| **`win`** | the collect/gamble offer is up — this is the win marker |
+| **`win`** | the collect/gamble offer is up — this is the win marker, logged at the *start* of the meter's count-up |
+| `win_bang_done` | the win meter finished counting up. 115/115 winning rounds, 6/405 losing ones |
+| `results_done` | the results display finished, so the meters have stopped moving. 519/520 rounds, win or lose — this is what the after shot waits for |
 | `take_win` / `gamble_played` | which button resolved a win |
 | `gamble_pick` / `gamble_result` / `gamble_over` | inside the double-up round: the card the player picked, the result, the end |
 | `final_grid` | the whole 15-cell grid at game over |
@@ -496,35 +539,67 @@ a row already trusted.
 
 ### It never assumes a pixel coordinate
 
-Everything is either a fraction of the image or derived from it at runtime. Two routes, in order:
+Everything is either a fraction of the image or derived from it at runtime. There are three ways to
+crop the meter strip out of a frame, and `slotocr/roi_config.py` — the one file you edit to change
+the crop — selects exactly one of them with `ROI_METHOD`:
 
-1. **A configured box** — a normalized `[x0, y0, x1, y1]` in `ROI_REGIONS["meters"]["boxes"]`, one
-   per known game layout. Adding a layout is one entry in that list and no code.
-2. **Dark-panel detection** — an HSV mask for the flat, dark UI panels a meter bar is drawn on,
-   grouped into rows, scored by how many fields each row actually resolved.
+1. **Horizontal bands** (`RoiMethod.BANDS`) — the frame cut into `BAND_COUNT` equal, full-width
+   strips numbered from the top, keeping the ones `BANDS` names: either a single band (`19`) or an
+   inclusive range (`(19, 22)`), cropped as one taller strip so the labels and their values still
+   reach Tesseract together. The default `24`/`19` is this cabinet.
+2. **A configured box** (`RoiMethod.CONFIGURED`) — a normalized `[x0, y0, x1, y1]` in
+   `CONFIGURED_BOXES`, one per known game layout. Adding a layout is one entry in that list and no
+   code.
+3. **Dark-panel detection** (`RoiMethod.DYNAMIC`) — an HSV mask for the flat, dark UI panels a
+   meter bar is drawn on, grouped into rows, scored by how many fields each row actually resolved.
 
-A box is "validated" by running the real extraction on it, so choosing one costs a full OCR pass —
-which is why the winner's results ride along on the `MeterROI` instead of being thrown away and
-recomputed. `roi_source` in each record says which route won, and it is the first thing to read
-when a value comes out wrong.
+**No method falls back to another.** The selected one either finds the meter bar or the record comes
+back with null meters saying it didn't. An earlier version ran the boxes and then raced the winner
+against dark-panel detection, which read well but meant "which pixels was this number read from?"
+could only be answered afterwards, and charged every frame for the methods that lost.
 
-Two rules there were each bought with a wrong reading, and both matter if you add a box:
+`roi_source` in each record names what ran and what it picked — `bands:19/24`,
+`config:hnpl_portrait`, `dynamic`, or `dynamic:whole-image` when detection found no row to crop to —
+and it is the first thing to read when a value comes out wrong. Compare the three over the samples
+with `--roi-method`:
+
+```powershell
+python -m server.extract.cli server/extract/Images --roi-method bands
+```
+
+Bands is the cheapest of the three (~4 s a frame against ~8 s and up to 30 s), because it is the
+only one that runs no OCR to decide anything: the band was named by hand, so it is believed. A box
+is "validated" by running the real extraction on it, which is why the winner's results ride along
+on the `MeterROI` instead of being thrown away and recomputed.
+
+**Tune a crop by reading the values, not by counting how many fields came back.** Sweeping six band
+geometries over this cabinet's five sample frames, `(32, 25)` resolved the *most* fields — 10
+against `(24, 19)`'s 7 — and was the worst of them: on `image1.png` it reported cash as
+**108900.00** where the balance is $1,089.00, and invented a win of **89.00** out of the fragment
+`",089.00"`. Three confident fields, two of them fabricated. The shipped `24/19` never disagrees
+with the configured box on any frame, and where it cannot read a meter it returns blank — which is
+the failure mode you want. A band also describes exactly *one* layout: `24/19` reads 7 of the 42
+fields across all fourteen samples where the boxes read 26, because nine of those samples are the
+`bottom_bar` layout whose meter sits in band 21.
+
+Two rules inside the box method were each bought with a wrong reading, and both matter if you add a
+box:
 
 - **The best box wins, not the first that resolved anything.** A box tuned for another layout can
   land somewhere unrelated on this screenshot and still scrape one plausible number out of it.
   Under the original first-past-the-post rule, adding this cabinet's box quietly broke four of the
   fourteen sample images that had been fine.
-- **A box that found only one value is raced against dynamic detection**, and kept only if it
-  reads at least as well. "Found a number" is not "found the meter bar". Two fields in one crop
-  is a meter bar, and a box that finds two is believed outright — which is also what keeps the
-  step fast, since WIN is blank on most before-frames and demanding all three sent every ordinary
-  pair through the full race, 27 seconds instead of two.
+- **Two fields in one crop is a meter bar**, and a box that finds two is believed outright without
+  the rest of the list being tried — which is what keeps the step fast, since WIN is blank on most
+  before-frames and demanding all three sent every ordinary pair through every box, 27 seconds
+  instead of two. One field is exactly what a *wrong* box looks like.
 
 This cabinet's box, `hnpl_portrait`, has its bottom edge at 752 px of 961 and deliberately not
 754. The meter strip is ~26 px tall; two more rows of pixels pull the bright COLLECT row into the
 crop, which moves the Otsu threshold far enough to lose the BET value entirely. Swept over
 y 722–727 × 750–756 against both frames of a real run, every combination but y1=754 reads cash and
-bet on both.
+bet on both. Band `19/24` runs to 761 px, which is the same 9 pixels of COLLECT row, and it is why
+that band loses BET on `before.png` where the box does not.
 
 ### Never take a suffix of a malformed number
 
@@ -556,7 +631,9 @@ python -m server.extract.cli server/extract/Images
 ```
 
 Read `roi_source` and the values for each. The ROI crops it saves — the exact pixels handed to
-Tesseract — are the fastest way to see why a value was wrong.
+Tesseract — are the fastest way to see why a value was wrong. Run it once per `--roi-method` after
+changing anything in `roi_config.py`: with no fallback left, a method that crops badly no longer
+gets covered for by one that doesn't.
 
 ## Deciding whether it adds up — `validate`
 
@@ -580,23 +657,46 @@ it cannot be argued with:
 Money crosses as strings. Reading it as `Decimal` and then putting it through a JSON float would
 undo the point of reading it as `Decimal`.
 
-### The agent has one tool, and the tool's answer is the one that counts
+### The model owns the verdict, and on this model it is measurably wrong
 
-The agent used to have no tools and do the arithmetic itself. Measured against the local
-qwen2.5-7b over twelve records: **5/12** with the original terse prompt, **10/12** when allowed to
-show its working, **12/12** with a tool. It dropped the `- bet` term deterministically —
-`1175.76 + 20.00 - 40.00` came back as `1195.76` every single time, which is this project's own
-sample data.
+`create_agent(llm, [])` — an agent with an empty tool list, `MAX_TOKENS` of **8**. Both records go
+to it: record 1 as `cash,win,bet`, record 2 as the after-spin cash alone. It adds, it compares,
+and it answers one word. `to_verdict` maps yes→Pass and no→Fail, comparing the first word whole
+rather than by prefix, because `startswith("no")` reads "not sure" as a confident Fail.
 
-That is worth being precise about, because it is the difference between a working tool and a
-useless one: a Fail is supposed to mean the spin's meters don't add up. A model that cannot
-subtract makes every spin a Fail and the verdict stops carrying any information. So the model does
-the part it is reliably good at — reading three numbers out of a record and deciding what to do
-with them — and the answer taken as authoritative is the tool's return value, pulled back out of
-the message history. A disagreement between the tool and the model's closing sentence is reported
-rather than resolved by guessing.
+Python still computes `cash + win - bet` in `runner.py`, but **only to draw the ledger** — that
+sum fills `computed_cash` and `difference` for the UI and never overrides the model's answer.
 
-If you change the model, re-measure before trusting it.
+**Know what this costs. Measured on the local qwen2.5-7b, 2026-08-10: 0/6** — not unreliable but
+inverted, and deterministically so at `temperature=0`:
+
+| record 1 | record 2 | truth | model said |
+|---|---|---|---|
+| `2183.65,0.00,1.00` | `2182.65` | yes | **no** (three runs) |
+| `2183.65,0.00,1.00` | `9999.99` | no | **yes** |
+| `1175.76,20.00,40.00` | `1155.76` | yes | **no** |
+| `2188.20,0.00,1.00` | `2187.20` | yes | **no** |
+
+A spin whose meters add up perfectly reports **Fail**; a pair that is nonsense reports **Pass**.
+
+The cause is structural, not a prompt bug: asking for the arithmetic *and* the judgement in one
+forced token is exactly where a small model is least reliable. The lineage, same model, all in
+`git log`:
+
+| design | who compares | score |
+|---|---|---|
+| `cash_after_spin` tool does the sum in `Decimal` | Python | **12/12** |
+| tool-less, model shows its working, parse last line | Python | **10/12** |
+| tool-less, model returns a bare number | Python | **5/12** |
+| **model answers yes/no** (current) | the model | **0/6** |
+
+Every step that moved judgement from Python to the model cost accuracy. If you need verdicts you
+can act on, walk back up that table and re-measure — and re-measure on any model change, because
+none of these numbers transfer.
+
+Until then, the guard rail is in `message`: whenever Python's sum and the model's word disagree,
+the verdict carries **"but the arithmetic disagrees with that answer"**. With the model owning the
+decision that sentence is the only warning you get, so read it.
 
 Everything else stays deliberately strict: `temperature=0`; `max_retries=0`, because the OpenAI
 SDK's default of two would turn a wedged server into three timeouts and six silent minutes; a
@@ -646,7 +746,7 @@ drops the SDK's plaintext-password line exists for exactly that.
 | | `scale` 1, `width`/`height` null, `quality` −1 | the size and compression to ask OBS for — see [the video and the resolution](#the-video-and-how-much-resolution-there-is-to-be-had) |
 | `record` | `enabled` true, `name` "spin", `start_wait_s` 10, `stop_wait_s` 20 | the video. `name` is what OBS's timestamped file is renamed to; the waits are for an output that starts and finishes lazily |
 | `target` | `process`, `window_class` | the game window |
-| `spin` | `timeout_s` 180, `after_delay_ms` 800 | the ceiling, and the settle before the after shot |
+| `spin` | `timeout_s` 180, `after_delay_ms` 800, `meter_settle_s` 90 | the ceiling, the settle before the after shot, and how long to wait for a win meter to finish counting up (`0` disables) |
 | `gamelog` | `path`, `idle_timeout_s` 8 | the game's log, and the real wait |
 | `watch` | `idle_timeout_s` 35, `quiet_s` 2, `long_wait_s` 90, `player_wait_s` 0, `after_delay_ms` 800, `tail_quiet_s` 1, `action_timeout_s` 300, `poll_interval_ms` 50, `preroll_s` 1, `milestone_shots` true, `milestone_min_gap_ms` 400 | `watch.py` only; `preroll_s: 0` turns off the standing before-frame, `player_wait_s: 0` holds a round open for as long as the game waits for the player |
 | `ideck` | `process`, `window_class`, `log`, `layout`, `button`, `actions` | `layout: null` means find it via `%CABINET_MODULE%` |
@@ -720,6 +820,9 @@ never the current working directory, so a server started from anywhere writes in
 | `<file>: cash value is not a number: None` | the OCR read that meter blank. Open the `_roi.png` beside it: a crop showing most of the screen means the configured box missed and detection took over |
 | `cannot reach http://localhost:1234/v1` | LM Studio's server is off, or on another port. Start it, or set `validate.base_url` |
 | `is up but is not serving <model>` | LM Studio is running a different model; load the configured one or change `validate.model` |
-| `the model answered without calling cash_after_spin` | the model ignored its tool — it is too small or not tuned for tool use. Try another; see [the agent](#the-agent-has-one-tool-and-the-tools-answer-is-the-one-that-counts) |
+| `model did not answer yes or no` | the reply is quoted in the message. One word is all `MAX_TOKENS = 8` allows, so this usually means the model opened with prose; see [the agent](#the-model-owns-the-verdict-and-on-this-model-it-is-measurably-wrong) |
+| `model returned reasoning but no answer` | a reasoning model spent the whole 8-token budget thinking. Use a non-reasoning model, or raise `MAX_TOKENS` |
+| `but the arithmetic disagrees with that answer` | Python's sum and the model's yes/no point different ways. **Believe the arithmetic**: the model scores 0/6 on the measured set. See [the agent](#the-model-owns-the-verdict-and-on-this-model-it-is-measurably-wrong) |
+| a `Pass` or `Fail` you don't believe | the model owns the verdict and is measurably inverted on this model. Read `computed_cash` against `expected_cash` in `validate.json` — those two are Python's and are not the model's to get wrong |
 | `a spin is already running` | one at a time: they would share one OBS instance, one record directory and one cursor |
 | `no run called <id>` | the folder was deleted, or the capture failed before writing anything — `prune_empty` removes a run folder that captured nothing |

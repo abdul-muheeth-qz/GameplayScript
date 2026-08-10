@@ -3,40 +3,55 @@ Locate the CASH/WIN/BET meter-bar region within a full screenshot, so the
 rest of the pipeline (and every OCR call) can operate on a small crop
 instead of the whole, visually busy image.
 
-Two strategies:
+Three methods, and `roi_config.ROI_METHOD` selects exactly one:
 
-  1. CONFIGURED REGION (slotocr.config.ROI_REGIONS["meters"]) — a
-     normalized [x0, y0, x1, y1] box (fractions of width/height). Exact,
-     and works well across screenshots that share the same UI layout/aspect
-     ratio. Tried first because, when it applies, it's more reliable than
-     guessing — note that "does this box apply?" is answered by running the
-     real extraction on it, so a configured box costs a full extraction to
-     validate. When one matches, its results ride along on the returned
-     MeterROI so the pipeline doesn't repeat that work.
+  1. HORIZONTAL BANDS (RoiMethod.BANDS) — the frame cut into
+     `roi_config.BAND_COUNT` equal horizontal strips, of which
+     `roi_config.BANDS` are kept. Hand-specified, therefore believed: no OCR
+     runs to decide anything, which makes this the cheapest of the three —
+     the pipeline's own extraction of the crop is the only one that happens.
 
-  2. DYNAMIC DETECTION (color/contour-based panel detection) — no fixed
-     coordinates, just "what does this screenshot's UI actually look like".
+  2. CONFIGURED BOX (RoiMethod.CONFIGURED) — a normalized [x0, y0, x1, y1]
+     box per known game layout (`roi_config.CONFIGURED_BOXES`). Exact, and
+     works across screenshots that share a layout. "Does this box apply?" is
+     answered by running the real extraction on it, so each candidate costs a
+     full extraction to validate; the winner's results ride along on the
+     returned MeterROI so the pipeline doesn't repeat that work.
 
-The order between them is not simply "config, then dynamic if it found
-nothing". A box that found *one* value has not necessarily found the meter
-bar — boxes describe several different games' layouts, and one aimed at
-another layout can land somewhere unrelated on this screenshot and still
-scrape a plausible number out of it. So a box is believed outright once it
-clears CONFIDENT_FIELDS, and otherwise has to beat dynamic detection on the
-same measure: how many meter fields the crop actually yields.
+  3. DYNAMIC DETECTION (RoiMethod.DYNAMIC) — no fixed coordinates at all,
+     just "what does this screenshot's UI actually look like": OpenCV finds
+     the flat dark panel rows, and both extraction methods vote on which row
+     is really the meter bar.
+
+**There is no fallback between the three.** An earlier version tried the
+configured boxes and then raced the winner against dynamic detection,
+switching methods mid-image on a field count. It read well, but it made "which
+pixels was this number read from?" a question only `roi_source` could answer
+after the fact, and it charged every ordinary frame for the losing methods.
+The method is now chosen up front, and a crop that misses the meter bar shows
+up as null meters rather than being quietly rescued.
+
+The multi-box race *within* method 2 is not a fallback and stays: those boxes
+describe alternative layouts of the same thing, and picking between them is
+what method 2 is.
 
 This module sits ABOVE panel_detection and extraction (it imports both),
 which is why it's a separate module rather than living in panel_detection
 — extraction.py already depends on panel_detection.py, so putting this
 here avoids a circular import while still letting us reuse the proven
 label-matching logic from both extraction methods (rather than
-re-implementing a weaker one-off label check).
+re-implementing a weaker one-off check).
 """
+import logging
 from typing import NamedTuple, Optional
 
-from .config import ROI_REGIONS
+from .roi_config import (BAND_COUNT, BANDS, CONFIDENT_FIELDS, CONFIGURED_BOXES,
+                         DYNAMIC_MIN_PAD_Y, DYNAMIC_PAD_FRAC_X, DYNAMIC_PAD_FRAC_Y,
+                         ROI_METHOD, RoiMethod)
 from .panel_detection import detect_dark_panels, group_panels_into_rows
 from .extraction import extract_all
+
+LOG = logging.getLogger("extract")
 
 
 class MeterROI(NamedTuple):
@@ -44,11 +59,13 @@ class MeterROI(NamedTuple):
     know them) the extraction results for that exact crop.
 
     `extracted` is the (cell_results, word_results, currency_tokens) triple
-    from extraction.extract_all when the ROI was chosen by *validating* a
-    configured box — i.e. we already ran both methods on these very pixels,
-    so the pipeline should reuse the answer rather than pay for it twice.
-    It is None when the ROI came from anywhere else and no such results
-    exist for this crop.
+    from extraction.extract_all when the method already ran both extraction
+    methods on these very pixels to *choose* this crop — i.e. the configured
+    box race. The pipeline should reuse that answer rather than pay for it
+    twice. It is None for the methods that need no OCR to decide (bands) or
+    that ran their OCR against different pixels (dynamic detection scores
+    rows on the full screenshot, so those results say nothing about the crop
+    it returns).
     """
     image: object
     source: str
@@ -69,28 +86,73 @@ def crop_normalized_box(image, box):
     return image[y0:y1, x0:x1]
 
 
-# How many fields a configured box has to resolve before it is believed outright.
-#
-# Not "all of them": WIN is genuinely blank on most before-frames, so a box that has
-# found the meter bar perfectly still comes back with two. Requiring three meant every
-# ordinary frame went on to run the dynamic race as well -- two more extractions, one
-# of them over the whole screenshot -- and took 27 s a pair instead of 3.
-#
-# Two is the line because one is exactly what a *wrong* box looks like: a box tuned for
-# another game's layout lands somewhere unrelated and scrapes a single plausible number
-# out of it. Two fields in one crop is a meter bar.
-CONFIDENT_FIELDS = 2
-
-
 def _fields_resolved(extracted):
     """How many distinct meter fields a (cell, word, tokens) triple resolved."""
     cell_results, word_results, _ = extracted
     return len(set(cell_results) | set(word_results))
 
 
-def _locate_meter_roi_from_config(image, region_key="meters"):
-    """Try every configured candidate box for `region_key` (see the "boxes"
-    list in slotocr.config.ROI_REGIONS) and keep the one that reads best.
+# ---------------------------------------------------------------------------
+# Method 1 -- horizontal bands
+# ---------------------------------------------------------------------------
+
+def normalize_bands(bands, count):
+    """`roi_config.BANDS` as an inclusive (first, last) pair, whichever of its
+    two shapes it was written in, checked against `count`.
+
+    A band outside 1..count is a typo in a hand-edited constant, and the
+    failure it would otherwise cause is silent: crop_normalized_box clamps to
+    the image, so BANDS = 25 of 24 would crop the bottom row of pixels and
+    every meter would read blank with nothing to say why. Name the constant to
+    fix instead.
+    """
+    first, last = (bands, bands) if isinstance(bands, int) else tuple(bands)
+    if count < 1:
+        raise ValueError(f"roi_config.BAND_COUNT is {count!r}; it must be at least 1")
+    if not 1 <= first <= last <= count:
+        raise ValueError(
+            f"roi_config.BANDS is {bands!r}, which is not a band or a range of "
+            f"consecutive bands within 1..{count} (roi_config.BAND_COUNT). Bands are "
+            f"numbered from 1 at the top of the frame, and a range is an inclusive "
+            f"(first, last) pair")
+    return first, last
+
+
+def crop_horizontal_bands(image, count, first, last):
+    """Crop `image` to bands `first`..`last` (inclusive, 1-based) of `count`
+    equal, full-width horizontal strips.
+
+    Expressed as a normalized box and cropped by the same code as a configured
+    box, so a band and a box cannot round to different pixels for the same
+    edge. The edges come from the fractions rather than from a per-band pixel
+    height, which is what keeps band N's top edge exactly on band N-1's bottom
+    edge when `count` does not divide the height evenly.
+    """
+    return crop_normalized_box(image, [0.0, (first - 1) / count, 1.0, last / count])
+
+
+def _locate_meter_roi_bands(image, count=BAND_COUNT, bands=BANDS):
+    """Crop to the configured horizontal band(s). No OCR, no scoring: the
+    band was named by hand, so it is what gets used."""
+    first, last = normalize_bands(bands, count)
+    label = f"{first}" if first == last else f"{first}-{last}"
+    crop = crop_horizontal_bands(image, count, first, last)
+    if crop is None or crop.size == 0:
+        h_img, w_img = image.shape[:2]
+        raise ValueError(
+            f"band {label} of {count} is empty on a {w_img}x{h_img} frame -- {count} "
+            f"bands over {h_img} px rounds to less than a pixel each; lower "
+            f"roi_config.BAND_COUNT")
+    return MeterROI(crop, f"bands:{label}/{count}")
+
+
+# ---------------------------------------------------------------------------
+# Method 2 -- configured boxes
+# ---------------------------------------------------------------------------
+
+def _locate_meter_roi_from_config(image):
+    """Try the candidate boxes in `roi_config.CONFIGURED_BOXES` and keep the
+    one that reads best.
 
     Validating a box means running both extraction methods on it and seeing
     what they resolved — so validation is NOT cheap, it is the whole
@@ -108,13 +170,18 @@ def _locate_meter_roi_from_config(image, region_key="meters"):
     preference order, and the search stops as soon as a box clears
     CONFIDENT_FIELDS rather than paying for the rest of the list.
 
-    Returns the winning MeterROI, or None if no box resolved anything."""
-    region = ROI_REGIONS.get(region_key)
-    if not region:
-        return None
+    With no dynamic detection behind it any more, a run where NO box resolved
+    a single field still has to return pixels. It returns the first usable
+    box's crop — the head of that preference order — and warns, so the record
+    names the box that was actually handed to Tesseract instead of reporting
+    a whole-image read the caller never asked for.
+    """
     best = None
-    best_score = 0
-    for candidate in region.get("boxes", []):
+    # -1, not 0, so the first usable candidate always becomes `best`: a box that
+    # resolved nothing is still the crop this method chose, and returning None
+    # here would leave the pipeline with no image at all.
+    best_score = -1
+    for candidate in CONFIGURED_BOXES:
         crop = crop_normalized_box(image, candidate["box"])
         if crop is None or crop.size == 0:
             continue
@@ -125,10 +192,24 @@ def _locate_meter_roi_from_config(image, region_key="meters"):
             best, best_score = MeterROI(crop, f"config:{label}", extracted), score
         if best_score >= CONFIDENT_FIELDS:
             break
+    if best is None:
+        raise ValueError(
+            "no box in roi_config.CONFIGURED_BOXES could be cropped from this frame -- "
+            "the list is empty, or every box in it is inverted or off the image")
+    if best_score == 0:
+        LOG.warning("no configured ROI box resolved a meter field; using %s anyway "
+                    "(roi_config.ROI_METHOD is CONFIGURED, which has no fallback). Add a "
+                    "box for this layout, or try RoiMethod.DYNAMIC on it", best.source)
     return best
 
 
-def _locate_meter_roi_dynamic(image, pad_frac_x=0.03, pad_frac_y=0.6, min_pad_y=40):
+# ---------------------------------------------------------------------------
+# Method 3 -- dynamic detection
+# ---------------------------------------------------------------------------
+
+def _locate_meter_roi_dynamic(image, pad_frac_x=DYNAMIC_PAD_FRAC_X,
+                              pad_frac_y=DYNAMIC_PAD_FRAC_Y,
+                              min_pad_y=DYNAMIC_MIN_PAD_Y):
     """Find which detected panel-row is most likely the CASH/WIN/BET meter
     bar, and return a CROPPED sub-image covering just that region.
 
@@ -145,12 +226,15 @@ def _locate_meter_roi_dynamic(image, pad_frac_x=0.03, pad_frac_y=0.6, min_pad_y=
     ran against the FULL image, whereas the pipeline needs results for the
     returned CROP, so those results are not reusable downstream.
 
-    Falls back to returning the original, uncropped image (source "none")
-    if no row confidently looks like a meter bar, so nothing is ever lost.
+    When no row confidently looks like a meter bar it returns the original,
+    uncropped image, with source "dynamic:whole-image" so that shows up in the
+    record. That is not a fallback to another method — it is this method
+    reporting that it found nothing to crop to, while still handing the
+    pipeline's own whole-image OCR pass something to work with.
     """
     h_img, w_img = image.shape[:2]
     rows = group_panels_into_rows(detect_dark_panels(image))
-    whole_image = MeterROI(image, "none")
+    whole_image = MeterROI(image, "dynamic:whole-image")
     if not rows:
         return whole_image
 
@@ -175,8 +259,8 @@ def _locate_meter_roi_dynamic(image, pad_frac_x=0.03, pad_frac_y=0.6, min_pad_y=
     best_row_id = max(row_scores, key=row_scores.get)
     if row_scores[best_row_id] == 0:
         # No row produced a single confident field match anywhere — hand
-        # back the whole image so downstream fallback methods still get a
-        # chance, rather than silently cropping to nothing useful.
+        # back the whole image so the pipeline's own whole-image fallback
+        # still gets a chance, rather than silently cropping to nothing useful.
         return whole_image
 
     best_row = rows[best_row_id]
@@ -199,33 +283,37 @@ def _locate_meter_roi_dynamic(image, pad_frac_x=0.03, pad_frac_y=0.6, min_pad_y=
     return MeterROI(roi, "dynamic")
 
 
-def locate_meter_roi(image, region_key="meters"):
-    """Top-level ROI locator: the configured region's candidate boxes, dynamic
-    color-based detection, and the whole image as an absolute last resort.
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+# One entry per RoiMethod member. Adding a fourth cropping method is a member
+# on the enum, a _locate_meter_roi_* function and a line here -- nothing in the
+# pipeline changes, because roi_source is a string it only passes through.
+_METHODS = {
+    RoiMethod.BANDS: _locate_meter_roi_bands,
+    RoiMethod.CONFIGURED: _locate_meter_roi_from_config,
+    RoiMethod.DYNAMIC: _locate_meter_roi_dynamic,
+}
 
-    A configured box that resolved CONFIDENT_FIELDS or more is taken immediately
-    -- it is exact, it is cheap, and its extraction results are reusable. One
-    that found a single lonely value is raced against dynamic detection and only
-    kept if it reads at least as well, because "this box found a number" is not
-    the same as "this box found the meter bar": a box tuned for another game's
-    layout can land somewhere unrelated and still scrape one plausible value out
-    of it. Ties go to the configured box, which is the more repeatable of the two.
 
-    Returns a MeterROI whose `source` is "config:<label>" (naming which
-    configured box matched), "dynamic", or "none"."""
-    from_config = _locate_meter_roi_from_config(image, region_key)
-    if from_config is not None and _fields_resolved(from_config.extracted) >= CONFIDENT_FIELDS:
-        return from_config
+def locate_meter_roi(image, method=None):
+    """Crop `image` to the meter bar using exactly one method: `method` when
+    given (a RoiMethod or its string value), otherwise `roi_config.ROI_METHOD`.
 
-    dynamic = _locate_meter_roi_dynamic(image)
-    if from_config is None:
-        return dynamic
+    No method backs up another. The selected one either finds the meter bar or
+    the record says it didn't.
 
-    # _locate_meter_roi_dynamic extracted against the FULL image to choose a
-    # row, so those results say nothing about the crop it returned. Re-extract
-    # on the crop itself -- that is the comparison that matters, and it is the
-    # work the pipeline would have done next anyway, so it rides along.
-    dynamic_extracted = extract_all(dynamic.image)
-    if _fields_resolved(dynamic_extracted) > _fields_resolved(from_config.extracted):
-        return MeterROI(dynamic.image, dynamic.source, dynamic_extracted)
-    return from_config
+    Returns a MeterROI whose `source` names what ran and what it chose:
+    "bands:<first>[-<last>]/<count>", "config:<label>", "dynamic", or
+    "dynamic:whole-image".
+    """
+    try:
+        selected = RoiMethod(ROI_METHOD if method is None else method)
+    except ValueError:
+        # A bad string from the CLI or (later) config.json. argparse `choices`
+        # catches the CLI case first; this is the one that reaches a caller
+        # passing the value straight through.
+        raise ValueError(
+            f"{method!r} is not an ROI cropping method; roi_config.RoiMethod has "
+            f"{', '.join(repr(m.value) for m in RoiMethod)}") from None
+    return _METHODS[selected](image)

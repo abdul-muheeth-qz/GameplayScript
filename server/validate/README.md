@@ -26,9 +26,15 @@ argued with. The old `data/before_spin.json` layout still works and is kept as a
 Two things changed for a measured reason, both written up in the root
 [README](../README.md#deciding-whether-it-adds-up--validate):
 
-- **The agent has a tool now.** Doing the arithmetic itself, the local qwen2.5-7b scored 5/12 on
-  measured records and dropped the `- bet` term deterministically — including on the sample data
-  in `data/`. With the tool it is 12/12, and the tool's return value is what the verdict uses.
+- **The agent has no tools and the model owns the verdict.** It gets both records, adds, compares
+  and answers one word. Python's `cash + win - bet` fills the ledger for the UI but never
+  overrides that answer. This has a measured cost, and it is severe: on the local qwen2.5-7b,
+  **0/6** — inverted, deterministically, so a spin that adds up perfectly reports Fail and a
+  nonsense pair reports Pass. The lineage on the same model, all in `git log`: 12/12 with a
+  `cash_after_spin` tool, 10/12 tool-less showing its working, 5/12 tool-less returning a number
+  with Python comparing, 0/6 here. The root [README](../README.md#the-model-owns-the-verdict-and-on-this-model-it-is-measurably-wrong)
+  has the table. Whenever Python's sum and the model's word disagree, `message` says so — that
+  note is the only warning a verdict was reached wrongly.
 - **A blank WIN meter is taken as 0.00.** That is the correct reading of an empty meter and what
   most before-frames look like; erroring on it meant an ordinary spin could never be validated.
   Cash and bet get no such treatment. Whatever was assumed comes back in `inferred`.

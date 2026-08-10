@@ -141,6 +141,7 @@ run holds every stage's output, and its name is the run id:
 ```
 captured_files/<run_id>/
     before.png  after.png  spin.json  run.log  spin.mp4     capture
+      (spin.json's `meters_settled_by` says which marker released the after shot)
     extract/before.json  extract/after.json  *_roi.png       extract
     validate.json                                            validate
 ```
@@ -202,6 +203,10 @@ holds the handle open, so the directory timestamp lies.
   timeout was tried and cut a Hold & Spin off mid-feature.
 - `spin.timeout_s` (180 s) is only a backstop. `spin.after_delay_ms` (800) is the sole deliberate
   sleep, letting the last frame settle before the after shot.
+- `spin.meter_settle_s` (90 s) is the **second** wait, and only after a `win` — see below. It is a
+  flat bound rather than a restarting idle timeout, and that is deliberate: it waits for one
+  specific marker measured to arrive within 44.8 s, and the log went silent for 43.8 s inside one
+  of those waits.
 - `watcher.mark()` must happen *before* the press, or an event landing during the press is lost.
 - The one wait that is *not* a fixed delay in disguise: `Recording` waits for OBS to actually be
   writing frames before the run continues. `StartRecord` answers instantly and the output went
@@ -223,6 +228,38 @@ belongs in `settle()` as a deadline, not a `time.sleep`.
 
 A win parks the game on the collect/gamble offer and it does **not** log `game_over` until the next
 press resolves it — a press this script never makes. So `win` must stay in `TERMINAL`.
+
+But `win` is where the spin *ends*, not where the screen *stops changing*: it is logged at the start
+of the win meter's count-up. `gamelog.SETTLED` (`win_bang_done`, `results_done`) is the other end,
+and `spin.await_meters` waits for it after a `win` before the after shot. Measured over 520 rounds
+in both logs: `win` → `results_done` is 0.33 s median, 6.3 s p90, **44.8 s worst**, so 28% of
+winning spins landed outside `after_delay_ms` — run `2026-08-10_163826` recorded a win of **1.49**
+on a spin that paid **12.00**. Don't "fix" this by raising `after_delay_ms`; that sleeps 45 s on
+every spin and still guarantees nothing.
+
+Three things here are load-bearing:
+
+- **A loss needs none of it.** `game_over` already lands after `results_done` (0.17 s median,
+  404/404 losing rounds), so `await_meters` runs only when `terminal == "win"`. Don't extend it to
+  the `game_over` path.
+- **`results_done` is the one that answers both cases**, which is why `SETTLED` has two entries.
+  `win_bang_done` fires on 115/115 winning rounds but only 6/405 losing ones; `results_done` fires
+  on 519/520 either way, and never earlier than `win_bang_done` (0–18 ms after it).
+- **`win_bang_done` sits *below* `idle_state` in `EVENTS`**, the one rule in that list placed for
+  its position rather than its specificity. 125 of the 126 matching lines collide with nothing, but
+  one was `IdleStateMachine transitioned from [stateBangup] to [stateDisabled] on event
+  [WinBangDone]` — matching that first would hide an idle transition from `current_state()`, which
+  is the thing that list must never do. That line reads as `idle_state` and the event is missed on
+  it; nothing breaks, because `results_done` is what the wait actually stops on. The pattern is
+  `\[WinBangDone\]` and not `WinBangDone` so it stays off the 181 `[FreeSpinWinBangDone_*]` lines,
+  which are one count-up per free spin inside a feature.
+
+`gamelog.GameLogWatcher._pending` exists for this and must not be inlined back into `poll`. One
+read of the log parses a *batch* while the byte offset advances past all of it, so a caller that
+`break`s part-way through a batch used to lose the remainder — and `win` and `results_done` are
+43 ms apart at their closest, well inside one 50 ms poll, which makes the settle marker the single
+most likely thing to be in the discarded remainder. Verified both ways with all four events written
+in one append: the buffer finds it, the old code waited out the full timeout and found nothing.
 
 `watch.py` is the exception and has its own `actions.ROUND_OVER = ("game_over",)`, because it is
 watching the person who is about to make that press: waiting for `game_over` is what keeps a spin
@@ -336,33 +373,73 @@ the two halves disagreed before they were joined. Renaming a key here is the sin
 change, because everything downstream iterates that dict. The lists beside the keys are OCR
 *synonyms* — what Tesseract might have read off the screen — so `BALANCE` stays in the list.
 
-### The ROI box, and why picking one is not first-past-the-post
+### Three ways to crop the ROI, one selected, no fallback
 
-`ROI_REGIONS["meters"]["boxes"]` is a list of normalized `[x0, y0, x1, y1]` boxes, one per game
-layout, tried against every screenshot. Two rules there were each bought with a wrong reading:
+Everything about *locating* the meter strip is in `slotocr/roi_config.py` — that file is the only
+one a person edits to change the crop, and `slotocr/config.py` is the constants for *reading* it.
+`ROI_METHOD` names one of three methods and that is the one that runs:
+
+| `RoiMethod` | What it crops | Cost per frame |
+|---|---|---|
+| `BANDS` | the frame cut into `BAND_COUNT` full-width horizontal strips, keeping `BANDS` (an int, or an inclusive `(first, last)` pair) | ~4 s — no OCR to decide anything |
+| `CONFIGURED` | the best of the normalized `[x0, y0, x1, y1]` boxes in `CONFIGURED_BOXES`, one per game layout | ~8 s — each candidate costs a full extraction to validate |
+| `DYNAMIC` | whatever OpenCV dark-panel detection finds, with both extraction methods voting on which row is the meter bar | up to 30 s — one extraction over the whole screenshot on top of the crop's |
+
+**There is no fallback between them**, and that is the point: the earlier version tried the boxes
+and then raced the winner against dynamic detection, which made "which pixels was this number read
+from?" a question only `roi_source` could answer afterwards, and charged every frame for the losing
+methods. A crop that misses the meter bar now shows up as null meters. The multi-box race *inside*
+`CONFIGURED` is not a fallback and stays — those boxes are alternative layouts of the same thing,
+and choosing between them is what that method *is*.
+
+`locate_meter_roi(image, method=None)` dispatches through `roi._METHODS`, which is keyed by every
+`RoiMethod` member; `process_image`/`extract_frames` take `roi_method` so the CLI can override it
+(`--roi-method bands`) and so config.json and the UI can later. `roi_source` in each record names
+what ran and what it chose: `bands:19/24`, `config:hnpl_portrait`, `dynamic`, or
+`dynamic:whole-image` (dynamic detection found no row to crop to — that name replaced a bare
+`"none"`, which said nothing about why).
+
+**Tune a crop on the values, never on how many fields it resolved.** Sweeping six band geometries
+over this cabinet's five frames in `Images/`, `(32, 25)` scored the *most* fields — 10 against
+`(24, 19)`'s 7 — and was the worst of them: on `image1.png` it read cash as **108900.00** where the
+balance is $1,089.00, and invented a win of **89.00** out of the fragment `",089.00"`. Three
+confident fields, two fabricated. The shipped `24/19` never disagrees with the configured box on
+any frame; where it can't read a meter it comes back blank, which is the failure you want. Note
+also that a band is right for *one* layout — `24/19` scores 7 of 42 across all fourteen samples
+against the boxes' 26, because nine of them are the `bottom_bar` layout whose meter is band 21.
+
+Two rules inside `CONFIGURED` were each bought with a wrong reading:
 
 - **The best box wins, not the first that resolved anything** (`roi._locate_meter_roi_from_config`).
   A box aimed at another layout can land somewhere unrelated on this screenshot and still scrape
   one plausible number out of it. Under the original first-past-the-post rule, adding a box for
   this cabinet silently degraded four of the sample images that were fine before it.
-- **A box that found only one value is raced against dynamic detection** (`roi.locate_meter_roi`),
-  and only kept if it reads at least as well. "This box found a number" is not "this box found
-  the meter bar".
+- **`best_score` starts at −1, not 0**, so the first usable box always becomes the winner. With
+  nothing behind this method any more, a frame where no box resolved a single field still has to
+  return pixels; it returns the head of the preference order and warns, rather than reporting a
+  whole-image read nobody asked for.
 
 `CONFIDENT_FIELDS` is **2**, not 3, and that is a performance decision as much as a correctness
 one. WIN is genuinely blank on most before-frames, so a box that found the meter bar perfectly
-still comes back with two fields; requiring three meant every ordinary frame went on to run the
-dynamic race as well — two more extractions, one of them over the whole screenshot — and the
-`/api/extract` call took **27 s** a pair instead of ~2 s. Two is also the right line on
-correctness, because one is exactly what a *wrong* box looks like.
+still comes back with two fields; requiring three meant every ordinary frame went on to try every
+remaining box as well, and the `/api/extract` call took **27 s** a pair instead of ~2 s. Two is
+also the right line on correctness, because one is exactly what a *wrong* box looks like.
 
 `hnpl_portrait` is this cabinet's box, and its bottom edge is 752 px of 961 and deliberately not
 754: the meter strip is only ~26 px tall, and two more rows of pixels pull the bright COLLECT row
 into the crop, which moves the Otsu threshold far enough to lose the BET value entirely. It was
 swept over y 722–727 × 750–756 against both frames of a real run; every combination but y1=754
-reads cash and bet on both. Re-run `python -m server.extract.cli server/extract/Images` after touching any of
-this — the fourteen samples there are the regression suite, and `roi_source` in each record says
-which route won.
+reads cash and bet on both. (That same edge is why band `19/24`, which runs to 761 px, loses BET on
+`before.png`.) Re-run `python -m server.extract.cli server/extract/Images` after touching any of
+this — the fourteen samples there are the regression suite — and re-run it once per method, because
+no method covers for another any more.
+
+Band edges come from the *fractions*, not from a per-band pixel height (`roi.crop_horizontal_bands`
+builds a normalized box and hands it to the same `crop_normalized_box` a configured box uses). That
+is what keeps band N's top edge exactly on band N−1's bottom edge when the count doesn't divide the
+height evenly: 24 bands over 961 px are 40 and 41 px tall and sum to exactly 961. A band outside
+`1..BAND_COUNT` raises and names the constant to fix, because `crop_normalized_box` clamps — `BANDS
+= 25` of 24 would otherwise quietly crop the bottom row of pixels and read every meter blank.
 
 ### Reading order breaks ties on a single-line meter bar
 
@@ -391,19 +468,42 @@ was started rather than beside the frames they came from.
 
 ## Validate
 
-### The agent has a tool, and the tool's answer is the one that counts
+### The model owns the verdict — and on this model it is measurably wrong
 
-The agent used to have no tools and add the numbers itself. Measured against the local qwen2.5-7b
-over twelve records, that got 5/12 right with the original terse prompt and 10/12 when allowed to
-show its working; it dropped the `- bet` term deterministically, turning the project's own sample
-data into a Fail every single time. With `cash_after_spin` it is 12/12, and the tool arguments
-were parsed correctly from the record in all twelve.
+`create_agent(llm, [])`, `MAX_TOKENS = 8`. Both records go to the model, it adds, it compares, and
+it answers one word; `to_verdict` maps yes→pass and no→fail. Python's `cash + win - bet` in
+`runner.py` is **display only** — it fills `computed_cash`/`difference` for the UI ledger and
+never overrides the answer. This is a deliberate choice; don't "fix" it back without being asked.
 
-That distinction is the whole point of the stage: a Fail is supposed to mean the spin's meters
-don't add up. A model that cannot subtract makes every spin a Fail and the verdict carries no
-information at all. So `compute_cash` takes the **tool's return value** out of the message
-history as the answer, and treats a disagreement with the model's closing sentence as an error
-rather than picking one. Keep it that way; if you change the model, re-measure before trusting it.
+**Measured on the local qwen2.5-7b, 2026-08-10: 0/6.** Not merely unreliable — inverted, and
+deterministically so at `temperature=0`:
+
+| record 1 | record 2 | truth | model said |
+|---|---|---|---|
+| `2183.65,0.00,1.00` | `2182.65` | yes | **no** (×3 runs) |
+| `2183.65,0.00,1.00` | `9999.99` | no | **yes** |
+| `1175.76,20.00,40.00` | `1155.76` | yes | **no** |
+| `2188.20,0.00,1.00` | `2187.20` | yes | **no** |
+
+So a passing spin reports Fail and a nonsense pair reports Pass. Reproduce with
+`agent.ask(record_1, record_2, cfg)` directly — that is the fastest way to tell a prompt change
+from a wiring change.
+
+Why it is this bad: folding the comparison in puts the arithmetic *and* the judgement in one
+forced token, which is where a small model is least reliable. The lineage, all against the same
+model and all in `git log`: **12/12** with a `cash_after_spin` tool doing the sum in `Decimal`;
+**10/12** tool-less but allowed to show its working; **5/12** tool-less returning a bare number
+with Python comparing; **0/6** here. Every step that moved judgement from Python to the model cost
+accuracy.
+
+Two consequences to preserve. `runner.py` appends **"but the arithmetic disagrees with that
+answer"** to `message` whenever Python's sum and the model's word point different ways — with the
+model owning the verdict that note is the only signal a verdict was reached wrongly, so don't drop
+it. And `agent.to_verdict` compares the **first word whole**, never `startswith("no")`, which read
+"not sure" and "none of them" as a confident Fail.
+
+If you need trustworthy verdicts, go back up that table and re-measure. Re-measure on any model
+change too — none of these numbers transfer.
 
 Everything the original was careful about still stands and should not be relaxed: `temperature=0`,
 `max_retries=0` (the OpenAI SDK's default of two would turn a wedged server into six silent
