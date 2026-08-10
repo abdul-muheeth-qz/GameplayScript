@@ -1,0 +1,23 @@
+[
+  {
+    "image": "Screenshot 2026-08-04 120407 2.png",
+    "cash": {
+      "value": 1155.76,
+      "rawtext": "$1,155.76",
+      "confidence": 89.0,
+      "label_matched": "CASH"
+    },
+    "win": {
+      "value": 40.0,
+      "rawtext": "$40.00",
+      "confidence": 60.0,
+      "label_matched": "WIN"
+    },
+    "bet": {
+      "value": 40.0,
+      "rawtext": "$40.00",
+      "confidence": 95.0,
+      "label_matched": "BET"
+    }
+  }
+]

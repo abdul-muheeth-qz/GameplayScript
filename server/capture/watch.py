@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Watch someone play, and capture a folder per round.
 
-    python watch.py                # watch until Ctrl-C
-    python watch.py --dry-run      # check everything, shoot one frame, press nothing, exit
-    python watch.py --duration 900 --max-rounds 40
+    python -m capture.watch              # watch until Ctrl-C
+    python -m capture.watch --dry-run    # check everything, shoot one frame, press nothing, exit
+    python -m capture.watch --duration 900 --max-rounds 40
 
 This presses nothing. A person plays the cabinet by hand -- spins, changes the denomination,
 collects, gambles, starts a Hold & Spin, sits through a bonus -- and this notices each of those
@@ -63,14 +63,11 @@ import sys
 import time
 from datetime import datetime
 
-import actions
-import gamelog
-import ideck
-import spin
-import winfocus
-from obs_client import ObsError
+from ..settings import ROOT
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from . import actions, gamelog, ideck, spin, winfocus
+from .obs_client import ObsError
+
 LOG = logging.getLogger("watch")
 
 # How long a capture failure is left alone before the game window is looked up again. A
@@ -81,7 +78,7 @@ REACQUIRE_EVERY_S = 15.0
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="watch.py", description=__doc__.split("\n")[0],
+        prog="python -m capture.watch", description=__doc__.split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true",
                         help="check everything and save one screenshot, then exit")
@@ -92,7 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-milestones", action="store_true",
                         help="one frame at each end of a round instead of one per milestone")
     parser.add_argument("--out", help="base folder that run folders are created in")
-    parser.add_argument("--config", default=os.path.join(HERE, "config.json"))
+    parser.add_argument("--config", default=None,
+                        help="path to config.json (default: the one at the repo root)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="debug logging (always written to run.log regardless)")
     return parser
@@ -561,7 +559,8 @@ def run(args) -> int:
     try:
         cfg = spin.load_config(args.config)
     except (OSError, ValueError) as exc:
-        print(f"error: cannot read config {args.config}: {exc}", file=sys.stderr)
+        print(f"error: cannot read config {args.config or spin.DEFAULT_CONFIG}: {exc}",
+              file=sys.stderr)
         return spin.EXIT_ERROR
 
     obs_cfg = cfg.get("obs", {})
@@ -575,7 +574,7 @@ def run(args) -> int:
     img_format = capture_cfg.get("format", "png")
     base_out = args.out or cfg.get("output", {}).get("dir", "captures")
     if not os.path.isabs(base_out):
-        base_out = os.path.join(HERE, base_out)
+        base_out = os.path.join(ROOT, base_out)
 
     suffix = "_dryrun" if args.dry_run else ""
     run_dir = os.path.join(base_out,

@@ -40,7 +40,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-import gamelog
+from . import gamelog
 
 # Events that mean a person did something. Reaching one of these while nothing is being followed
 # opens an action. Deliberately not "any event at all": the game logs state transitions and deck

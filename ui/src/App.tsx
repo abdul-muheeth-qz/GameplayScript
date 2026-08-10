@@ -1,0 +1,229 @@
+import { useCallback, useEffect, useState } from "react"
+import { AlertCircle, RotateCcw } from "lucide-react"
+
+import { api, type Health, type RunState } from "@/lib/api"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
+import { FramePanel } from "@/components/FramePanel"
+import { HealthStrip } from "@/components/HealthStrip"
+import { LedgerVerdict } from "@/components/LedgerVerdict"
+import { MeterReadout } from "@/components/MeterReadout"
+import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
+
+type Stage = "capture" | "extract" | "validate"
+
+export default function App() {
+  const [run, setRun] = useState<RunState | null>(null)
+  const [health, setHealth] = useState<Health | null>(null)
+  const [busy, setBusy] = useState<Stage | null>(null)
+  const [failed, setFailed] = useState<Stage | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const refreshHealth = useCallback(() => {
+    api.health().then(setHealth).catch(() => setHealth(null))
+  }, [])
+
+  useEffect(refreshHealth, [refreshHealth])
+
+  // A run id in the address bar survives a reload, and makes a run linkable -- the
+  // server keeps no session, so an id is all it takes to get the whole state back.
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("run")
+    if (id) api.run(id).then(setRun).catch(() => undefined)
+  }, [])
+
+  function remember(state: RunState) {
+    setRun(state)
+    const url = new URL(window.location.href)
+    url.searchParams.set("run", state.run_id)
+    window.history.replaceState(null, "", url)
+  }
+
+  async function step(stage: Stage, call: () => Promise<RunState>) {
+    setBusy(stage)
+    setFailed(null)
+    setError(null)
+    try {
+      remember(await call())
+    } catch (exc) {
+      setFailed(stage)
+      setError(exc instanceof Error ? exc.message : String(exc))
+      if (stage === "capture") refreshHealth()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  function reset() {
+    setRun(null)
+    setError(null)
+    setFailed(null)
+    const url = new URL(window.location.href)
+    url.searchParams.delete("run")
+    window.history.replaceState(null, "", url)
+    refreshHealth()
+  }
+
+  function statusOf(stage: Stage, unlocked: boolean, done: boolean): StepStatus {
+    if (busy === stage) return "running"
+    if (failed === stage) return "failed"
+    if (done) return "done"
+    return unlocked && !busy ? "ready" : "locked"
+  }
+
+  const captured = Boolean(run?.frames.before && run?.frames.after)
+  const extracted = Boolean(run?.extraction)
+  const validated = Boolean(run?.validation)
+
+  const steps: Step[] = [
+    {
+      ordinal: "01",
+      name: "Capture",
+      blurb: "Opens OBS, presses Repeat Bet on the i-Deck, and shoots a frame either side of the spin.",
+      action: busy === "capture" ? "Spinning…" : "Start",
+      status: statusOf("capture", true, captured),
+      detail: run?.spin && (
+        <dl className="space-y-1">
+          <Detail term="Outcome" value={run.spin.outcome} />
+          <Detail
+            term="Took"
+            value={run.spin.measured_s === null ? null : `${run.spin.measured_s}s`}
+          />
+          <Detail term="Ended on" value={run.spin.terminal_event ?? "a timeout"} />
+          <Detail term="Pressed" value={run.spin.button} />
+        </dl>
+      ),
+      onRun: () => step("capture", () => api.capture()),
+    },
+    {
+      ordinal: "02",
+      name: "Extract",
+      blurb: "Crops both frames to the meter strip and reads cash, win and bet off them.",
+      action: busy === "extract" ? "Reading…" : "Extract",
+      status: statusOf("extract", captured, extracted),
+      detail: run?.extraction && (
+        <dl className="space-y-1">
+          <Detail term="Before" value={run.extraction.before.roi_source} />
+          <Detail term="After" value={run.extraction.after.roi_source} />
+        </dl>
+      ),
+      onRun: () => run && step("extract", () => api.extract(run.run_id)),
+    },
+    {
+      ordinal: "03",
+      name: "Validate",
+      blurb: "Checks that the cash after the spin is the cash before it, plus the win, less the bet.",
+      action: busy === "validate" ? "Checking…" : "Validate",
+      status: statusOf("validate", extracted, validated),
+      detail: run?.validation && (
+        <dl className="space-y-1">
+          <Detail term="Verdict" value={run.validation.verdict} />
+          <Detail term="Model" value={run.validation.model} />
+        </dl>
+      ),
+      onRun: () => run && step("validate", () => api.validate(run.run_id)),
+    },
+  ]
+
+  return (
+    <div className="min-h-dvh bg-background text-foreground">
+      <header className="border-b border-rule">
+        <div className="mx-auto flex max-w-[1400px] flex-wrap items-baseline justify-between gap-4 px-6 py-4">
+          <div className="flex items-baseline gap-4">
+            <h1 className="eyebrow text-base text-numeral">Meter audit</h1>
+            <p className="text-xs text-muted-foreground">
+              HuffNPuffLink · ICE cabinet
+            </p>
+          </div>
+          <div className="flex items-center gap-6">
+            {run && (
+              <span className="tnum text-xs text-muted-foreground">{run.run_id}</span>
+            )}
+            <HealthStrip health={health} />
+            {run && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={reset}
+                className="h-7 gap-1.5 px-2 text-xs text-muted-foreground hover:text-numeral"
+              >
+                <RotateCcw className="size-3" aria-hidden />
+                New run
+              </Button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto grid max-w-[1400px] gap-8 px-6 py-8 lg:grid-cols-[19rem_minmax(0,1fr)]">
+        <div className="lg:sticky lg:top-8 lg:self-start">
+          <StepRail steps={steps} />
+        </div>
+
+        <div className="min-w-0 space-y-10">
+          {error && (
+            <Alert className="border-vermilion/50 bg-vermilion/5">
+              <AlertCircle className="size-4 text-vermilion" />
+              <AlertTitle className="eyebrow text-vermilion">
+                {failed} did not finish
+              </AlertTitle>
+              <AlertDescription className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-muted-foreground">
+                {error}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {!run && !busy && <Empty />}
+
+          {busy === "capture" && !captured && <CaptureWaiting />}
+
+          {run && captured && <FramePanel run={run} />}
+          {run && <MeterReadout run={run} />}
+          {run?.validation && <LedgerVerdict verdict={run.validation} />}
+        </div>
+      </main>
+    </div>
+  )
+}
+
+function Detail({ term, value }: { term: string; value?: string | null }) {
+  if (!value) return null
+  return (
+    <div className="flex gap-2">
+      <dt className="w-16 shrink-0 text-muted-foreground/70">{term}</dt>
+      <dd className="tnum min-w-0 text-numeral/80">{value}</dd>
+    </div>
+  )
+}
+
+function Empty() {
+  return (
+    <div className="rounded-sm border border-dashed border-rule px-8 py-16 text-center">
+      <p className="text-sm text-muted-foreground">
+        Press Start to spin the cabinet once and capture it.
+      </p>
+      <p className="mt-2 text-xs text-muted-foreground/70">
+        Or open a past run with <span className="tnum">?run=&lt;folder name&gt;</span>.
+      </p>
+    </div>
+  )
+}
+
+function CaptureWaiting() {
+  return (
+    <section>
+      <div className="mb-3 flex items-baseline gap-3 border-b border-rule pb-2">
+        <h3 className="eyebrow text-amber">Frames</h3>
+        <p className="text-xs text-muted-foreground">
+          waiting for the game's log to say the spin is over — an ordinary spin is about
+          3 seconds, a Hold &amp; Spin runs to a minute
+        </p>
+      </div>
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Skeleton className="h-96 rounded-sm bg-slab" />
+        <Skeleton className="h-96 rounded-sm bg-slab" />
+      </div>
+    </section>
+  )
+}

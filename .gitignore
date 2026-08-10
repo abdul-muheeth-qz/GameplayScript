@@ -1,6 +1,21 @@
 # config.json holds the obs-websocket password -- keep it local.
 config.json
 
-captures/
+captured_files/
 __pycache__/
 *.pyc
+
+# One environment for the whole app (server/.venv), and it is not committed.
+.venv/
+venv/
+env/
+ENV/
+
+# Left behind by running the OCR step against loose images.
+roi_crops/
+
+# UI
+ui/node_modules/
+ui/dist/
+ui/.vite/
+npm-debug.log*

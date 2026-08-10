@@ -1,0 +1,27 @@
+# One environment for all three stages. Install from the repository root with:
+#     python -m pip install -r server/requirements.txt
+
+# -- capture ---------------------------------------------------------------
+# OBS Studio WebSocket 5.x client (pulls in websocket-client).
+# Everything else -- finding windows, clicking the i-Deck -- uses ctypes against user32.dll.
+obsws-python>=1.6,<2
+
+# -- extract ---------------------------------------------------------------
+# The Tesseract OCR *engine* is a separate, non-Python install; pytesseract only
+# drives it. See server/extract/tesseract.py for how the binary is located.
+opencv-python>=4.8,<6
+numpy>=1.24,<3
+pytesseract>=0.3.10,<0.4
+
+# -- validate --------------------------------------------------------------
+# Pinned exactly: create_agent moved package in LangChain 1.x and the reply-parsing
+# here depends on response_metadata["finish_reason"] surviving the OpenAI-compatible
+# client. langchain-openai talks to LM Studio, not to OpenAI.
+langchain==1.3.14
+langchain-core==1.5.3
+langchain-openai==1.4.1
+openai==2.53.0
+
+# -- server ----------------------------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.30

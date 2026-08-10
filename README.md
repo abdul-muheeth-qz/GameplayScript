@@ -1,31 +1,58 @@
-# Capturing HuffNPuffLink
+# Auditing HuffNPuffLink's meters
 
-Two entry points over the same parts. [spin.py](spin.py) **causes** one spin and captures it;
-[watch.py](watch.py) **presses nothing** and captures whatever a person does at the cabinet. Both
-open OBS if it isn't open, find the game window, and take the game's own log as the authority on
-when something is finished.
+Spin the cabinet once, read the credit meters off the two frames, and check that the money adds
+up. Three stages, one app:
+
+| | | |
+|---|---|---|
+| **[capture/](server/capture/)** | Start | Opens OBS, presses Repeat Bet on the i-Deck, and shoots a frame either side of the spin — waiting on the *game's own log* to say when it is over. |
+| **[extract/](server/extract/)** | Extract | Crops both frames to the CASH / WIN / BET meter strip and reads it with Tesseract. |
+| **[validate/](server/validate/)** | Validate | Asks whether the cash after the spin is the cash before it, plus the win, less the bet. Answers Pass or Fail. |
 
 ```powershell
-python spin.py                 # the real thing: before, press Repeat Bet, wait, after
-python spin.py --dry-run       # check everything and shoot one frame, press nothing
-python spin.py --no-record     # skip the video; capture only the two frames
+python -m pip install -r server/requirements.txt      # one venv (server/.venv) for all three stages
+cd ui; npm install; npm run build; cd ..
 
-python watch.py                # watch a person play until Ctrl-C, capturing every action
+python -m server                               # http://127.0.0.1:8000 -- the three buttons
 ```
 
-Most of this document is about `spin.py`, which came first and explains the machinery both share.
-[Watching a whole session](#watching-a-whole-session-instead--watchpy) covers `watch.py`.
+Or run any stage on its own, over the same folder:
 
-Everything it produces lands in one folder per run under `captures/`:
+```powershell
+python -m server.capture.spin                     # the real thing: before, press Repeat Bet, wait, after
+python -m server.capture.spin --dry-run           # check everything and shoot one frame, press nothing
+python -m server.capture.spin --no-record         # skip the video; capture only the two frames
+python -m server.capture.watch                    # watch a person play until Ctrl-C, capturing every action
+
+python -m server.extract.cli captured_files/<run>       # read the meters, write the two records
+python -m server.validate.cli captured_files/<run>      # Pass or Fail, exit 0 or 1
+```
+
+Run them from the repository root — they are `-m` modules, and that is what puts the `server`
+package (and `server.settings`) on the path.
+
+Everything lands in one folder per run under `captured_files/`, and that folder is the only thing the
+three stages share. Nothing is passed between them by argument or by a path baked into a script:
 
 ```
-captures/2026-08-05_224937/
-    before.png      the screen before the press
-    after.png       the screen once the game reported the spin over
-    spin.mp4        OBS's video of the whole run (the container is whatever OBS is set to)
-    spin.json       what happened, with the game's own timestamps
-    run.log         the full log of the run
+captured_files/2026-08-05_224937/
+    before.png              the screen before the press
+    after.png               the screen once the game reported the spin over
+    spin.mp4                OBS's video of the whole run (the container is whatever OBS is set to)
+    spin.json               what happened, with the game's own timestamps
+    run.log                 the full log of the run
+    extract/before.json     the meters read off before.png -- cash, win, bet
+    extract/after.json      the same for after.png
+    extract/*_roi.png       the strip of each frame that was actually sent to Tesseract
+    validate.json           the verdict, and the arithmetic behind it
 ```
+
+The web page is the same three stages with a button each, and holds nothing but the run id — so a
+reload, a second tab, or `?run=<folder name>` a week later all rebuild from those files.
+
+Most of this document is about `capture`, which came first, is by far the most delicate, and
+explains the machinery the rest sits on. [Reading the meters](#reading-the-meters--extract) and
+[Deciding whether it adds up](#deciding-whether-it-adds-up--validate) cover the other two.
 
 ## What it does, step by step
 
@@ -190,7 +217,7 @@ Every marker below was copied from real log lines and checked against history.
 | `idle_state` / `gamble_state` | the state machines behind the deck's mode. `via` names the message that caused the transition, which is how an action gets traced back to the input behind it |
 | `game_started` | the client (re)started — a new window for OBS to find |
 
-And what the *player* asked for, which is what [watch.py](watch.py) needs and `spin.py` never had
+And what the *player* asked for, which is what [watch.py](server/capture/watch.py) needs and `spin.py` never had
 to ask, since it did the pressing itself:
 
 | Event | What it means |
@@ -282,10 +309,10 @@ by hand and every action they take gets captured — spin, denomination change, 
 gamble, bonus, Hold & Spin.
 
 ```powershell
-python watch.py                          # watch until Ctrl-C
-python watch.py --dry-run                # check everything, shoot one frame, exit
-python watch.py --duration 900 --max-rounds 40
-python watch.py --no-milestones          # one frame at each end instead of one per milestone
+python -m server.capture.watch                          # watch until Ctrl-C
+python -m server.capture.watch --dry-run                # check everything, shoot one frame, exit
+python -m server.capture.watch --duration 900 --max-rounds 40
+python -m server.capture.watch --no-milestones          # one frame at each end instead of one per milestone
 ```
 
 Ctrl-C is the normal way to stop, and exits `0`.
@@ -294,7 +321,7 @@ Ctrl-C is the normal way to stop, and exits `0`.
 gamble or collect that answers it:
 
 ```
-captures/watch_2026-08-06_170314/
+captured_files/watch_2026-08-06_170314/
     session.json                  rewritten after every round, so an interruption costs nothing
     run.log
     rounds/
@@ -414,7 +441,7 @@ better: winning rounds with their collect in a *different* folder went from 18 t
 wins that were genuinely never collected), rounds ending with no `game_over` from 61 to 45, and
 spin outcomes landing outside every round from 39 to 15. No round anywhere contains two spins.
 That replay also turned up a rule that had never once fired as intended — see `waiting_for` in
-[actions.py](actions.py): `win` is both an announcement and one of the things that resolves a
+[actions.py](server/capture/actions.py): `win` is both an announcement and one of the things that resolves a
 gamble, so scanning backwards for "a resolution of anything" made every win resolve itself the
 moment it was logged.
 
@@ -444,6 +471,168 @@ their own frame inside the round.
 `unattributed_events` counts game events that arrived while no round was open. It should stay
 small; a player action this tool doesn't recognise yet would show up there first.
 
+## Reading the meters — `extract`
+
+Given a run folder, this writes `extract/before.json` and `extract/after.json` into it, one record
+per frame:
+
+```json
+{
+  "image": "before.png",
+  "roi_source": "config:hnpl_portrait",
+  "roi_crop": "before_roi.png",
+  "cash": { "value": 2208.35, "rawtext": "$2,208.35", "confidence": 95.0, "label_matched": "CASH" },
+  "win":  { "value": null,    "rawtext": "",          "confidence": 0,    "label_matched": null },
+  "bet":  { "value": 1.0,     "rawtext": "$1.00",     "confidence": 95.0, "label_matched": "[BET" }
+}
+```
+
+`value` is `null` for a meter that read blank — which for WIN before a spin is the correct answer,
+not a failure. `rawtext` is what Tesseract actually saw, so a misread is visible rather than
+inferred from a wrong number. `label_matched` is the raw OCR of the label it was paired with,
+noise included (`"[BET"` above is the bracket tick either side of the meter bleeding into the
+word), or `"(inferred by elimination)"` when the value was recovered as the one leftover amount in
+a row already trusted.
+
+### It never assumes a pixel coordinate
+
+Everything is either a fraction of the image or derived from it at runtime. Two routes, in order:
+
+1. **A configured box** — a normalized `[x0, y0, x1, y1]` in `ROI_REGIONS["meters"]["boxes"]`, one
+   per known game layout. Adding a layout is one entry in that list and no code.
+2. **Dark-panel detection** — an HSV mask for the flat, dark UI panels a meter bar is drawn on,
+   grouped into rows, scored by how many fields each row actually resolved.
+
+A box is "validated" by running the real extraction on it, so choosing one costs a full OCR pass —
+which is why the winner's results ride along on the `MeterROI` instead of being thrown away and
+recomputed. `roi_source` in each record says which route won, and it is the first thing to read
+when a value comes out wrong.
+
+Two rules there were each bought with a wrong reading, and both matter if you add a box:
+
+- **The best box wins, not the first that resolved anything.** A box tuned for another layout can
+  land somewhere unrelated on this screenshot and still scrape one plausible number out of it.
+  Under the original first-past-the-post rule, adding this cabinet's box quietly broke four of the
+  fourteen sample images that had been fine.
+- **A box that found only one value is raced against dynamic detection**, and kept only if it
+  reads at least as well. "Found a number" is not "found the meter bar". Two fields in one crop
+  is a meter bar, and a box that finds two is believed outright — which is also what keeps the
+  step fast, since WIN is blank on most before-frames and demanding all three sent every ordinary
+  pair through the full race, 27 seconds instead of two.
+
+This cabinet's box, `hnpl_portrait`, has its bottom edge at 752 px of 961 and deliberately not
+754. The meter strip is ~26 px tall; two more rows of pixels pull the bright COLLECT row into the
+crop, which moves the Otsu threshold far enough to lose the BET value entirely. Swept over
+y 722–727 × 750–756 against both frames of a real run, every combination but y1=754 reads cash and
+bet on both.
+
+### Never take a suffix of a malformed number
+
+The orange bracket tick drawn after each meter reads as a `5` about half the time, giving
+`"$2,202.155"`. That has three decimals, so it isn't a clean number — and the rule for a value OCR
+ran into its label (`"BALANCE1,250.00"`) anchors at the **end** of the token, so it returned
+**155**. A confident, plausible, entirely invented figure, and a live spin was judged against it
+before this was caught.
+
+An amount with junk digits stuck on the end now keeps its currency-shaped **prefix**, and the
+glued-value rule additionally requires letters in front of the number — without them there is
+nothing to say the leading part is a label rather than the significant digits of the value itself.
+
+### Reading order, and an 8-pixel bug
+
+Label-to-value pairing scores by distance with a direction penalty. On this bar —
+`CASH $2,208.35   WIN   BET $1.00`, all on one line — the cash value sits almost exactly between
+CASH and WIN: 214 px from one, 206 px from the other. Plain distance is undirected, so WIN won by
+8 px and was reported as holding $2,208.35. A label is written *before* its value, so a value
+found behind one now costs 1.1 rather than 0.5 — still below the 1.6 for an unrelated diagonal
+match, so a genuinely right-aligned layout can outrank it.
+
+### Checking it without a cabinet
+
+`server/extract/Images/` holds fourteen screenshots across several layouts and is the regression suite:
+
+```powershell
+python -m server.extract.cli server/extract/Images
+```
+
+Read `roi_source` and the values for each. The ROI crops it saves — the exact pixels handed to
+Tesseract — are the fastest way to see why a value was wrong.
+
+## Deciding whether it adds up — `validate`
+
+The check is one line: the cash meter after a spin should be the cash before it, plus the win that
+was standing, less the bet that was placed.
+
+```
+Cₙ = Cₙ₋₁ + Wₙ₋₁ - Bₙ₋₁
+```
+
+`validate.json` records the answer and the numbers behind it, because a verdict with nothing under
+it cannot be argued with:
+
+```json
+{ "verdict": "pass", "expected_cash": "2207.35", "computed_cash": "2207.35",
+  "difference": "0.00", "tolerance": "0.005", "record": "2208.35,0.00,1.00",
+  "formula": "cash + win - bet", "model": "qwen2.5-7b-instruct-1m",
+  "inferred": ["win"], "message": "..." }
+```
+
+Money crosses as strings. Reading it as `Decimal` and then putting it through a JSON float would
+undo the point of reading it as `Decimal`.
+
+### The agent has one tool, and the tool's answer is the one that counts
+
+The agent used to have no tools and do the arithmetic itself. Measured against the local
+qwen2.5-7b over twelve records: **5/12** with the original terse prompt, **10/12** when allowed to
+show its working, **12/12** with a tool. It dropped the `- bet` term deterministically —
+`1175.76 + 20.00 - 40.00` came back as `1195.76` every single time, which is this project's own
+sample data.
+
+That is worth being precise about, because it is the difference between a working tool and a
+useless one: a Fail is supposed to mean the spin's meters don't add up. A model that cannot
+subtract makes every spin a Fail and the verdict stops carrying any information. So the model does
+the part it is reliably good at — reading three numbers out of a record and deciding what to do
+with them — and the answer taken as authoritative is the tool's return value, pulled back out of
+the message history. A disagreement between the tool and the model's closing sentence is reported
+rather than resolved by guessing.
+
+If you change the model, re-measure before trusting it.
+
+Everything else stays deliberately strict: `temperature=0`; `max_retries=0`, because the OpenAI
+SDK's default of two would turn a wedged server into three timeouts and six silent minutes; a
+reply that hit the token cap reported rather than parsed as though it were whole; and a numeric
+parser that rejects anything ambiguous, since `Decimal()` also accepts `nan`, `inf`, `1e3` and
+`1_155.76`, and blindly stripping commas turns `1155,76` into `115576`.
+
+**The comparison is not the model's job.** Python does it, within half a cent as `Decimal` so the
+boundary sits exactly there rather than wherever binary float lands. An earlier version asked the
+model to compare as well, which put the arithmetic *and* the judgment in one forced token — the
+place a small model is least reliable.
+
+### A blank WIN meter is zero; a blank CASH meter is a failure
+
+`extract` reports `"value": null` both for a meter it could not read and for a meter with nothing
+in it, and a blank WIN box before a spin is the second — the correct reading of an empty meter,
+and what most before-frames look like. Erroring on it meant an ordinary spin could never be
+validated at all, so `win` alone is taken as `0.00`. Cash and bet are not: a blank cash meter is
+not zero credits, it is a failed read, and inferring a balance there would turn an OCR failure
+into a verdict. Whatever was assumed comes back in `inferred` and is badged on screen, so a wrong
+assumption stays visible instead of hiding inside a Pass.
+
+### Running it
+
+Needs LM Studio serving the configured model — `validate.base_url` / `validate.model`, or
+`LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL`. `/api/health` says whether it is up and whether the model
+it is serving is the one asked for.
+
+```powershell
+python -m server.validate.cli server/validate/data          # the sample records: Pass, exit 0
+python -m server.validate.cli captured_files/<run> --json  # the full verdict object
+```
+
+Exit codes are `0` pass, `1` fail, `2` no verdict — a Fail is a judgement about the spin, an error
+means no judgement was reached, and keeping them apart is what lets a test runner tell them apart.
+
 ## Configuration
 
 `config.json`, git-ignored because it holds the obs-websocket password. `OBS_WS_PASSWORD` in the
@@ -462,22 +651,50 @@ drops the SDK's plaintext-password line exists for exactly that.
 | `watch` | `idle_timeout_s` 35, `quiet_s` 2, `long_wait_s` 90, `player_wait_s` 0, `after_delay_ms` 800, `tail_quiet_s` 1, `action_timeout_s` 300, `poll_interval_ms` 50, `preroll_s` 1, `milestone_shots` true, `milestone_min_gap_ms` 400 | `watch.py` only; `preroll_s: 0` turns off the standing before-frame, `player_wait_s: 0` holds a round open for as long as the game waits for the player |
 | `ideck` | `process`, `window_class`, `log`, `layout`, `button`, `actions` | `layout: null` means find it via `%CABINET_MODULE%` |
 | `output` | `dir` | base folder that run folders are created in |
+| `extract` | `tesseract_cmd` null, `save_roi_crops` true | `null` means look at `%TESSERACT_CMD%`, then the per-user Windows install, then whatever is on `PATH` |
+| `validate` | `base_url`, `model`, `api_key_env`, `tolerance` "0.005", `timeout_s` 120 | the LM Studio endpoint. `LMSTUDIO_BASE_URL` and `LMSTUDIO_MODEL` override the file |
+| `server` | `host` 127.0.0.1, `port` 8000 | `python -m server --host/--port` override these |
 
 `ideck.actions` maps a role to a hardware button, which is what lets `"button": "spin"` mean
 Rebet on this cabinet and something else on another.
+
+Relative paths — `output.dir`, `--out`, `--run-dir` — are resolved against the repository root,
+never the current working directory, so a server started from anywhere writes into the same
+`captured_files/` the command line uses.
 
 ## Files
 
 | File | |
 |---|---|
-| [spin.py](spin.py) | one spin, caused and captured: OBS, the windows, before, press, wait, after |
-| [watch.py](watch.py) | a whole session, captured and never touched: the loop, the frames, the record |
-| [actions.py](actions.py) | what the player just did, from the logs — triggers, boundaries, labels |
-| [ideck.py](ideck.py) | the Virtual OLED — layout, the button map, clicking, press confirmation |
-| [gamelog.py](gamelog.py) | the game's events, and what the deck's mode currently is |
-| [logtail.py](logtail.py) | tailing a live log: byte offsets, partial lines, rotation |
-| [obs_client.py](obs_client.py) | opening OBS, connecting, screenshotting, recording the run |
-| [winfocus.py](winfocus.py) | finding and measuring the two windows |
+| [server/settings.py](server/settings.py) | the one config loader, and the root every relative path anchors on |
+| [server/api.py](server/api.py) | the three endpoints, health, and the files the page shows |
+| [server/runs.py](server/runs.py) | the run folder as state, and the capture lock |
+| [server/__main__.py](server/__main__.py) | `python -m server` |
+| **server/capture** | |
+| [server/capture/spin.py](server/capture/spin.py) | one spin, caused and captured: OBS, the windows, before, press, wait, after |
+| [server/capture/watch.py](server/capture/watch.py) | a whole session, captured and never touched: the loop, the frames, the record |
+| [server/capture/actions.py](server/capture/actions.py) | what the player just did, from the logs — triggers, boundaries, labels |
+| [server/capture/ideck.py](server/capture/ideck.py) | the Virtual OLED — layout, the button map, clicking, press confirmation |
+| [server/capture/gamelog.py](server/capture/gamelog.py) | the game's events, and what the deck's mode currently is |
+| [server/capture/logtail.py](server/capture/logtail.py) | tailing a live log: byte offsets, partial lines, rotation |
+| [server/capture/obs_client.py](server/capture/obs_client.py) | opening OBS, connecting, screenshotting, recording the run |
+| [server/capture/winfocus.py](server/capture/winfocus.py) | finding and measuring the two windows |
+| **server/extract** | |
+| [server/extract/runner.py](server/extract/runner.py) | the two frames of a run in, two JSON records out |
+| [server/extract/cli.py](server/extract/cli.py) | a run folder, or loose images |
+| [server/extract/tesseract.py](server/extract/tesseract.py) | finding the OCR engine binary |
+| [server/extract/slotocr/roi.py](server/extract/slotocr/roi.py) | which part of the screenshot is the meter bar |
+| [server/extract/slotocr/extraction.py](server/extract/slotocr/extraction.py) | the two methods that read a meter panel, and the elimination pass |
+| [server/extract/slotocr/matching.py](server/extract/slotocr/matching.py) | fuzzy label matching and label↔value pairing |
+| [server/extract/slotocr/config.py](server/extract/slotocr/config.py) | the field keys, the label synonyms, the ROI boxes |
+| **server/validate** | |
+| [server/validate/agent.py](server/validate/agent.py) | the agent, its arithmetic tool, and the LM Studio endpoint |
+| [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
+| [server/validate/runner.py](server/validate/runner.py) | the verdict object |
+| [server/validate/cli.py](server/validate/cli.py) | Pass / Fail / no verdict |
+| **ui** | |
+| [ui/src/App.tsx](ui/src/App.tsx) | the three steps |
+| **root** | |
 | [config.json](config.json) | settings (git-ignored) |
 
 ## When it doesn't work
@@ -498,3 +715,11 @@ Rebet on this cabinet and something else on another.
 | `the game is drawn larger than the canvas` | the video will be cropped; the screenshots won't be. Right-click the source in OBS → Resize output to source |
 | `that is larger than the source, so OBS is upscaling` | `capture.scale`/`width` is above the game window's own size. Harmless, but it buys file size, not detail |
 | `UIPI will silently discard the button clicks` | the panel service runs elevated and this doesn't; re-run from an administrator terminal |
+| `cannot run tesseract at ...` | the OCR engine isn't installed or isn't where it was looked for; set `extract.tesseract_cmd` to the full path of `tesseract.exe` |
+| `<run> has no before or after frame` | the capture step hasn't run over that folder, or `capture.format` doesn't match what is on disk |
+| `<file>: cash value is not a number: None` | the OCR read that meter blank. Open the `_roi.png` beside it: a crop showing most of the screen means the configured box missed and detection took over |
+| `cannot reach http://localhost:1234/v1` | LM Studio's server is off, or on another port. Start it, or set `validate.base_url` |
+| `is up but is not serving <model>` | LM Studio is running a different model; load the configured one or change `validate.model` |
+| `the model answered without calling cash_after_spin` | the model ignored its tool — it is too small or not tuned for tool use. Try another; see [the agent](#the-agent-has-one-tool-and-the-tools-answer-is-the-one-that-counts) |
+| `a spin is already running` | one at a time: they would share one OBS instance, one record directory and one cursor |
+| `no run called <id>` | the folder was deleted, or the capture failed before writing anything — `prune_empty` removes a run folder that captured nothing |

@@ -1,0 +1,168 @@
+/* Bundled rather than fetched from a CDN: the cabinet this runs beside is not
+   guaranteed to have internet, and a font that silently falls back changes the
+   alignment of every meter column. */
+@import "@fontsource-variable/archivo";
+@import "@fontsource-variable/azeret-mono";
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+  /* Every number on this page is money read off a meter, and money in columns has to
+     line up, so the mono face is not a stylistic choice -- it is the only one whose
+     digits are the same width. */
+  --font-mono: "Azeret Mono Variable", ui-monospace, "Cascadia Mono", monospace;
+
+  /* Sampled off the cabinet's own meter strip: the deep indigo the bar is drawn on,
+     the periwinkle its digits are set in, and the amber of the bracket ticks either
+     side of each meter. */
+  --color-ink: #0d1020;
+  --color-slab: #161b2e;
+  --color-rule: #2a3149;
+  --color-numeral: #c9d2f7;
+  --color-amber: #f2a13c;
+  --color-jade: #3ecf8e;
+  --color-vermilion: #ef5b5b;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+}
+
+/* The whole app is dark; the light tokens above exist only so the shadcn primitives
+   have something to resolve against. */
+:root {
+  --background: #0d1020;
+  --foreground: #c9d2f7;
+  --card: #161b2e;
+  --card-foreground: #c9d2f7;
+  --popover: #161b2e;
+  --popover-foreground: #c9d2f7;
+  --primary: #f2a13c;
+  --primary-foreground: #0d1020;
+  --secondary: #1e2439;
+  --secondary-foreground: #c9d2f7;
+  --muted: #1e2439;
+  --muted-foreground: #7b86ad;
+  --accent: #1e2439;
+  --accent-foreground: #c9d2f7;
+  --destructive: #ef5b5b;
+  --destructive-foreground: #0d1020;
+  --border: #2a3149;
+  --input: #2a3149;
+  --ring: #f2a13c;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans);
+    /* The strip of hairlines behind the page reads as the cabinet's brushed metal
+       without becoming a texture anyone has to look at. */
+    background-image: repeating-linear-gradient(
+      90deg,
+      transparent 0 3px,
+      rgb(255 255 255 / 0.012) 3px 4px
+    );
+  }
+
+  /* A label on a piece of test equipment: small, wide, and unmistakably not prose. */
+  .eyebrow {
+    @apply text-[0.6875rem] font-semibold tracking-[0.18em] uppercase;
+  }
+
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* The subtotal rule is struck once, left to right, when a verdict lands. */
+@keyframes rule-draw {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

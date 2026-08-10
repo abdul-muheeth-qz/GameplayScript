@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Capture one spin of HuffNPuffLink, start to finish.
 
-    python spin.py                 # the real thing: before, spin, wait, after
-    python spin.py --dry-run       # report everything and shoot one frame, press nothing
+    python -m capture.spin              # the real thing: before, spin, wait, after
+    python -m capture.spin --dry-run    # report everything and shoot one frame, press nothing
 
 What it does, in order:
 
@@ -35,12 +35,11 @@ import sys
 import time
 from datetime import datetime
 
-import gamelog
-import ideck
-import winfocus
-from obs_client import MAX_DIM, ObsError, ObsSession, Recording, clamp_dim
+from ..settings import DEFAULT_CONFIG, ROOT, load_config
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from . import gamelog, ideck, winfocus
+from .obs_client import MAX_DIM, ObsError, ObsSession, Recording, clamp_dim
+
 LOG = logging.getLogger("spin")
 
 EXIT_OK, EXIT_ERROR, EXIT_ABORTED = 0, 1, 2
@@ -57,27 +56,24 @@ SPIN_BEGINS = ("bet_locked", "spin_started")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="spin.py", description=__doc__.split("\n")[0],
+        prog="python -m capture.spin", description=__doc__.split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true",
                        help="check everything and save one screenshot, without spinning")
     parser.add_argument("--no-record", action="store_true",
                        help="skip the OBS video recording; capture only the two frames")
     parser.add_argument("--out", help="base folder that run folders are created in")
-    parser.add_argument("--config", default=os.path.join(HERE, "config.json"))
+    parser.add_argument("--run-dir",
+                       help="write into exactly this folder, instead of composing "
+                            "<out>/<timestamp>. The server passes it so it knows the run "
+                            "folder before this process starts, rather than guessing at "
+                            "the newest one -- the timestamp is only second-granular, so "
+                            "two runs a second apart would collide.")
+    parser.add_argument("--config", default=None,
+                       help="path to config.json (default: the one at the repo root)")
     parser.add_argument("-v", "--verbose", action="store_true",
                        help="debug logging (always written to run.log regardless)")
     return parser
-
-
-def load_config(path: str) -> dict:
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-    # The environment wins, so the password need not be in a file at all.
-    password = os.environ.get("OBS_WS_PASSWORD")
-    if password:
-        cfg.setdefault("obs", {})["password"] = password
-    return cfg
 
 
 class _ScrubSecrets(logging.Filter):
@@ -333,7 +329,8 @@ def run(args) -> int:
     try:
         cfg = load_config(args.config)
     except (OSError, ValueError) as exc:
-        print(f"error: cannot read config {args.config}: {exc}", file=sys.stderr)
+        print(f"error: cannot read config {args.config or DEFAULT_CONFIG}: {exc}",
+              file=sys.stderr)
         return EXIT_ERROR
 
     obs_cfg = cfg.get("obs", {})
@@ -351,12 +348,16 @@ def run(args) -> int:
     idle_timeout = float(gamelog_cfg.get("idle_timeout_s", 8.0))
     ceiling = float(spin_cfg.get("timeout_s", 180.0))
     after_delay = float(spin_cfg.get("after_delay_ms", 800)) / 1000.0
-    base_out = args.out or cfg.get("output", {}).get("dir", "captures")
-    if not os.path.isabs(base_out):
-        base_out = os.path.join(HERE, base_out)
-
-    suffix = "_dryrun" if args.dry_run else ""
-    run_dir = os.path.join(base_out, datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix)
+    if args.run_dir:
+        # Named by the caller, so it can find the artefacts without racing the timestamp.
+        run_dir = args.run_dir if os.path.isabs(args.run_dir) else os.path.join(ROOT,
+                                                                               args.run_dir)
+    else:
+        base_out = args.out or cfg.get("output", {}).get("dir", "captures")
+        if not os.path.isabs(base_out):
+            base_out = os.path.join(ROOT, base_out)
+        suffix = "_dryrun" if args.dry_run else ""
+        run_dir = os.path.join(base_out, datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix)
     os.makedirs(run_dir, exist_ok=True)
     setup_logging(run_dir, args.verbose)
     LOG.info("run folder: %s", run_dir)

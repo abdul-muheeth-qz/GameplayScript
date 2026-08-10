@@ -19,7 +19,7 @@ import subprocess
 import time
 from datetime import datetime
 
-import winfocus
+from . import winfocus
 
 LOG = logging.getLogger("spin.obs")
 

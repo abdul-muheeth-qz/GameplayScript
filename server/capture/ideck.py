@@ -58,8 +58,7 @@ import time
 import xml.etree.ElementTree as ET
 from ctypes import wintypes
 
-import logtail
-import winfocus
+from . import logtail, winfocus
 
 LOG = logging.getLogger("spin.ideck")
 

@@ -1,3 +1,0 @@
-# OBS Studio WebSocket 5.x client (pulls in websocket-client).
-# Everything else -- finding windows, clicking the i-Deck -- uses ctypes against user32.dll.
-obsws-python>=1.6,<2

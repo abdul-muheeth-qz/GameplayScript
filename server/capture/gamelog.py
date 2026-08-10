@@ -34,7 +34,7 @@ import re
 import time
 from datetime import datetime
 
-import logtail
+from . import logtail
 
 DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
 
