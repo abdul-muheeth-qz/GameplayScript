@@ -168,9 +168,17 @@ def _is_fragment_pair(a, b):
         return False
     if gap > FRAGMENT_GAP * max(1.0, min(_glyph_advance(a), _glyph_advance(b))):
         return False
-    # Two well-formed amounts side by side are two meters, never one number.
-    return not (COMPLETE_AMOUNT_RE.match(a["text"])
-                and COMPLETE_AMOUNT_RE.match(b["text"]))
+    # The LEFT half has to be incomplete, and that alone decides it. A number
+    # torn in two always leaves its left part missing the cents -- "$2,190" and
+    # "$2,18" -- so an `a` that already carries them is a finished amount, and
+    # whatever sits after it belongs to something else.
+    #
+    # This started as "at least one of the two is incomplete", which is the same
+    # thing for both real fragments and wrong everywhere else: on
+    # 2026-08-11_151012 a stray artwork "2" landed five pixels to the right of a
+    # perfectly good "$1.00" at confidence 96, and the pair rule ate BOTH, so
+    # the BET meter came back empty.
+    return not COMPLETE_AMOUNT_RE.match(a["text"])
 
 
 def _drop_fragment_pairs(tokens):
