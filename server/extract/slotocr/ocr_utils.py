@@ -64,6 +64,51 @@ def best_ocr_variant(variants, config):
     return best_data
 
 
+# The one config string both sparse-text paths use. It is bare `--psm 11`, and
+# the list of things that are NOT in it is the useful part -- each was measured
+# against the four ROI crops that bracket the problem (two where tesseract tears
+# an amount in half, one where it emits a junk token, and the tight
+# config:hnpl_portrait crop as a control), and then, where that looked
+# promising, against the whole corpus. Do not add any of them back without
+# re-running BOTH.
+#
+#   --dpi 300      The near miss, and the reason the corpus run is not optional.
+#                  Tesseract estimates source resolution from median blob height
+#                  and that estimate drives which small blobs are discarded as
+#                  noise and where word breaks fall; we hand it the same meter
+#                  bar at 3x, 5x or 6x, so it was varying for reasons unrelated
+#                  to the text. On the four crops it looked like the answer --
+#                  the ONLY option that read both "$2,190.90" and "$2,186.20"
+#                  whole, at no extra cost, and byte-identical on the control.
+#                  Over the fourteen fixtures and 52 captured frames it was a
+#                  net loss: two correct balances on 2026-08-10_173653 went to
+#                  null, `bet` 176 was lost on Screenshot 2026-08-05 153757, and
+#                  2026-08-10_174208 read "$2,184.95" as **184.95** -- a
+#                  confident wrong number, which is the one outcome that must
+#                  never be traded for anything. Ledger 24 pass/1 fail -> 22/2,
+#                  link agreement 22 -> 19.
+#   dawgs off      `load_punc_dawg=0 load_number_dawg=0 load_system_dawg=0
+#                  load_freq_dawg=0` changes not one token on any of the four
+#                  crops. The LSTM decoder's dictionary is the most plausible
+#                  mechanism for a mid-number word break and it is simply not
+#                  the cause here. Placebo.
+#   --psm 6        Reads both torn amounts whole and cuts a cluttered crop from
+#                  62 tokens to 18 -- but psm 11 still wins the tight crop, so
+#                  it would have to be a SECOND raced pass, doubling every
+#                  panel's OCR cost. Untested against the corpus; if the tearing
+#                  ever needs solving at the engine level, start here.
+#   whitelist      Actively harmful on these paths. A whitelist does not drop
+#                  non-matching glyphs, it forces the classifier to pick the
+#                  best ALLOWED character, so the artwork, the logo and
+#                  "Play 800 Credits" all become letters and digits instead of
+#                  being ignored. It is already applied where it is safe, on the
+#                  tight single-line crops in ocr_small_crop.
+#   --oem 1, -l eng  Placebos on this install: the tessdata is eng+osd and
+#                  LSTM-only, so OEM 3 already resolves to LSTM and eng is
+#                  already the default.
+SPARSE_TEXT_CONFIG = "--psm 11"
+
+
 # ---------------------------------------------------------------------------
 # Whole-image preprocessing (used only by the last-resort fallback method)
 # ---------------------------------------------------------------------------
@@ -95,7 +140,7 @@ def run_ocr_data(gray, binary):
     """Run image_to_data on a couple of preprocessing variants and keep
     whichever produced more/higher-confidence tokens (dynamic, no assumption
     about a fixed 'best' preprocessing per screenshot)."""
-    return best_ocr_variant([gray, binary], "--psm 11")
+    return best_ocr_variant([gray, binary], SPARSE_TEXT_CONFIG)
 
 
 # ---------------------------------------------------------------------------
@@ -170,9 +215,12 @@ def panel_word_ocr(crop):
     declut = remove_long_lines(otsu)
     declut = cv2.morphologyEx(declut, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
+    # Both polarities are genuinely needed: over the config matrix the target
+    # amount came back whole 41 times on each, a dead tie. Dropping the loser
+    # to fund a second PSM pass was considered and the measurement refused it.
     variants = [cv2.bitwise_not(declut), declut]
     # `scale` is returned alongside the data because every coordinate in it
     # (left/top/width/height, and the cx/cy derived from them) is in the
     # UPSCALED space — callers doing distance math against the original crop's
     # dimensions must scale those dimensions up to match.
-    return best_ocr_variant(variants, "--psm 11"), scale
+    return best_ocr_variant(variants, SPARSE_TEXT_CONFIG), scale

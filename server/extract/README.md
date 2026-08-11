@@ -21,8 +21,10 @@ from `config.json`, and emits `cash` rather than `balance` — that key is what
 The full account lives in the root [README](../README.md#reading-the-meters--extract): what the
 record looks like, why the ROI box for this cabinet stops at 752 px and not 754, why the best
 configured box wins rather than the first one that resolved anything, why a band geometry is tuned
-on the values and never on how many fields it resolved, and the 8-pixel bug that made a single-line
-meter bar report cash's money under WIN.
+on the values and never on how many fields it resolved, why a value found to the left of its label
+is rejected outright rather than penalised — and why that rejection is unsafe without the
+blank-meter assertion shipped beside it — and why both halves of a number OCR tore in two are
+thrown away rather than glued back together.
 
 `Images/` is the regression suite — fourteen screenshots across several layouts. Run the CLI over
 it after changing anything in `slotocr/`, once per `--roi-method`, and read `roi_source` in each

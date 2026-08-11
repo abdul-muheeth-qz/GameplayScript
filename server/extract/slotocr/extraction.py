@@ -23,7 +23,7 @@ from .config import FIELD_LABELS, FUZZY_CUTOFF, NUMERIC_WHITELIST, LABEL_WHITELI
 from .ocr_utils import ocr_small_crop, panel_word_ocr
 from .panel_detection import detect_dark_panels, group_panels_into_rows
 from .matching import (
-    find_label_tokens, find_numeric_tokens, score_candidate,
+    find_label_tokens, find_numeric_tokens, find_text_tokens, score_candidate,
     clean_numeric_value, looks_like_currency_value,
     extract_field_value_prefer_currency, label_similarity,
 )
@@ -212,6 +212,11 @@ def extract_fields_via_panel_word_ocr(image):
             box_to_row[b] = row_id
 
     field_candidates = {field: [] for field in FIELD_LABELS}
+    # Every field whose LABEL was found somewhere on this image, whether or not
+    # a value could be paired with it. That distinction is what lets an empty
+    # meter be reported as empty rather than left open for something else to
+    # fill -- see the blank record built at the bottom of this function.
+    labelled_fields = set()
     # per-panel record of every currency-shaped token found (with its
     # position, so we can later tell two tokens with the SAME text apart —
     # e.g. WIN and BET coincidentally both showing "$40.00" are two
@@ -262,10 +267,23 @@ def extract_fields_via_panel_word_ocr(image):
         for field, variants in FIELD_LABELS.items():
             for label in find_label_tokens(data, variants):
                 all_labels_in_panel.append((field, label))
+                labelled_fields.add(field)
+
+        # Every title and every number on this panel, which is the vocabulary
+        # matching.score_candidate needs to tell "the value is across the bar
+        # from this title" from "this game just leaves space after the title".
+        # Only these two kinds of token count: a divider bar or a bracket tick
+        # standing between a title and its money must not wall the two apart.
+        #
+        # find_text_tokens and not `all_labels_in_panel`, because a title OCR
+        # could not read is still a title. BET arrives as "[B" + "ET" on several
+        # frames and never clears FUZZY_CUTOFF; blocking only on recognised
+        # titles would let WIN reach across it and claim BET's $1.00.
+        panel_labels = find_text_tokens(data)
 
         for field, label in all_labels_in_panel:
             best = extract_field_value_prefer_currency(
-                label, numeric_tokens, crop_w, crop_h)
+                label, numeric_tokens, crop_w, crop_h, panel_labels)
             if not best:
                 continue
             value_token = best["value_token"]
@@ -275,7 +293,8 @@ def extract_fields_via_panel_word_ocr(image):
             # currently trying to pair it with?
             nearest_label = min(
                 all_labels_in_panel,
-                key=lambda fl: score_candidate(fl[1], value_token, crop_w, crop_h)
+                key=lambda fl: score_candidate(fl[1], value_token, crop_w, crop_h,
+                                               panel_labels + numeric_tokens)
             )
             if nearest_label[1] is not label:
                 continue
@@ -299,6 +318,33 @@ def extract_fields_via_panel_word_ocr(image):
     results = {}
     for field, cands in field_candidates.items():
         if not cands:
+            # "I found this field's label, and nothing on its row can be its
+            # value" is a POSITIVE reading of an empty meter, not a gap, and it
+            # has to be written down. Leaving the key absent invites two other
+            # mechanisms to fill it, and both were measured doing exactly that
+            # on a frame whose WIN meter was simply blank:
+            #
+            #  - pipeline.process_image merges this method OVER the per-cell
+            #    one, so an absent key lets method 1 answer instead. On
+            #    2026-08-10_173530 that substituted win=380 -- a jackpot badge
+            #    read from the middle of a 240 px panel with its label band
+            #    116 px above it. One wrong number traded for another.
+            #  - run_elimination_pass only fires for a field in `missing`, so an
+            #    absent key lets the one unclaimed currency token in the row be
+            #    handed over at a fabricated confidence of 60. That is how the
+            #    whole $2,915.05 balance was reported as a WIN on
+            #    2026-08-10_235014, with validate.json then answering "pass".
+            #
+            # This is also what makes the left-of-label rejection in
+            # matching.score_candidate safe. Rejection on its own does not leave
+            # a meter blank -- it promotes the NEXT candidate, which on a meter
+            # bar is the neighbouring cell's money. Measured over the fourteen
+            # fixtures, rejection alone invented win=1.0 on three of them by
+            # reaching past the blank WIN cell to BET's $1.00. Do not ship one
+            # of these two without the other.
+            if field in labelled_fields:
+                results[field] = {"value": None, "rawtext": "", "confidence": 0,
+                                  "label_matched": None, "blank": True}
             continue
         # prefer currency-shaped values first, then higher label-match
         # confidence, then higher OCR confidence on the value itself
@@ -371,7 +417,31 @@ def run_elimination_pass(results, panel_currency_tokens):
     values), the field's exact token position — from the word-OCR method
     only, since that's the only method precise enough to disambiguate —
     is used to claim just that one token, leaving its siblings eligible
-    for the still-missing field. Mutates and returns `results`."""
+    for the still-missing field. Mutates and returns `results`.
+
+    This pass has NO geometric direction rule, deliberately, and adding the
+    one in matching.value_belongs_to_another_cell here would be wrong three
+    times over:
+
+      - It is unreachable for the case that motivates it. Since the blank
+        assertion above, a field whose label was found is never in `missing`,
+        and a field whose label was NOT found has no label token to measure
+        against — which is precisely the case this pass exists to cover.
+      - It was measured insufficient on its own. With the direction check but
+        without the blank assertion, 2026-08-10_235014 still reported
+        win=2914.05: the lowercase "win" on that frame is 20 px tall and never
+        cleared FUZZY_CUTOFF, so there was no label to test and the token went
+        through. The guard is exactly as fragile as the label OCR it is meant
+        to compensate for.
+      - It has to stay permissive when no label is found, or it destroys the
+        two records where this pass is RIGHT — Images/Screenshot 2026-08-04
+        120407 2.png (win=20.00) and 120446 2.png (win=40.00), whose value
+        panels contain no label tokens at all, and which are also the fixtures
+        behind server/validate/data/.
+
+    What actually disarmed this pass was upstream: rejecting both halves of a
+    torn number in matching.find_numeric_tokens leaves TWO fields missing, and
+    the `len(missing) != 1` guard below then returns on its own."""
     missing = [f for f in FIELD_LABELS if f not in results]
     if len(missing) != 1:
         return results

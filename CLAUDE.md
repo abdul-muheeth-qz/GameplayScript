@@ -441,13 +441,90 @@ height evenly: 24 bands over 961 px are 40 and 41 px tall and sum to exactly 961
 `1..BAND_COUNT` raises and names the constant to fix, because `crop_normalized_box` clamps — `BANDS
 = 25` of 24 would otherwise quietly crop the bottom row of pixels and read every meter blank.
 
-### Reading order breaks ties on a single-line meter bar
+### A value is never to the left of its label, and that is a rejection
 
-`matching.score_candidate` penalises a value found to the *left* of its label on the same line.
-Distance alone is undirected, and on a bar reading `CASH $2,208.35  WIN  BET $1.00` the cash
-value sits almost exactly between CASH and WIN — 214 px from one, 206 px from the other — so the
-nearer label won by 8 px and handed cash's money to WIN. The penalty is 1.1, below the 1.6 for an
-unrelated diagonal match, so a genuinely right-aligned layout can still outrank one.
+`matching.score_candidate` returns `math.inf` for a value found to the *left* of its label on the
+same visual row. It is a hard fact about the layout — the bar is a row of `LABEL value` cells,
+`CASH $2,915.05 | WIN $0.30 | BET $1.00` — and not a preference, so it is enforced as a rejection
+rather than a penalty. **Scoring it as merely unlikely was measured to lose.** The previous rule
+charged 1.1 for it, and on `2026-08-10_173530` the cash amount shredded into `"$2,190"` + `"90"`
+and the orphan `"90"`, sitting entirely to the left of the WIN label, went to WIN anyway:
+114.2 px × 1.1 = **125.7** against CASH's 317.7 × 0.5 = **158.9**. No penalty short of rejection
+changes that.
+
+Three things are load-bearing:
+
+- **Row identity comes from the token bounding boxes, never from `line_num`.** Both callers OCR
+  with `--psm 11`, under which tesseract emits one *block* per token and restarts `line_num`
+  inside each: measured over the fourteen fixtures and the captured ROI crops, every panel came
+  back with `block_num` running 1..N and `line_num` identically **1**. `same_line` was therefore
+  always True, which made the below/above/unrelated branches of `score_candidate` **dead code**
+  and let a junk token 78 px *below* a label score as though it sat beside it — that is how `cash`
+  was read off the fragment `"6."` at confidence 13 while the real $2,915.05 sat next to CASH.
+  `_token` no longer even records `line_num`.
+- **Left is tested on edges, not centres.** A value box is routinely 2–5× wider than its label
+  (`"$2,190"` is 181 px against `"CASH"`'s 96), so an amount that genuinely *starts* right of its
+  label can have its centre to the left of the label's. `dx` still orders the survivors.
+- **Above and below score the same, `STACKED_PENALTY` = 0.65.** The full layout rule is that a
+  value sits to the right of its label, or stacked directly above or below it, and **never** to
+  the left — all three placements are equally legitimate, so the multiplier must not rank them.
+  An earlier version charged above 0.75 against below's 0.65, guessing that below was the commoner
+  stacking; there is a game that draws the value *above* its title, and there the guess is a thumb
+  on the scale against the correct reading. Same-row-to-the-right keeps a slightly cheaper 0.5,
+  which is not a claim about legality: on a single-line meter bar it is the more specific reading,
+  and in a stacked layout there is no same-row candidate for it to outrank.
+- **A *stacked* value must be currency-shaped**, and that guard is what makes the two branches
+  above safe to enable at all. They were part of the same dead code, so switching them on is new
+  behaviour rather than a restoration, and unguarded they invented `win = 200.0` on three of the
+  fourteen fixtures: the bet-level buttons (100/200/300/500/800) nine label-heights below the WIN
+  label in a full-screen `dynamic` crop. **Bounding the vertical distance instead does not work** —
+  one of those pairings measures a gap of 0.03 label heights, because tesseract's box for that
+  `win` swallowed the panel divider and came back 173 px tall against the value's 56. A bare
+  integer that is not even on its label's row is a decoy every time; the same integer *on* the row
+  (the `CREDITS` meter reading 230313) is untouched. The cost of this guard is that a stacked meter
+  drawn as a bare integer would be missed — no such layout is in the corpus, and that is the line
+  to revisit first if a value-above-title game starts reading blank.
+
+**The other direction — a value so far right it belongs to the next cell — is decided by what
+stands between the two, never by how far apart they are.** `_something_in_between` looks for
+another title or another meter's money whose midpoint falls in the gap; empty space blocks
+nothing, because empty space *means* nothing. A game may draw `CASH        $2,914.05` with half
+the bar between them.
+
+This replaced a `MAX_SAME_ROW_GAP` of 4.0, chosen as the midpoint of a gap census taken on this
+cabinet — genuine pairs 0.35–2.62 of the taller box, cross-cell reaches 6.82–21.7, nothing in
+between. The census was accurate and the conclusion did not generalise: on a roomier layout a
+title and its *own* value measure 23.3 in those units, and the rule silently returned no value at
+all. Raising the constant only moves which layout it breaks, which is why there is no constant any
+more. Distance was only ever a proxy for "is there another cell in the way".
+
+**Blockers are `find_text_tokens` — every lettery token — not just the recognised titles**, and
+that distinction is load-bearing. A meter title is always an English word, so anything lettery is
+somebody's title even when OCR mangled it past `FUZZY_CUTOFF`. BET arrives as `"[B"` + `"ET"` on
+several frames; if only recognised titles could block, WIN would reach straight across that unread
+title and report BET's `$1.00` — which is exactly what the old distance cap had been preventing by
+accident. Numbers block too, so a neighbouring meter's money walls off its own cell. Dividers,
+bracket ticks and background artwork are in neither set and cannot separate a title from its
+value.
+
+**The rejection is only safe with the blank-meter assertion beside it, and neither may ship
+alone.** Rejection does not leave a meter blank — it promotes the *next* candidate, which on a
+meter bar is the neighbouring cell's money. Measured over the fourteen fixtures, rejection alone
+invented `win=1.0` on three of them by reaching past the blank WIN cell to BET's `$1.00`. So
+`extraction.extract_fields_via_panel_word_ocr` now writes a **blank record** for any field whose
+label it found but whose row holds no value it can claim (`labelled_fields`). That is a positive
+reading of an empty meter, and it closes the two holes an absent key opens: `pipeline` merges the
+word method over the per-cell one, and `run_elimination_pass` only fires for a field in `missing`.
+The record itself is byte-identical to the not-found record, so the output contract is unchanged;
+`roi._fields_resolved` must not count a blank, or a box wins the configured race on meters it
+could not read.
+
+One live consequence, worth knowing before touching this again: the rejection is what *exposed*
+the `-00` misread on `2026-08-10_173258`. WIN there used to take CASH's `$2,185.10` and lose it
+again to the mutual-nearest check, leaving null; with that pairing rejected, the mangled `"-00"`
+at confidence 83 was promoted into the record as a confident `-0.0`. Hence
+`matching._is_plausible_amount` refuses a signed token — a meter never shows a negative, and zero
+of the 42 captured records or either fixture layout ever has.
 
 ### Never take a suffix of a malformed number
 
@@ -461,6 +538,97 @@ Two rules now, in `find_numeric_tokens`, and the order matters: `OVERPRECISE_RE`
 the currency-shaped **prefix** of an amount with junk digits on the end; then the glued rule,
 which additionally requires letters in front of the number. Without the letters there is nothing
 to say the leading part is a label rather than the significant digits of the value itself.
+
+### A number torn in two is not two numbers, and neither half survives
+
+On the noisier crops Tesseract splits one amount into two tokens — true `$2,190.90` came back as
+`"$2,190"` + `"90"` (the decimal point lost outright), true `$2,186.20` as `"$2,18"` + `"6.20"`,
+and `$2,915.05` alongside a junk `"6."` at confidence 13. `NUMERIC_RE` cannot tell any of these
+from a whole amount, because its `\.?\d{0,2}` tail makes both the point and the cents optional.
+So `config.COMPLETE_AMOUNT_RE` states what a finished amount looks like, and
+`find_numeric_tokens` applies two rules in this order — the order is load-bearing:
+
+1. **`_drop_fragment_pairs` first, while both halves are still present to recognise each other
+   by.** Two digit-bearing tokens on one row, separated by less than `FRAGMENT_GAP` (0.6) of the
+   narrower one's per-character width, at least one of them not a complete amount: **drop both**.
+   Both, because on `2026-08-10_150454` the right half `"6.20"` is itself perfectly well-formed,
+   and dropping only `"$2,18"` reports a balance of **6.20** — a different wrong answer, and a
+   more plausible-looking one than the 2.18 that shipped.
+2. **Then reject any separator-bearing token that is not a complete amount.** A token with *no*
+   separator is kept: `"90"`, `"100"`, `"218295"` may be a legitimate credit count, and bare
+   integers are already deprioritised against currency-shaped values.
+
+Three constants, all measured, and **two of them are traps that the obvious values fall into**:
+
+- `FRAGMENT_GAP = 0.6`. The two real fragments measure **0.13** and **0.12**. The nearest pair in
+  the whole corpus that is *not* a torn number is 1.55 (two artwork glyph groups), the nearest
+  genuine number-beside-number is 3.95, and two adjacent meter values sit at 6.93. Twelvefold
+  separation; 0.6 is 4.6× above the fragments and 2.6× below the closest contender.
+- **No height-ratio condition.** The obvious `≤ 1.3` would have thrown away a real fragment:
+  `"$2,190"`|`"90"` measures **1.98**, because tesseract's box for the left half swallows the cell
+  divider and runs 85 px against the right half's 43. It would not have helped anyway — the
+  nearest non-fragment measures 2.11.
+- `FRAGMENT_ROW_OVERLAP = 0.3`, deliberately looser than `SAME_ROW_OVERLAP`. At 0.6 it would have
+  thrown away the other real fragment: `"$2,18"`|`"6.20"` shares only **0.45** of the shorter box.
+
+**Nothing is glued back together**, and that is a decision, not an omission. Rebuilding
+`$2,190.90` from `"$2,190"` and `"90"` means inventing the decimal point's position from a
+convention rather than recovering it from the image, and it fails silently and confidently if the
+engine dropped a digit along with the dot — the same family as the `155` misread above. A null
+cash meter is caught downstream (`validate.records.INFERABLE` holds `win` alone, so a blank
+balance raises); a wrong one is not.
+
+Rejecting *both* halves is also what disarms `run_elimination_pass` without touching it: two
+missing fields instead of one, and its own `len(missing) != 1` guard returns. That pass is
+deliberately left with no direction rule of its own — see its docstring for why all three obvious
+ways of adding one are wrong.
+
+Sanity check on the strictness, run over every baseline: across **64 distinct rawtexts** spanning
+the fourteen fixtures under two methods and all 52 captured frames, these rules drop exactly
+three — `"$2,18"`, `"$2,190"` and `"6."` — and every one is a known corrupted read.
+
+### Nothing was added to the Tesseract config, and `--dpi 300` is why
+
+`ocr_utils.SPARSE_TEXT_CONFIG` is the one string both sparse-text paths use. It is bare
+`--psm 11`; the comment above it lists what was measured and refused, and that list is the
+deliverable. **A four-crop probe is not enough to ship an engine flag on** — this is the case that
+proves it, and the reason the corpus run in the verification procedure is not optional.
+
+`--dpi 300` looked like the answer and is not. Tesseract estimates source resolution from median
+blob height and that estimate drives which small blobs are discarded as noise and where word
+breaks fall; we hand it the same meter bar at 3×, 5× or 6× depending on path and crop, so it was
+varying for reasons unrelated to the text. Against the four probe crops it was the **only** option
+that read both `"$2,190.90"` and `"$2,186.20"` whole, at no extra cost, and byte-identical on the
+tight control (76.7/77.7 confidence, 14 tokens either way). Against the fourteen fixtures and 52
+captured frames it was a net loss:
+
+| | with `--dpi 300` |
+|---|---|
+| `2026-08-10_173653` before/after | two correct balances → **null** |
+| `Screenshot 2026-08-05 153757` | `bet 176` → **null** |
+| `2026-08-10_174208/after` | `$2,184.95` → **184.95** — a confident wrong number |
+| ledger | 24 pass / 1 fail → **22 / 2** |
+| link agreement | 22 → **19** |
+
+Three others, same matrix, all refused:
+
+| Rejected | Measured result |
+|---|---|
+| `load_punc_dawg=0` etc. (all four dawgs) | **No effect whatsoever** on any of the four crops. The LSTM decoder's dictionary was the most plausible mechanism for a mid-number word break, and it is simply not the cause. Placebo. |
+| Morphological top-hat before Otsu | Fixes `"$2,190.90"` but **not** `"$2,186.20"`, for an extra pass. (It does move the threshold from 102 to 70, against the strip's own local Otsu of 67 — so it is the right tool if a *thresholding* problem ever shows up. It is not this one.) |
+| Dropping the black-on-white/white-on-black polarity race | Refused: the target came back whole **41 times on each** polarity, a dead tie. `panel_word_ocr` keeps both. |
+
+`--psm 6` is the one untried option with evidence behind it — it reads both torn amounts whole and
+cuts a cluttered crop from 62 tokens to 18 — but psm 11 still wins the tight crop, so it would have
+to be a second raced pass at double the OCR cost per panel. Start there if the tearing ever needs
+solving at the engine level rather than downstream.
+
+The colour hypothesis died here too, and is worth recording so it is not retried: the meter text
+is nowhere near the threshold. Glyph interiors measure grey 198 (CASH label), 224 (cash value),
+**233 (the saturated orange WIN value)** and 215 (BET), against an Otsu threshold of 102. Switching
+to the V channel *halves* the separation between real values and the dim blue credit subscripts
+that are the actual decoys — 137 grey points down to 50. The problem was never contrast or hue; it
+was segmentation.
 
 `pipeline.process_image` takes `roi_dir` as an argument. It used to be a module constant
 `"roi_crops"`, which is CWD-relative — run from a server and the crops land wherever the server

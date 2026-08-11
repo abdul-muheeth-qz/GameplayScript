@@ -20,6 +20,26 @@ FIELD_LABELS = {
 # Matches numbers like 1,250.00 / $45.50 / 980 / 2.00 / 1250
 NUMERIC_RE = re.compile(r"^[\$₹€£]?\s?-?[\d,]+\.?\d{0,2}$")
 
+# A *complete* amount: the decimal point followed by exactly two digits, with at
+# least one digit in front of it. NUMERIC_RE cannot tell a whole amount from a
+# torn one -- its `\.?\d{0,2}` tail makes both the point and the cents optional,
+# so "$2,190" (the left half of a shredded "$2,190.90") and "6." (debris) pass it
+# just as "$2,182.95" does. find_numeric_tokens uses this to tell the two apart.
+#
+# The named assumption, because it is the one thing that would make this wrong:
+# EVERY meter on this cabinet and on the bottom_bar layout draws exactly two
+# decimal places, with "." as the decimal point and "," only ever grouping
+# thousands -- verified across all 42 captured records and both fixture layouts.
+# Hence the trailing separator must be a period: `[.,]\d{2}` would also accept
+# "$2,18", which is precisely the truncated half this exists to catch, and no
+# regex can tell that from a European "20,00" drawn by some future game. If such
+# a layout ever appears this is the single place to relax, and the relaxation
+# costs the ability to detect a comma-truncated fragment.
+#
+# `[\d,.]*` rather than `[\d,]*` in the head keeps "1.175.76" -- the
+# thousands-comma-misread-as-a-period case that clean_numeric_value repairs.
+COMPLETE_AMOUNT_RE = re.compile(r"^[\$₹€£]?\s?-?[\d,.]*\d\.\d{2}$")
+
 FUZZY_CUTOFF = 0.72  # similarity threshold for label matching (handles OCR noise)
 
 NUMERIC_WHITELIST = "0123456789.,$₹€£-"

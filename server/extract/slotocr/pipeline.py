@@ -11,7 +11,8 @@ import cv2
 from .config import FIELD_LABELS
 from .ocr_utils import preprocess_for_ocr, run_ocr_data
 from .roi import locate_meter_roi
-from .matching import find_label_tokens, find_numeric_tokens, extract_field_value, clean_numeric_value
+from .matching import (find_label_tokens, find_numeric_tokens, find_text_tokens,
+                       extract_field_value, clean_numeric_value)
 from .extraction import extract_all, run_elimination_pass
 
 LOG = logging.getLogger("extract")
@@ -116,6 +117,9 @@ def process_image(image_path, roi_dir=None, roi_method=None):
         r.pop("row_id", None)
         r.pop("box", None)
         r.pop("token_pos", None)
+        # "blank" is internal: an empty meter leaves the same all-null record
+        # the not-found branch below writes, so the output contract is unchanged.
+        r.pop("blank", None)
 
     # ---- (b) LAST-RESORT FALLBACK: whole-image nearest label/value match --
     # Used only when NEITHER panel method found any confident meter panel
@@ -129,9 +133,15 @@ def process_image(image_path, roi_dir=None, roi_method=None):
         gray, binary, scale = preprocess_for_ocr(roi_image)
         data = run_ocr_data(gray, binary)
         numeric_tokens = find_numeric_tokens(data)
+        # Every lettery token, not just the recognised titles: they are what
+        # tells matching.score_candidate that a value sits in someone else's
+        # cell rather than merely far from this one, and a title OCR could not
+        # read still marks where the next cell starts.
+        all_labels = find_text_tokens(data)
         for field in FIELD_LABELS:
             label_matches = find_label_tokens(data, FIELD_LABELS[field])
-            best = extract_field_value(label_matches, numeric_tokens, img_w * scale, img_h * scale)
+            best = extract_field_value(label_matches, numeric_tokens,
+                                       img_w * scale, img_h * scale, all_labels)
             if best:
                 fallback_results[field] = {
                     "value": clean_numeric_value(best["value_token"]["text"]),

@@ -613,14 +613,83 @@ An amount with junk digits stuck on the end now keeps its currency-shaped **pref
 glued-value rule additionally requires letters in front of the number — without them there is
 nothing to say the leading part is a label rather than the significant digits of the value itself.
 
-### Reading order, and an 8-pixel bug
+### A number torn in two is not two numbers
 
-Label-to-value pairing scores by distance with a direction penalty. On this bar —
-`CASH $2,208.35   WIN   BET $1.00`, all on one line — the cash value sits almost exactly between
-CASH and WIN: 214 px from one, 206 px from the other. Plain distance is undirected, so WIN won by
-8 px and was reported as holding $2,208.35. A label is written *before* its value, so a value
-found behind one now costs 1.1 rather than 0.5 — still below the 1.6 for an unrelated diagonal
-match, so a genuinely right-aligned layout can outrank it.
+On the noisier crops Tesseract splits one amount across two tokens: true `$2,190.90` came back as
+`"$2,190"` + `"90"` with the decimal point lost outright, true `$2,186.20` as `"$2,18"` + `"6.20"`,
+and `$2,915.05` alongside a junk `"6."` at confidence 13. Nothing in the old numeric rule could
+tell any of these from a whole amount, because the decimal point and the cents were both optional
+in it.
+
+Both halves of a torn number are now discarded — both, because on one frame the right half
+`"6.20"` is itself a perfectly well-formed amount, and dropping only the malformed left half
+reports a balance of **6.20**: a different wrong answer, and a more convincing one. A token
+carrying a separator must now be a complete amount, ending in two decimals; a token carrying none
+is left alone, since a bare integer may be a real credit count.
+
+They are recognised by how close together they sit — the two real fragments are separated by 0.13
+and 0.12 of a character width, while the nearest pair in the corpus that is *not* a torn number is
+1.55 and two adjacent meter values sit at 6.93. Nothing is glued back together: reconstructing
+`$2,190.90` from `"$2,190"` and `"90"` means inventing where the decimal point went, and it fails
+silently if the engine dropped a digit along with it. A null meter is caught downstream; a wrong
+one is not.
+
+### A value is never to the left of its label
+
+A meter value is drawn to the right of its title, or stacked directly above or below it — and
+never behind it. On this bar — `CASH $2,915.05 | WIN $0.30 | BET $1.00`, all on one line — it is
+always the first of those; another game puts the value above the title instead. All three
+placements are equally valid, so the scoring treats above and below identically and **rejects
+left outright** rather than charging it a penalty.
+
+How far to the right does not matter, and an earlier version that thought it did was wrong in a
+way worth recording. Space between a title and its value carries no meaning — a game may leave
+half the bar empty — so a cap tuned on this cabinet's tight strip read a roomier layout as two
+different cells and returned nothing at all. What settles it instead is *what stands in the gap*:
+another title, or another meter's money. Since a title is always an English word and a value is
+always digits, any lettery token counts as a title even when OCR mangled it past recognition —
+which matters, because BET often arrives as `[B` + `ET`, and without that a blank WIN would reach
+across it and claim BET's dollar. Charging for it was measured to lose: when
+the cash amount shredded into `"$2,190"` + `"90"`, the orphan `"90"` sat entirely to the left of
+the WIN label and was reported as the win anyway, 125.7 against CASH's 158.9.
+
+Two discoveries came out of fixing it. First, the row test was reading Tesseract's `line_num`,
+which in sparse-text mode is **identically 1 on every token** — so "same line" was always true,
+three of the five direction branches had never once executed, and a junk token 78 px *below* a
+label could score as though it sat beside it. Row identity now comes from the bounding boxes.
+Second, rejection alone makes things worse: it does not leave a meter blank, it promotes the next
+candidate, which on a meter bar is the neighbouring cell's money. Across the fourteen samples it
+invented a win of $1.00 on three of them by reaching past an empty WIN cell to BET. So a field
+whose label is found with nothing on its row to claim is now recorded as **blank** — a positive
+reading of an empty meter, which is what most before-frames actually show. The two changes are one
+change and neither is safe alone.
+
+Nothing was added to the Tesseract config to stop the tearing at its source, and the near miss is
+worth recording. Tesseract guesses source resolution from how tall the letters are, and that guess
+decides which small marks are noise and where words break — so the same meter bar handed over at
+3×, 5× or 6×, depending on how tightly the ROI cropped, was being read under three different sets
+of assumptions. Pinning it with `--dpi 300` was the only option that read both shredded amounts
+whole, cost nothing, and changed a tight crop not at all. Across the fourteen samples and 52
+captured frames it still lost: two correct balances went blank, and one frame read `$2,184.95` as
+**184.95** — a confident wrong number, which is the one thing never worth trading for. It is not
+used. Disabling Tesseract's dictionaries does nothing whatsoever, the two image polarities tie
+exactly so both are kept, and `--psm 6` is the one untried idea with evidence behind it, at the
+price of a second OCR pass per panel.
+
+The colour theory died here too. The meter text is nowhere near the threshold — the saturated
+orange WIN value measures grey 233 against a threshold of 102, and switching to a brightness
+channel *halves* the separation between real values and the dim credit subscripts that are the
+actual decoys. The problem was never contrast or hue. It was Tesseract deciding where one number
+ends.
+
+Fixing the row test also woke up the branches that pair a value *stacked* above or below its
+label, which had never once run — so the value-above-title layout was, in practice, unreachable.
+Unguarded they invented a win of 200 on three samples from the bet-level buttons sitting nine
+label-heights away, and the vertical distance cannot separate them — one of those pairings
+measures a gap of 0.03 label heights, because Tesseract's box for that label swallowed the panel
+divider. What separates them is that every fabricated value is a bare integer, so a stacked value
+must now look like money. A bare integer on the label's *own* row is still fine, which is what a
+credits meter shows.
 
 ### Checking it without a cabinet
 

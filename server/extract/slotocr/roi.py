@@ -87,9 +87,16 @@ def crop_normalized_box(image, box):
 
 
 def _fields_resolved(extracted):
-    """How many distinct meter fields a (cell, word, tokens) triple resolved."""
+    """How many distinct meter fields a (cell, word, tokens) triple resolved.
+
+    A field the word method asserted BLANK does not count. It carries a real
+    reading -- the label was found and its meter is empty -- but it resolved no
+    value, and counting it would let a box win this race, and clear
+    CONFIDENT_FIELDS, on the strength of meters it could not actually read.
+    """
     cell_results, word_results, _ = extracted
-    return len(set(cell_results) | set(word_results))
+    return len(set(cell_results)
+               | {f for f, r in word_results.items() if not r.get("blank")})
 
 
 # ---------------------------------------------------------------------------
