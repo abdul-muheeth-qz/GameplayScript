@@ -1,4 +1,12 @@
-import { api, type FrameRecord, type MeterField, type RunState } from "@/lib/api"
+import {
+  api,
+  FRAME_LABELS,
+  FRAME_STAGES,
+  type FrameRecord,
+  type FrameStage,
+  type MeterField,
+  type RunState,
+} from "@/lib/api"
 import { Heading } from "@/components/FramePanel"
 import { cn } from "@/lib/utils"
 
@@ -27,16 +35,14 @@ function FrameRecordCard({
   record,
 }: {
   run: RunState
-  which: "before" | "after"
+  which: FrameStage
   record: FrameRecord
 }) {
   const crop = run.crops[which]
   return (
     <div className="min-w-0 rounded-sm border border-rule bg-slab">
       <div className="flex items-baseline justify-between border-b border-rule px-4 py-3">
-        <h4 className="eyebrow text-numeral">
-          {which === "before" ? "Before the spin" : "After the spin"}
-        </h4>
+        <h4 className="eyebrow text-numeral">{FRAME_LABELS[which]}</h4>
         {/* Which route found the meter bar. When a value looks wrong this is the first
             thing to read: a configured box that missed falls back to detection, and
             detection returning most of the screen is what loses the BET meter. */}
@@ -49,7 +55,7 @@ function FrameRecordCard({
         <div className="border-b border-rule bg-ink/60 p-2">
           <img
             src={api.fileUrl(run.run_id, crop, run.run_id)}
-            alt={`The strip of the ${which} frame that was read`}
+            alt={`The strip of the ${FRAME_LABELS[which].toLowerCase()} frame that was read`}
             className="mx-auto block h-auto w-full max-w-full"
           />
         </div>
@@ -94,16 +100,25 @@ function FrameRecordCard({
 }
 
 export function MeterReadout({ run }: { run: RunState }) {
-  if (!run.extraction) return null
+  const extraction = run.extraction
+  if (!extraction) return null
+  // Whatever was extracted, which is two records on a loss and three on a win.
+  const stages = FRAME_STAGES.filter((k) => extraction[k])
+  if (!stages.length) return null
   return (
     <section>
       <Heading
         label="Meters"
         note="cropped to the meter strip, then read with Tesseract"
       />
-      <div className="grid gap-4 sm:grid-cols-2">
-        <FrameRecordCard run={run} which="before" record={run.extraction.before} />
-        <FrameRecordCard run={run} which="after" record={run.extraction.after} />
+      <div
+        className={
+          stages.length > 2 ? "grid gap-4 sm:grid-cols-3" : "grid gap-4 sm:grid-cols-2"
+        }
+      >
+        {stages.map((which) => (
+          <FrameRecordCard key={which} run={run} which={which} record={extraction[which]!} />
+        ))}
       </div>
     </section>
   )

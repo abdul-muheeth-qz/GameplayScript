@@ -12,7 +12,21 @@ What it does, in order:
    logs them under, and what the deck is currently offering, read out of the game's own log.
 3. Starts OBS recording into the run folder, screenshots the screen before the spin, clicks
    Repeat Bet on the i-Deck, then waits for the *game* to say the spin is finished -- however
-   long that takes -- screenshots the result, stops the recording, and stops.
+   long that takes -- screenshots the result, and **if the spin won, takes the win on the glass
+   and screenshots that too**, then stops the recording.
+
+So a spin captures two frames, or three if it won (`server.frames` names them):
+
+    pre_spin       the meters before the wager
+    spin_result    the outcome, WIN meter showing what it paid
+    win_collected  after TAKE WIN -- the win is now in the cash meter. Wins only
+
+The third frame is not a nicety. A win is announced but **not paid**: the game parks on the
+collect/gamble offer and holds the money there, so `spin_result` shows a cash meter with the bet
+taken off and nothing added back. The spin's money is only settled once the win is collected, and
+the i-Deck cannot do that without betting again -- Repeat Bet reads "Collect Win" and means
+*collect **and** bet*. So the collect is a click on the game's own TAKE WIN (`gameclick`),
+confirmed against the game log, and the frame after it is the spin's final state.
 
 The wait is the point. An ordinary spin takes ~3.3 s but a Hold & Spin feature ran 53 s over 23
 free spins, so no fixed delay can be right for both; the game log is asked instead. Every event
@@ -41,9 +55,10 @@ import sys
 import time
 from datetime import datetime
 
+from .. import frames
 from ..settings import DEFAULT_CONFIG, ROOT, load_config
 
-from . import gamelog, ideck, winfocus
+from . import gameclick, gamelog, ideck, winfocus
 from .obs_client import MAX_DIM, ObsError, ObsSession, Recording, clamp_dim
 
 LOG = logging.getLogger("spin")
@@ -68,6 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="check everything and save one screenshot, without spinning")
     parser.add_argument("--no-record", action="store_true",
                        help="skip the OBS video recording; capture only the two frames")
+    parser.add_argument("--no-collect", action="store_true",
+                       help="don't take the win at the end of a winning spin. Leaves it on the "
+                            "collect/gamble offer, so the run captures two frames instead of "
+                            "three and its last frame shows cash the win was never paid into")
+    parser.add_argument("--collect-first", action="store_true",
+                       help="if a win is pending, take it by clicking the game's own TAKE WIN "
+                            "before betting, instead of letting the i-Deck press collect and "
+                            "bet in one. Keeps the collect out of this spin's before/after pair")
     parser.add_argument("--out", help="base folder that run folders are created in")
     parser.add_argument("--run-dir",
                        help="write into exactly this folder, instead of composing "
@@ -314,6 +337,73 @@ def await_meters(watcher: gamelog.GameLogWatcher,
     return seen, settled
 
 
+def take_win(window, watcher: gamelog.GameLogWatcher, game_cfg: dict,
+             timeout_s: float) -> dict:
+    """Collect a win on the glass, and wait for the game to finish doing it.
+
+    This is the only reason `gameclick` exists, and it is used at two different moments for the
+    same reason: the i-Deck has no separate TAKE WIN. With a win pending, Rebet reads "Collect
+    Win" and means *collect **and** bet again*, so the deck cannot settle a win without starting
+    another spin, and any pair of frames spanning that press has a collect hidden inside it.
+
+    At the **end** of a spin (the ordinary case, `spin.collect_after_spin`) this is what makes the
+    spin's money final: a win is announced but not paid, so `spin_result` shows cash with the bet
+    taken off and nothing added back, and the third frame after this call is the one where the
+    win is actually in the cash meter. At the **start** (`--collect-first`) it clears a win that
+    something else left pending, so the run does not begin mid-transaction.
+
+    **Waits for `game_over`, not for `gamelog.SETTLED`.** That is the opposite of `await_meters`
+    and it is measured, not assumed: over the 27 collects in this cabinet's two logs, `decline`
+    to `GameOverMsg` runs 0.20 s median, 0.47 s at p90 and **15.47 s** at worst, and
+    `results_done` appears in between on **0 of 27** of them. Handing this to `await_meters`
+    would wait out the whole 90 s of `spin.meter_settle_s` every time and then report that
+    nothing settled. `game_over` is what ends a collect -- the same event `watch.actions`
+    already uses as its round boundary, and for the same reason.
+
+    The bound is flat rather than an idle timeout that restarts, for the reason `await_meters`
+    is: this waits for one specific marker with a measured worst case, not for an open-ended
+    feature.
+    """
+    targets = game_cfg.get("targets") or {}
+    if "take_win" not in targets:
+        raise gameclick.GameClickError(
+            "there is no \"take_win\" target in \"game.targets\" in config.json, so the win "
+            "cannot be collected on the glass. Measure one with "
+            "`python -m server.capture.gameclick --calibrate` while a win is pending.")
+
+    record = gameclick.deliver(
+        window, watcher, targets["take_win"],
+        method=game_cfg.get("click_method", "sendinput"),
+        hold_ms=int(game_cfg.get("click_hold_ms", 80)),
+        foreground=bool(game_cfg.get("foreground", True)),
+        confirm_timeout=float(game_cfg.get("confirm_timeout_s", 2.0)),
+        expect="take_win")
+    if not record["landed"]:
+        # Fatal rather than a warning, both ways round. At the end of a spin a failed collect
+        # means the final frame would show a win that is still sitting on the offer, and the
+        # ledger would be short by exactly that win; at the start it means spinning with the old
+        # win still pending, which is the conflated pair this avoids.
+        raise gameclick.GameClickError(
+            "could not collect the win by clicking the game: " + record["reading"])
+    LOG.info("collected the win on the glass at %s (%s)", record["point"], record["method"])
+
+    followed: list[dict] = []
+    for event in watcher.drain(timeout_s, timeout_s):
+        row = _row(event)
+        followed.append(row)
+        LOG.info("   %s  %s", row["game_clock"], row["note"])
+        if event.name == "game_over":
+            break
+    record["events"] = record["events"] + [r["event"] for r in followed]
+    record["completed"] = any(r["event"] == "game_over" for r in followed)
+    if not record["completed"]:
+        LOG.warning("WARNING: the game never logged a game over within %.0fs "
+                    "(spin.collect_timeout_s) after the collect, so the cash meter may still "
+                    "be counting up in the before frame -- treat its balance as unverified.",
+                    timeout_s)
+    return record
+
+
 def classify(events: list[dict]) -> dict:
     """What kind of spin that was, from the events it produced.
 
@@ -399,6 +489,13 @@ def run(args) -> int:
     # worst case of 44.8 s. 0 turns it off and restores the old behaviour of shooting
     # `after_delay_ms` after the win was announced.
     meter_settle = float(spin_cfg.get("meter_settle_s", 90.0))
+    # How long to wait for the game over that ends a separate collect. 60 s against a measured
+    # worst case of 15.47 s over 27 collects; see take_win.
+    collect_timeout = float(spin_cfg.get("collect_timeout_s", 60.0))
+    collect_first = args.collect_first or bool(spin_cfg.get("collect_before_bet", False))
+    # On by default: a win that is never collected leaves the spin's money unsettled, and the
+    # final frame showing a cash meter the win was never paid into.
+    collect_after_spin = (not args.no_collect) and bool(spin_cfg.get("collect_after_spin", True))
     if args.run_dir:
         # Named by the caller, so it can find the artefacts without racing the timestamp.
         run_dir = args.run_dir if os.path.isabs(args.run_dir) else os.path.join(ROOT,
@@ -478,16 +575,47 @@ def run(args) -> int:
             LOG.info("dry run OK -- OBS, both windows, the panel layout, the game log and "
                      "screenshotting all work. It would press %s (position %d). Next: run it "
                      "without --dry-run", button.name, button.position)
+            target = (cfg.get("game", {}).get("targets") or {}).get("take_win")
+            named = target or ("<nothing -- there is no \"take_win\" in game.targets. Measure "
+                               "one with `gameclick --calibrate`>")
+            if collect_after_spin:
+                LOG.info("if the spin wins, the win would then be taken by clicking %s, giving a "
+                         "third frame (%s.%s)", named, frames.WIN_COLLECTED, img_format)
+            else:
+                LOG.info("--no-collect: a win would be left on the offer, so this run would "
+                         "capture two frames and its last would show unpaid cash")
+            if collect_first:
+                LOG.info("--collect-first is on: a *previous* pending win would be cleared by "
+                         "clicking %s before betting. Right now there is %s.", named,
+                         "one pending" if state.get("gamble") == "offerState"
+                         else "none pending, so it would change nothing")
             return EXIT_OK
 
         # 3. Rolling, before, spin, wait for the game to finish it, after.
         if recorder is not None:
             recorder.start(scene, source)
-        before = shot(obs, source, os.path.join(run_dir, f"before.{img_format}"),
-                      size, img_format, quality)
 
         # A win left uncollected -- by a previous run or by hand -- changes what our press does.
         carry = state.get("gamble") == "offerState"
+        stale_win = stale_collect = None
+        if carry and collect_first:
+            LOG.info("a win is pending and the collect is being taken separately, on the glass, "
+                     "so the before frame is a settled screen and this spin's ledger has no "
+                     "collect folded into it")
+            # Shot before the click, not after: the post-collect screen is what before.* is
+            # about to be, so the frame that would otherwise be lost is the one showing the win
+            # still standing. It is what makes the collect itself auditable.
+            stale_win = shot(obs, source, os.path.join(run_dir, f"stale_win.{img_format}"),
+                             size, img_format, quality)
+            stale_collect = take_win(game, watcher, cfg.get("game", {}), collect_timeout)
+            carry = False
+            # The game over lands while the last frame of the count-up is still being drawn --
+            # the same reason the after shot waits.
+            time.sleep(after_delay)
+
+        pre_spin = shot(obs, source,
+                        os.path.join(run_dir, f"{frames.PRE_SPIN}.{img_format}"),
+                        size, img_format, quality)
         if carry:
             LOG.info("a win is pending, so this press collects it and bets again")
 
@@ -525,13 +653,33 @@ def run(args) -> int:
             if settled is None:
                 LOG.warning("WARNING: the game never said the meters had settled within %.0fs "
                             "(spin.meter_settle_s). Shooting anyway; the WIN meter may still be "
-                            "counting up, so treat the amount in after.%s as unverified.",
-                            meter_settle, img_format)
+                            "counting up, so treat the amount in %s.%s as unverified.",
+                            meter_settle, frames.SPIN_RESULT, img_format)
         # The terminal event fires when the game decides the spin is over, while the last frame
         # of it is still being drawn.
         time.sleep(after_delay)
-        after = shot(obs, source, os.path.join(run_dir, f"after.{img_format}"),
-                     size, img_format, quality)
+        spin_result = shot(obs, source,
+                           os.path.join(run_dir, f"{frames.SPIN_RESULT}.{img_format}"),
+                           size, img_format, quality)
+
+        # The third frame, and the reason it exists: `spin_result` shows a cash meter with the
+        # bet taken off and the win *not* added, because the game holds a win on the
+        # collect/gamble offer instead of paying it. So a winning spin is not finished here --
+        # take the win on the glass and photograph the meter that results. That frame is the
+        # spin's final state and what the ledger is closed against.
+        win_collected = win_collect = None
+        if terminal == "win" and collect_after_spin:
+            LOG.info("the spin won, so the win is being taken on the glass to settle it")
+            win_collect = take_win(game, watcher, cfg.get("game", {}), collect_timeout)
+            time.sleep(after_delay)
+            win_collected = shot(obs, source,
+                                 os.path.join(run_dir, f"{frames.WIN_COLLECTED}.{img_format}"),
+                                 size, img_format, quality)
+        elif terminal == "win":
+            LOG.warning("WARNING: the spin won but the win was left on the offer "
+                        "(spin.collect_after_spin is off), so %s.%s shows a cash meter the win "
+                        "has not been paid into yet.", frames.SPIN_RESULT, img_format)
+
         measured = round(time.monotonic() - started, 3)
         # Stopped here rather than in the teardown, so the video's own details make it into
         # spin.json. Stopping it twice is harmless.
@@ -553,8 +701,20 @@ def run(args) -> int:
             "button": {"name": button.name, "position": button.position,
                        "pressed_at": pressed_at},
             "collected_a_pending_win": carry,
-            "before": before,
-            "after": after,
+            # The frames, keyed by the names in server.frames, which is what extract reads and
+            # what the UI labels. `win_collected` is absent from a losing spin.
+            "frames": {name: entry for name, entry in
+                       ((frames.PRE_SPIN, pre_spin),
+                        (frames.SPIN_RESULT, spin_result),
+                        (frames.WIN_COLLECTED, win_collected)) if entry},
+            # The click that settled this spin's win: the point, how it was delivered, and what
+            # the game logged in answer -- so a verdict reached over these frames can be traced
+            # back to the input behind it. None on a losing spin.
+            "win_collect": win_collect,
+            # Only when --collect-first found a win that something else had left pending. Not
+            # part of the ledger: a diagnostic pair showing what was cleared before betting.
+            "stale_win": stale_win,
+            "stale_collect": stale_collect,
             "measured_s": measured,
             "terminal_event": terminal,
             # None on a losing spin (nothing to wait for) and on a win the game never settled.
@@ -573,12 +733,14 @@ def run(args) -> int:
         LOG.info("spin finished in %.2fs on %s%s: %s%s", measured, terminal or "a timeout",
                  f" then {settled}" if settled else "", summary["outcome"],
                  f", stops {summary['final_stops']}" if summary["final_stops"] else "")
+        LOG.info("%d frames: %s", len(record["frames"]), ", ".join(
+            f"{name}.{img_format}" for name in record["frames"]))
 
     except KeyboardInterrupt:
         LOG.warning("interrupted")
         exit_code = EXIT_ABORTED
     except (ObsError, winfocus.WindowNotFound, ideck.IdeckError, gamelog.GameLogError,
-            RuntimeError) as exc:
+            gameclick.GameClickError, RuntimeError) as exc:
         LOG.error("error: %s", exc)
         exit_code = EXIT_ERROR
     except Exception:

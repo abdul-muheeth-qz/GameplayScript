@@ -86,7 +86,7 @@ export function LedgerVerdict({ verdict }: { verdict: Verdict }) {
         {verdict.record ? (
           <div className="mx-auto max-w-xl space-y-2">
             <Row value={amount(cash)} label="cash before" />
-            <Row sign="+" value={amount(win)} label="win standing" assumed={assumed.has("win")} />
+            <Row sign="+" value={amount(win)} label="the spin paid" assumed={assumed.has("win")} />
             <Row sign="−" value={amount(bet)} label="bet placed" assumed={assumed.has("bet")} />
 
             {/* The rule draws itself once, the way a subtotal line gets struck. */}
@@ -97,7 +97,15 @@ export function LedgerVerdict({ verdict }: { verdict: Verdict }) {
             </div>
 
             <Row result value={amount(verdict.computed_cash)} label="should be" />
-            <Row result value={amount(verdict.expected_cash)} label="the meter read" />
+            <Row
+              result
+              value={amount(verdict.expected_cash)}
+              label={
+                verdict.stages?.includes("win_collected")
+                  ? "the meter read, once collected"
+                  : "the meter read"
+              }
+            />
 
             {difference !== null && difference !== 0 && (
               <div className="flex items-baseline gap-4 pt-1">

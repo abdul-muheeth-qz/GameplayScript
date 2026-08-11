@@ -6,9 +6,13 @@ a restart or a second browser tab all see the same thing, and a run from last we
 replays exactly like one from a minute ago.
 
     captured_files/<run_id>/
-        before.png  after.png  spin.json  run.log  spin.mp4    capture
-        extract/before.json  extract/after.json  *_roi.png      extract
-        validate.json                                           validate
+        pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
+        win_collected.png                                             capture, wins only
+        extract/pre_spin.json  extract/spin_result.json  *_roi.png    extract
+        validate.json                                                 validate
+
+A winning spin has three frames, because a win is not in the cash meter until it is
+collected -- see `server.frames`, which owns those names.
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ import subprocess
 import sys
 from datetime import datetime
 
+from . import frames as frame_names
 from .settings import ROOT, captures_dir
-from .extract.runner import extract_dir, frame_path, read_frames
+from .extract.runner import extract_dir, read_frames
 from .validate.runner import read_result
 
 LOG = logging.getLogger("server")
@@ -155,11 +160,15 @@ def read_spin(cfg: dict, run_id: str) -> dict | None:
 
 
 def frames(cfg: dict, run_id: str) -> dict:
-    """{"before": "before.png", "after": "after.png"} for whichever frames exist."""
+    """{"pre_spin": "pre_spin.png", ...} for whichever frames this run captured.
+
+    Two on a losing spin and three on a winning one, so the UI must render whatever is here
+    rather than expecting a fixed pair.
+    """
     folder = run_dir(cfg, run_id)
     found = {}
-    for name in ("before", "after"):
-        path = frame_path(folder, name)
+    for name in frame_names.ORDER:
+        path = frame_names.find(folder, name)
         if path:
             found[name] = os.path.basename(path)
     return found
@@ -169,8 +178,8 @@ def crops(cfg: dict, run_id: str) -> dict:
     """The ROI crop each frame was read from, as run-folder-relative paths."""
     folder = run_dir(cfg, run_id)
     found = {}
-    for name in ("before", "after"):
-        frame = frame_path(folder, name)
+    for name in frame_names.ORDER:
+        frame = frame_names.find(folder, name)
         if not frame:
             continue
         stem = os.path.splitext(os.path.basename(frame))[0]
@@ -192,6 +201,9 @@ def summarise(spin: dict | None) -> dict | None:
         "button": (spin.get("button") or {}).get("name"),
         "capture_size": spin.get("capture_size"),
         "collected_a_pending_win": spin.get("collected_a_pending_win"),
+        # Whether the win at the end of this spin was taken on the glass, which is what makes
+        # the third frame exist and the spin's cash meter final.
+        "win_collected": bool(spin.get("win_collect")),
         "final_stops": spin.get("final_stops"),
         "video": (spin.get("video") or {}).get("file"),
         "event_count": len(spin.get("events") or []),

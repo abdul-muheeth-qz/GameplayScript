@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from "react"
 import { AlertCircle, RotateCcw } from "lucide-react"
 
-import { api, type Health, type RunState } from "@/lib/api"
+import {
+  api,
+  FRAME_LABELS,
+  FRAME_STAGES,
+  type Health,
+  type RunState,
+} from "@/lib/api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -72,7 +78,9 @@ export default function App() {
     return unlocked && !busy ? "ready" : "locked"
   }
 
-  const captured = Boolean(run?.frames.before && run?.frames.after)
+  // The two frames every spin has. A win adds a third, which is not required to call the
+  // capture step done -- a losing spin never gets one.
+  const captured = Boolean(run?.frames.pre_spin && run?.frames.spin_result)
   const extracted = Boolean(run?.extraction)
   const validated = Boolean(run?.validation)
 
@@ -80,7 +88,7 @@ export default function App() {
     {
       ordinal: "01",
       name: "Capture",
-      blurb: "Opens OBS, presses Repeat Bet on the i-Deck, and shoots a frame either side of the spin.",
+      blurb: "Opens OBS, presses Repeat Bet on the i-Deck, and shoots a frame either side of the spin — and a third after taking the win, if it won.",
       action: busy === "capture" ? "Spinning…" : "Start",
       status: statusOf("capture", true, captured),
       detail: run?.spin && (
@@ -92,6 +100,12 @@ export default function App() {
           />
           <Detail term="Ended on" value={run.spin.terminal_event ?? "a timeout"} />
           <Detail term="Pressed" value={run.spin.button} />
+          {run.spin.won && (
+            <Detail
+              term="Win"
+              value={run.spin.win_collected ? "taken on the glass" : "left on the offer"}
+            />
+          )}
         </dl>
       ),
       onRun: () => step("capture", () => api.capture()),
@@ -99,13 +113,14 @@ export default function App() {
     {
       ordinal: "02",
       name: "Extract",
-      blurb: "Crops both frames to the meter strip and reads cash, win and bet off them.",
+      blurb: "Crops every frame to the meter strip and reads cash, win and bet off them.",
       action: busy === "extract" ? "Reading…" : "Extract",
       status: statusOf("extract", captured, extracted),
       detail: run?.extraction && (
         <dl className="space-y-1">
-          <Detail term="Before" value={run.extraction.before.roi_source} />
-          <Detail term="After" value={run.extraction.after.roi_source} />
+          {FRAME_STAGES.filter((k) => run.extraction![k]).map((k) => (
+            <Detail key={k} term={FRAME_LABELS[k]} value={run.extraction![k]!.roi_source} />
+          ))}
         </dl>
       ),
       onRun: () => run && step("extract", () => api.extract(run.run_id)),

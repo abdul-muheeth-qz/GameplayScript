@@ -24,7 +24,10 @@ What the panel will and won't tell you:
     from a set of images, so there is no asset id to read back. So "Repeat Bet" vs "Collect
     Win" is known from the game's state, not from the panel.
 
-Getting a click to land took some finding out, and all four of these are load-bearing:
+Getting a click to land took some finding out, and all four of these are load-bearing. The
+first three now live in `winfocus` (`cursor_parked`, `post_message`), shared with `gameclick`,
+and the fourth is a property of the whole process -- but they were all found here, so they are
+recorded here:
 
 1. **The real cursor is parked on the target button.** SDL re-reads GetCursorPos while a
    mouse button is held, which overrides the position a posted message carried. Leave the
@@ -33,7 +36,9 @@ Getting a click to land took some finding out, and all four of these are load-be
 2. **The click is posted as window messages, not injected with SendInput.** The game window
    overlaps the panel, and an injected click goes to whichever window is topmost at that
    point, so it hits the game and the panel sees nothing. A posted message reaches the
-   panel's HWND whatever the z-order, and doesn't disturb the focus.
+   panel's HWND whatever the z-order, and doesn't disturb the focus. (`gameclick` may inject,
+   and that is not a contradiction: when the game *is* the target, being topmost is what you
+   want. It is still wrong for the panel.)
 3. **wParam carries MK_LBUTTON on the down message** and nothing on the up. SDL works out
    which buttons are held from that mask; post WM_LBUTTONDOWN with wParam=0 and it decides
    no button is down and drops the click silently.
@@ -49,14 +54,11 @@ worked.
 
 from __future__ import annotations
 
-import contextlib
-import ctypes
 import logging
 import os
 import re
 import time
 import xml.etree.ElementTree as ET
-from ctypes import wintypes
 
 from . import logtail, winfocus
 
@@ -72,20 +74,9 @@ LAYOUT_RELATIVE = os.path.join("deployment", "cfg", "ButtonPanel", "virtual_oled
 
 _PRESS_RE = re.compile(r"Button Pressed ID=([0-9a-fA-F]+)")
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-WM_MOUSEMOVE = 0x0200
-WM_LBUTTONDOWN = 0x0201
-WM_LBUTTONUP = 0x0202
-MK_LBUTTON = 0x0001
-SPI_GETSCREENSAVERRUNNING = 0x0072
-
-user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
-user32.PostMessageW.restype = wintypes.BOOL
-user32.GetCursorPos.argtypes = (ctypes.POINTER(wintypes.POINT),)
-user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
-user32.SystemParametersInfoW.argtypes = (wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
-                                         wintypes.UINT)
+# The click primitives and the mouse-message constants live in winfocus, shared with gameclick.
+# `input_blocked` is re-exported here because callers reach for it as ideck.input_blocked().
+input_blocked = winfocus.input_blocked
 
 
 class IdeckError(RuntimeError):
@@ -263,48 +254,8 @@ class PressWatcher:
 
 # -- pressing --------------------------------------------------------------
 
-
-def input_blocked() -> str | None:
-    """Why a click cannot be delivered right now, or None if it can.
-
-    A running screensaver owns the input desktop, so `SetCursorPos` is refused outright with
-    ERROR_ACCESS_DENIED and the click never happens. Measured here: policy sets a 10-minute
-    blank screensaver, and eight consecutive runs failed on it. Worth checking before a run
-    starts rather than after the first screenshot has been taken.
-    """
-    running = wintypes.BOOL()
-    if user32.SystemParametersInfoW(SPI_GETSCREENSAVERRUNNING, 0, ctypes.byref(running), 0) \
-            and running.value:
-        return ("a screensaver is running and owns the input desktop, so no click can be "
-                "delivered. Dismiss it at the machine -- and note that policy here asks for the "
-                "password on resume, so it has to be unlocked by hand")
-    return None
-
-
-@contextlib.contextmanager
-def _cursor_parked(screen_xy: tuple[int, int], settle_ms: int = 20):
-    """Put the cursor on the button for the duration, then put it back."""
-    before = wintypes.POINT()
-    restore = bool(user32.GetCursorPos(ctypes.byref(before)))
-    if not user32.SetCursorPos(int(screen_xy[0]), int(screen_xy[1])):
-        # Read the code before input_blocked(): it makes its own use_last_error call, which
-        # resets the thread's saved error to 0 and would report the failure as no failure.
-        error = ctypes.get_last_error()
-        reason = input_blocked() or "is the session locked?"
-        raise IdeckError(f"could not move the cursor to {screen_xy} "
-                         f"(GetLastError={error}): {reason}")
-    time.sleep(settle_ms / 1000.0)  # the panel must see the move before the press
-    try:
-        yield
-    finally:
-        if restore:
-            user32.SetCursorPos(before.x, before.y)
-
-
-def _post(hwnd, message: int, wparam: int, lparam: int, what: str) -> None:
-    if not user32.PostMessageW(hwnd, message, wparam, lparam):
-        raise IdeckError(f"PostMessage({what}) failed "
-                         f"(GetLastError={ctypes.get_last_error()}). Has the panel closed?")
+# What a failed post most likely means for *this* target, appended to winfocus's message.
+_CLOSED_HINT = "Has the panel closed?"
 
 
 def _screen_point(window, button: Button) -> tuple[int, int]:
@@ -335,13 +286,19 @@ def press(panel: Panel, window, spec, hold_ms: int = 80,
     if watcher is not None:
         watcher.mark()
 
-    x, y = button.center
-    packed = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
-    with _cursor_parked(cursor):
-        _post(window.hwnd, WM_MOUSEMOVE, 0, packed, "WM_MOUSEMOVE")
-        _post(window.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, packed, "WM_LBUTTONDOWN")
-        time.sleep(max(hold_ms, 1) / 1000.0)
-        _post(window.hwnd, WM_LBUTTONUP, 0, packed, "WM_LBUTTONUP")
+    packed = winfocus.pack_point(*button.center)
+    try:
+        with winfocus.cursor_parked(cursor):
+            winfocus.post_message(window.hwnd, winfocus.WM_MOUSEMOVE, 0, packed,
+                                  "WM_MOUSEMOVE", _CLOSED_HINT)
+            winfocus.post_message(window.hwnd, winfocus.WM_LBUTTONDOWN, winfocus.MK_LBUTTON,
+                                  packed, "WM_LBUTTONDOWN", _CLOSED_HINT)
+            time.sleep(max(hold_ms, 1) / 1000.0)
+            winfocus.post_message(window.hwnd, winfocus.WM_LBUTTONUP, 0, packed,
+                                  "WM_LBUTTONUP", _CLOSED_HINT)
+    except winfocus.InputError as exc:
+        # Each module owns its own exception type, and spin.run catches exactly those.
+        raise IdeckError(str(exc)) from exc
 
     if watcher is not None:
         logged = watcher.wait_for_press(confirm_timeout)

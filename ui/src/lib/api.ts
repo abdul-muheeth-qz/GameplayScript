@@ -32,6 +32,8 @@ export type SpinSummary = {
   button: string | null
   capture_size: string | null
   collected_a_pending_win: boolean | null
+  /** Whether this spin's win was taken on the glass, which is what makes a third frame. */
+  win_collected: boolean | null
   final_stops: number[] | null
   video: string | null
   event_count: number
@@ -49,14 +51,41 @@ export type Verdict = {
   /** Fields assumed rather than read -- a blank WIN meter is taken as 0.00. */
   inferred: string[]
   message: string
+  /** Which record file each part of the sum came from. */
+  sources: Record<"cash_and_bet" | "win" | "final", string> | null
+  /** The frame stages this verdict was reached over, in order. */
+  stages: string[]
+}
+
+/**
+ * The stages a run can hold, in order. Two on a losing spin; three when it won, because a
+ * win is not in the cash meter until it is collected -- `win_collected` is the frame taken
+ * after TAKE WIN was clicked on the glass, and it is the one the ledger closes against.
+ *
+ * Mirrors `server/frames.py`. Nothing here may assume a fixed pair.
+ */
+export const FRAME_STAGES = ["pre_spin", "spin_result", "win_collected"] as const
+export type FrameStage = (typeof FRAME_STAGES)[number]
+
+export const FRAME_LABELS: Record<FrameStage, string> = {
+  pre_spin: "Before the spin",
+  spin_result: "Spin result",
+  win_collected: "Win collected",
+}
+
+/** What each frame is evidence of, shown under its label. */
+export const FRAME_BLURBS: Record<FrameStage, string> = {
+  pre_spin: "the cash it started from, and the bet",
+  spin_result: "what the spin paid -- not yet in the cash meter",
+  win_collected: "the win taken on the glass, now paid in",
 }
 
 export type RunState = {
   run_id: string
-  frames: Partial<Record<"before" | "after", string>>
+  frames: Partial<Record<FrameStage, string>>
   spin: SpinSummary | null
-  extraction: Record<"before" | "after", FrameRecord> | null
-  crops: Partial<Record<"before" | "after", string>>
+  extraction: Partial<Record<FrameStage, FrameRecord>> | null
+  crops: Partial<Record<FrameStage, string>>
   validation: Verdict | null
 }
 

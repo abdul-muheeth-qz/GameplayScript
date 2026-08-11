@@ -36,16 +36,21 @@ three stages share. Nothing is passed between them by argument or by a path bake
 
 ```
 captured_files/2026-08-05_224937/
-    before.png              the screen before the press
-    after.png               the screen once the game reported the spin over
+    pre_spin.png            the screen before the press
+    spin_result.png         once the game reported the spin over, WIN meter showing what it paid
+    win_collected.png       after TAKE WIN was clicked on the glass -- wins only, and then it is
+                             the final frame, because a win is not in the cash meter until this
     spin.mp4                OBS's video of the whole run (the container is whatever OBS is set to)
     spin.json               what happened, with the game's own timestamps
     run.log                 the full log of the run
-    extract/before.json     the meters read off before.png -- cash, win, bet
-    extract/after.json      the same for after.png
+    extract/pre_spin.json   the meters read off pre_spin.png -- cash, win, bet
+    extract/*.json          the same for every other frame
     extract/*_roi.png       the strip of each frame that was actually sent to Tesseract
     validate.json           the verdict, and the arithmetic behind it
 ```
+
+So a losing spin leaves two frames and a winning one leaves three. `server/frames.py` owns those
+names and which part of the ledger each supplies.
 
 The web page is the same three stages with a button each, and holds nothing but the run id — so a
 reload, a second tab, or `?run=<folder name>` a week later all rebuild from those files.
@@ -72,8 +77,10 @@ titles change, `UnityWndClass` does not.
 A minimised window is restored, because it gives OBS no frames to capture — but nothing here
 takes the foreground.
 
-**3. The spin.** Start recording, `before.png`, then Repeat Bet, then wait for the game, then
-`after.png`, then stop recording.
+**3. The spin.** Start recording, `pre_spin.png`, then Repeat Bet, then wait for the game, then
+`spin_result.png` — and if it won, click TAKE WIN on the glass and shoot `win_collected.png`,
+because until that click the win is sitting on the collect/gamble offer and is not in the cash
+meter. Then stop recording.
 
 ## The video, and how much resolution there is to be had
 
@@ -294,6 +301,57 @@ reels still turning.
 The boundary is where the *new* spin begins (`bet_locked`), not where the old one ends: the old
 spin's `final_grid` is logged a few milliseconds **after** its `game_over`, so ending the carry
 on `game_over` let the previous spin's reel stops through into this spin's record.
+
+### Taking the win separately — clicking the game itself
+
+There is no TAKE WIN on the i-Deck. Every way the game has ever left the collect/gamble offer,
+counted over both log files here:
+
+| what resolved the offer | n | what it does |
+|---|---|---|
+| `GDK.Common.ServerAPI.SpinButtonMsg` | 57 | the deck's Rebet — collects **and** spins |
+| `double_up_offer_decline` | 26 | **TAKE WIN on the glass — collect only** |
+| `GDK.Common.ServerAPI.BetValueButtonMsg` | 24 | a bet-level button — collects **and** spins |
+| `double_up_offer_accept` | 7 | GAMBLE on the glass |
+| `BetsPerUnitSelectButtonMsg` / `MaxBetButtonMsg` | 6 / 1 | the deck again |
+| `FORCE_TOUCH_EVENT` | 1 | **not an input** — the client auto-declining a recovered win while restarting |
+
+So a standalone collect is a touch and nothing else; the panel's `Collect` button is the
+cabinet's cashout. `server/capture/gameclick.py` does it, and `spin.py --collect-first` uses it.
+
+**A posted click does not work on the game window**, which is the opposite of the i-Deck and was
+measured at a real pending win, all three lines at the same point:
+
+| | result |
+|---|---|
+| `post`, game unfocused | nothing logged |
+| `post`, game in the foreground | nothing logged |
+| `sendinput`, game in the foreground | `touch`, `take_win`, and no `bet_locked` |
+
+The third line is what makes the first two mean anything: injection landing there proves the
+point is live, so the silence was the method and not the coordinate. Unity reads Raw Input, which
+`PostMessage` cannot forge; SDL reads its message queue, which is why the panel works. `post` is
+kept as a selectable method precisely because a method that silently does nothing is worth being
+able to name, and there is no fallback between the two.
+
+The cost is that injected input goes wherever the cursor is rather than to an HWND, so **the game
+has to be topmost** — the single exception to "nothing takes the foreground", and the reason for
+`winfocus.bring_to_front` and `game.foreground`. Nothing else minds: OBS's Window Capture and the
+i-Deck's posted click are both z-order independent. `gameclick` refuses to inject when the game is
+not under the point rather than firing blind, which is not theoretical — the first real attempt
+was blocked by a File Explorer window sitting over the game.
+
+The target is a **normalized** fraction of the client area, not pixels, and that has already
+earned its keep: the client area was 612x961 when the extract ROI boxes were tuned, 638x1048
+during the first probe and 510x928 an hour later, and `take_win: [0.124, 0.917]` landed at all of
+them. `gameclick --calibrate` measures one from a real human click and refuses to print it unless
+the log confirms it hit.
+
+Every click is confirmed the way a deck press is. `touch` is the glass specifically — verified,
+not assumed: an i-Deck press produces `SpinButtonMsg` with **no** `TouchMsg`, while all 87
+`TouchMsg` in the current log are followed in the same millisecond by a widget reacting. One gap
+worth knowing: all 87 hit a live widget, so nothing in the log says what a touch on *dead space*
+does, and silence after a click is therefore ambiguous. `verdict()` says so rather than guessing.
 
 ### Two markers that look like wins and are not
 
@@ -516,14 +574,14 @@ small; a player action this tool doesn't recognise yet would show up there first
 
 ## Reading the meters — `extract`
 
-Given a run folder, this writes `extract/before.json` and `extract/after.json` into it, one record
-per frame:
+Given a run folder, this writes one record per frame into `extract/` — two on a losing spin,
+three on a winning one:
 
 ```json
 {
-  "image": "before.png",
+  "image": "pre_spin.png",
   "roi_source": "config:hnpl_portrait",
-  "roi_crop": "before_roi.png",
+  "roi_crop": "pre_spin_roi.png",
   "cash": { "value": 2208.35, "rawtext": "$2,208.35", "confidence": 95.0, "label_matched": "CASH" },
   "win":  { "value": null,    "rawtext": "",          "confidence": 0,    "label_matched": null },
   "bet":  { "value": 1.0,     "rawtext": "$1.00",     "confidence": 95.0, "label_matched": "[BET" }
@@ -599,7 +657,15 @@ This cabinet's box, `hnpl_portrait`, has its bottom edge at 752 px of 961 and de
 crop, which moves the Otsu threshold far enough to lose the BET value entirely. Swept over
 y 722–727 × 750–756 against both frames of a real run, every combination but y1=754 reads cash and
 bet on both. Band `19/24` runs to 761 px, which is the same 9 pixels of COLLECT row, and it is why
-that band loses BET on `before.png` where the box does not.
+that band loses BET on the pre-spin frame where the box does not.
+
+**`roi_config.ROI_METHOD` is currently `BANDS`, and on this cabinet's present window size it is
+reading numbers that are not there.** Over the three frames of run `2026-08-11_204202`,
+`bands:19/24` lost cash on two of them and read `spin_result`'s cash as **24.00** — which is that
+frame's *win* value, a confident wrong number of exactly the kind the "tune on the values, never on
+the field count" rule above exists to catch. `configured` reads all three correctly
+(`2892.70 / 0.15 / 1.00`, `2891.70 / 24.00 / 1.00`, `2915.70`), and `dynamic` gets two of three.
+Compare with `--roi-method configured` before trusting any ledger from a fresh run.
 
 ### Never take a suffix of a malformed number
 
@@ -626,6 +692,11 @@ Both halves of a torn number are now discarded — both, because on one frame th
 reports a balance of **6.20**: a different wrong answer, and a more convincing one. A token
 carrying a separator must now be a complete amount, ending in two decimals; a token carrying none
 is left alone, since a bare integer may be a real credit count.
+
+What marks a pair as torn is that the *left* one is missing its cents. That precision matters: an
+earlier version asked only that one of the two be incomplete, and a stray piece of artwork landing
+five pixels to the right of a perfectly good `$1.00` was enough to delete them both and leave the
+BET meter empty.
 
 They are recognised by how close together they sit — the two real fragments are separated by 0.13
 and 0.12 of a character width, while the nearest pair in the corpus that is *not* a torn number is
@@ -787,6 +858,41 @@ validated at all, so `win` alone is taken as `0.00`. Cash and bet are not: a bla
 not zero credits, it is a failed read, and inferring a balance there would turn an OCR failure
 into a verdict. Whatever was assumed comes back in `inferred` and is badged on screen, so a wrong
 assumption stays visible instead of hiding inside a Pass.
+
+### Each value comes from a different frame, and that mapping is the correctness question
+
+A spin has two frames, or three if it won. Which one supplies which number is decided in
+`validate.Sources`:
+
+| value | frame | why |
+|---|---|---|
+| cash, bet | `pre_spin` | the balance the spin started from, and its wager |
+| win | `spin_result` | the frame whose whole purpose is to show what it paid |
+| the cash checked against | the **last** frame | `win_collected` on a win, `spin_result` on a loss |
+
+The reason it cannot be simpler is that **the game announces a win without paying it**, and leaves
+a paid win on display afterwards. Measured on run `2026-08-11_204202`:
+
+| frame | CASH | WIN | BET |
+|---|---|---|---|
+| `pre_spin` | **2,892.70** | 0.15 — *stale, the previous spin's* | **1.00** |
+| `spin_result` | 2,891.70 — *bet taken, win unpaid* | **24.00** | 1.00 |
+| `win_collected` | **2,915.70** — *win paid in* | 24.00 — *stale* | 1.00 |
+
+`2892.70 + 24.00 - 1.00 = 2915.70`, exact. Both obvious shortcuts fail on this same run: reading
+the win from `pre_spin` gives 2,891.85, and checking against `spin_result` gives 2,891.70 — short
+by exactly the win. The WIN meter is stale on two of the three frames, which is why it is only
+ever read from the one frame that means it.
+
+On a losing spin `spin_result` is both the win source and the final frame, the WIN meter is blank
+and taken as 0.00, and the sum reduces to `cash - bet` — verified at ±0.00.
+
+Older two-frame folders (`extract/before.json`) are still read under the original rule, with the
+win taken from the first record, and so is the sample data in `data/`. That rule was correct for
+those runs: their before-frame win was genuinely pending, about to be collected by the very press
+being measured, and it closes to ±0.00 across the eight carry runs captured here. (The one
+exception, `2026-08-10_173530` at +0.90, is the `"$2,190"` + `"90"` OCR shred described above, not
+an arithmetic error.)
 
 ### Running it
 

@@ -5,11 +5,11 @@ r"""Read the slot meters off one or more screenshots.
     python -m server.extract.cli some/folder/ --out results/        # a folder of images
     python -m server.extract.cli server/extract/Images --roi-method bands   # one crop method
 
-Given a **capture run folder** -- one holding before.png and after.png -- this does the
-real step 2: it writes extract/before.json and extract/after.json inside that folder,
-which is exactly what `python -m server.validate.cli <run folder>` then reads. Given
-loose images it falls back to the older behaviour of printing a JSON list to stdout,
-which is how the sample images in Images/ are still checked.
+Given a **capture run folder** -- one holding pre_spin and spin_result, and win_collected
+too if the spin won -- this does the real step 2: it writes one record per frame into
+extract/ inside that folder, which is exactly what `python -m server.validate.cli <run
+folder>` then reads. Given loose images it falls back to the older behaviour of printing a
+JSON list to stdout, which is how the sample images in Images/ are still checked.
 
 Requires the Tesseract OCR engine. See extract/tesseract.py for how it is found.
 """
@@ -23,10 +23,11 @@ import logging
 import os
 import sys
 
+from .. import frames
 from ..settings import load_config
 
 from . import tesseract
-from .runner import FRAMES, extract_frames, frame_path
+from .runner import extract_frames
 from .slotocr import RoiMethod, process_image
 
 LOG = logging.getLogger("extract")
@@ -46,13 +47,13 @@ EXIT_OK, EXIT_ERROR = 0, 1
 def is_run_folder(path: str) -> bool:
     """True for a folder the capture step wrote.
 
-    Keyed on spin.json rather than on "has a before and an after in it": the sample
-    images in Images/ include a before.png and an after.png too, and treating that
-    folder as a run would quietly write records into it instead of printing them.
+    Keyed on spin.json rather than on which frames are in it: the sample images in
+    Images/ include a before.png and an after.png too, and treating that folder as a run
+    would quietly write records into it instead of printing them.
     """
     return (os.path.isdir(path)
             and os.path.isfile(os.path.join(path, "spin.json"))
-            and all(frame_path(path, name) for name in FRAMES))
+            and all(frames.find(path, name) for name in frames.REQUIRED))
 
 
 def gather_image_paths(args):

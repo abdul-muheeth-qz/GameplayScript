@@ -67,11 +67,13 @@ def main(argv=None) -> int:
         result = validate_run(str(args.folder), cfg)
     else:
         try:
-            before, after = find_records(args.folder)
+            sources = find_records(args.folder)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_ERROR
-        result = validate_records(before, after, cfg)
+        # legacy_stale is deliberately not applied here: it needs spin.json, and this branch
+        # exists for judging a bare pair of records that may not have one beside them.
+        result = validate_records(sources, cfg)
 
     if args.json:
         print(json.dumps(result, indent=2))

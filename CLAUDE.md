@@ -52,6 +52,15 @@ python -m server.capture.spin -v              # debug to console (run.log always
 python -m server.capture.spin --run-dir <dir> # use exactly this folder (what the server passes)
 python -m server.capture.spin --out <dir> --config <path>
 
+python -m server.capture.spin --no-collect    # leave a win on the offer: 2 frames, unpaid cash
+python -m server.capture.spin --collect-first  # also clear a win something *else* left pending
+
+# clicking the game window itself (stage 1, and the only way to TAKE WIN on its own)
+python -m server.capture.gameclick --calibrate            # click TAKE WIN by hand; prints the target
+python -m server.capture.gameclick take_win               # a named target from config.json
+python -m server.capture.gameclick --probe 0.124 0.917 --method post   # measure a delivery method
+python -m server.capture.gameclick --probe 0.5 0.5 --allow-idle        # click with no win pending
+
 python -m server.capture.watch --dry-run      # same checks, without needing the panel
 python -m server.capture.watch                # watch a person play until Ctrl-C (which exits 0 -- it is the normal stop)
 python -m server.capture.watch --duration 900 --max-rounds 40 --no-milestones
@@ -90,6 +99,9 @@ and serves and owns no logic of its own.
 server/
   settings.py         the one config loader, and ROOT (the repo root, one level up). Everything
                        relative anchors here, not on CWD
+  frames.py           the frame names a run folder holds (pre_spin, spin_result, win_collected),
+                       and which part of the ledger each supplies. No dependencies, so all
+                       three stages can import it
   runs.py              the run folder as state: name it, fill it, read it back. The capture lock
   api.py               the three endpoints, /api/health, and the files the UI shows
   __main__.py          `python -m server`
@@ -99,8 +111,12 @@ server/
     watch.py          the passive session loop: polls both logs, schedules frames, writes session.json
       actions.py      (watch only) triggers, round boundaries, and what a round was. Pure logic
       obs_client.py   launch OBS, connect over obs-websocket, screenshot a source, record the run
-      winfocus.py     find/measure windows by process+class (ctypes user32/kernel32/advapi32)
+      winfocus.py     find/measure windows by process+class, and the shared click primitives
+                       (ctypes user32/kernel32/advapi32) -- cursor_parked, post_message,
+                       inject_click, input_blocked. One definition each, used by ideck+gameclick
       ideck.py        the OLED button panel: parse layout, post the click, confirm the press
+      gameclick.py    click the *game's* window (the only standalone TAKE WIN), confirmed
+                       against the game log. Normalized targets; --probe and --calibrate
       gamelog.py      the game's log as events, and what the deck is currently offering
         logtail.py    shared by ideck + gamelog: byte offsets, whole lines, rotation
 
@@ -140,11 +156,22 @@ run holds every stage's output, and its name is the run id:
 
 ```
 captured_files/<run_id>/
-    before.png  after.png  spin.json  run.log  spin.mp4     capture
-      (spin.json's `meters_settled_by` says which marker released the after shot)
-    extract/before.json  extract/after.json  *_roi.png       extract
-    validate.json                                            validate
+    pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
+      (spin.json's `meters_settled_by` says which marker released the spin_result shot)
+    win_collected.png                                             capture, wins only
+      (the meter after TAKE WIN was clicked on the glass; the click itself is in
+       spin.json's `win_collect`)
+    stale_win.png                                                 capture, --collect-first only
+      (a win something *else* left pending, shot before it was cleared. Diagnostic, not
+       part of the ledger; the click is in spin.json's `stale_collect`)
+    extract/pre_spin.json  extract/spin_result.json  *_roi.png     extract
+    validate.json                                                 validate
 ```
+
+**`server/frames.py` owns those three names** and is imported by capture, extract, validate and
+`runs.py` — one definition of the contract rather than four string literals that drift. Nothing
+may assume a fixed pair of frames: a losing spin has two and a winning one has three, and
+`extract` requires only `frames.REQUIRED`.
 
 That is why a page reload, a second browser tab and a run from last week all behave the same,
 and why each stage is runnable on its own from the command line over the same folder. A stage
@@ -328,10 +355,82 @@ The panel never logs its label text (checked three ways — see the README), so 
 mode comes from `gamelog.current_state()`, and reports must say the button names are the cabinet's
 fixed names rather than what is drawn now.
 
+### Clicking the game window is a different problem from clicking the i-Deck
+
+There is no TAKE WIN on the deck: Rebet reads "Collect Win" with a win pending and means *collect
+**and** bet again*. Counted over both logs, the only standalone collect is a touch on the glass
+(`double_up_offer_decline`, 26) — every deck route (`SpinButtonMsg` 57, `BetValueButtonMsg` 24,
+`MaxBetButtonMsg` 1) also spins, and the one `FORCE_TOUCH_EVENT` is the client auto-declining a
+recovered win during a restart, not an input. The panel's `Collect` button is the cabinet's
+cashout. Hence `gameclick.py`.
+
+Three things there invert the i-Deck's rules, and each was measured rather than assumed:
+
+- **`sendinput`, not `post`.** Probed at one point against a real pending win: `post` unfocused →
+  nothing, `post` foregrounded → nothing, `sendinput` foregrounded → `touch` + `take_win`. The
+  injection landing is what makes the two silences conclusive (the point is live, so it was the
+  method). Unity reads Raw Input; SDL reads its message queue. **`post` stays selectable and
+  documented as not working here** — a method that silently does nothing is worth being able to
+  name — and there is no fallback between them, for `ROI_METHOD`'s reason.
+- **The game must be topmost**, because injected input follows the cursor rather than an HWND.
+  `winfocus.bring_to_front` is the one thing in the package that takes the foreground and must
+  never be called from the capture path. `click` refuses to inject when another window is under
+  the point instead of firing blind — a File Explorer window over the game caught the first real
+  attempt.
+- **Targets are normalized fractions**, because there is no `virtual_oled.xml` for Unity's UI and
+  the client area moves: 612x961 when the ROI boxes were tuned, 638x1048 at the first probe,
+  510x928 an hour later. `[0.124, 0.917]` landed at all of them. `--calibrate` measures one from a
+  real click and refuses to print a point the log did not confirm.
+
+`touch` is the glass and only the glass — an i-Deck press logs `SpinButtonMsg` with no `TouchMsg`.
+But all 87 `TouchMsg` in the log hit a live widget, so **nothing says what a touch on dead space
+does**, and silence after a click is genuinely ambiguous. `gameclick.verdict` reports both
+readings instead of picking one; don't "tidy" that into a confident sentence.
+
+### A winning spin needs three frames, and each value comes from a different one
+
+**A win is announced but not paid.** The game parks on the collect/gamble offer and holds the
+money there, so `spin_result` shows a cash meter with the bet taken off and *nothing added back*.
+The spin's money is only final once the win is collected — and the i-Deck cannot collect without
+betting again. So a winning spin ends with a TAKE WIN click on the glass and a third frame, which
+is the one the ledger closes against (`spin.collect_after_spin`, on by default; `--no-collect`).
+
+Measured on run `2026-08-11_204202`, and this is the whole argument in one table:
+
+| frame | CASH | WIN | BET |
+|---|---|---|---|
+| `pre_spin` | **2,892.70** | 0.15 — *stale, the previous spin's* | **1.00** |
+| `spin_result` | 2,891.70 — *bet taken, win unpaid* | **24.00** | 1.00 |
+| `win_collected` | **2,915.70** — *win paid in* | 24.00 — *stale* | 1.00 |
+
+`2892.70 + 24.00 - 1.00 = 2915.70`. So `validate.Sources` reads **cash and bet from `pre_spin`,
+win from `spin_result`, and the cash it checks against from the last frame there is**. Both of the
+obvious shortcuts are wrong on this very run: taking win from `pre_spin` gives 2,891.85, and
+taking the final cash from `spin_result` gives 2,891.70 — short by exactly the win. On a losing
+spin `spin_result` is both the win source and the final frame, and the sum reduces to the original
+`cash - bet`, verified at ±0.00.
+
+The WIN meter is **stale on two of the three frames**, which is why it is only ever read from the
+one frame whose purpose is to show it. The game leaves a collected win on display until the next
+spin clears it.
+
+Old two-frame folders (`extract/before.json`) still validate under the original rule — win read
+from the first record — via `Sources.legacy`, and `legacy_stale_win` covers the handful captured
+by the short-lived `--collect-first`-only flow. `server/validate/data` depends on that same legacy
+path, so don't collapse it.
+
+`take_win` waits for **`game_over`, not `gamelog.SETTLED`** — the opposite of `await_meters`, and
+measured: over 27 collects, `decline` → `GameOverMsg` is 0.20 s median, 0.47 s p90, 15.47 s worst,
+and `results_done` appears in between on **0 of 27**. Handing it to `await_meters` waits out the
+full 90 s and then reports nothing settled.
+
 ### Nothing takes the foreground
 
 `winfocus.ensure_restored` un-minimises (a minimised window gives OBS no frames) but never
-foregrounds. Screenshots come from OBS's client-area-only, no-cursor Window Capture source, so
+foregrounds. The single exception is `winfocus.bring_to_front`, which exists only because
+injected input has no HWND to aim at — it is called from `gameclick` when collecting a win and
+from nowhere else, and nothing else in the pipeline is affected, since OBS's Window Capture and
+the i-Deck's posted click both ignore z-order. Screenshots come from OBS's client-area-only, no-cursor Window Capture source, so
 overlapping windows don't matter. Windows are matched on **process + class**, never title — Unity
 titles change, `UnityWndClass` does not.
 
@@ -550,10 +649,18 @@ So `config.COMPLETE_AMOUNT_RE` states what a finished amount looks like, and
 
 1. **`_drop_fragment_pairs` first, while both halves are still present to recognise each other
    by.** Two digit-bearing tokens on one row, separated by less than `FRAGMENT_GAP` (0.6) of the
-   narrower one's per-character width, at least one of them not a complete amount: **drop both**.
-   Both, because on `2026-08-10_150454` the right half `"6.20"` is itself perfectly well-formed,
-   and dropping only `"$2,18"` reports a balance of **6.20** — a different wrong answer, and a
-   more plausible-looking one than the 2.18 that shipped.
+   narrower one's per-character width, **and whose LEFT token is not a complete amount**: drop
+   both. Both, because on `2026-08-10_150454` the right half `"6.20"` is itself perfectly
+   well-formed, and dropping only `"$2,18"` reports a balance of **6.20** — a different wrong
+   answer, and a more plausible-looking one than the 2.18 that shipped.
+
+   **The left-token test is the whole condition, and "at least one of the two is incomplete" —
+   which is what this started as — is wrong.** A number torn in two always leaves its left part
+   missing the cents (`"$2,190"`, `"$2,18"`), so a left token that already carries them is a
+   finished amount and whatever follows belongs to something else. Under the looser rule, a stray
+   artwork `"2"` five pixels to the right of a confidence-96 `"$1.00"` on `2026-08-11_151012`
+   matched the pair test and deleted **both**, and the BET meter came back empty. Both real
+   fragments are still caught; that is the case the narrower rule has to keep passing.
 2. **Then reject any separator-bearing token that is not a complete amount.** A token with *no*
    separator is kept: `"90"`, `"100"`, `"218295"` may be a legitimate credit count, and bare
    integers are already deprioritised against currency-shaped values.
