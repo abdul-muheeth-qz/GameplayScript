@@ -436,8 +436,8 @@ def run_elimination_pass(results, panel_currency_tokens):
       - It has to stay permissive when no label is found, or it destroys the
         two records where this pass is RIGHT — Images/Screenshot 2026-08-04
         120407 2.png (win=20.00) and 120446 2.png (win=40.00), whose value
-        panels contain no label tokens at all, and which are also the fixtures
-        behind server/validate/data/.
+        panels contain no label tokens at all. (Those two were also the source
+        of validate's old before_spin/after_spin fixtures, since deleted.)
 
     What actually disarmed this pass was upstream: rejecting both halves of a
     torn number in matching.find_numeric_tokens leaves TWO fields missing, and

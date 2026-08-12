@@ -1,13 +1,13 @@
 """Validate one slot spin.
 
-    python -m server.validate.cli captured_files/2026-08-07_141726   # a capture run folder
-    python -m server.validate.cli server/validate/data               # the sample records
+    python -m server.validate.cli captured_files/2026-08-11_212236
+    python -m server.validate.cli captured_files/2026-08-11_212236 --json
 
-The argument is the folder holding the two OCR records -- either the run-folder layout
-the extract step writes (extract/before.json, extract/after.json) or the standalone one
-(before_spin.json, after_spin.json).
+The argument is a capture run folder that the extract step has already been run over, so
+that it holds `extract/pre_spin.json`, `extract/spin_result.json` and -- if the spin won --
+`extract/win_collected.json`.
 
-Prints Pass or Fail, and the arithmetic behind it on stderr.
+Prints Pass or Fail, and the model's reasoning on stderr.
 """
 
 import argparse
@@ -27,18 +27,13 @@ EXIT_ERROR = 2
 
 EXIT_FOR = {"pass": EXIT_PASS, "fail": EXIT_FAIL, "error": EXIT_ERROR}
 
-# Anchored on this file, not the current working directory, so the default works
-# whether this is run from the repository root or from anywhere else.
-DEFAULT_FOLDER = Path(__file__).resolve().parent / "data"
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m server.validate.cli", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("folder", nargs="?", default=DEFAULT_FOLDER, type=Path,
-                        help="folder holding the two OCR records (default: the sample "
-                             "records in server/validate/data)")
+    parser.add_argument("folder", type=Path,
+                        help="a capture run folder the extract step has been run over")
     parser.add_argument("--config", default=None,
                         help="path to config.json (default: the one at the repo root)")
     parser.add_argument("--json", action="store_true",
@@ -71,8 +66,6 @@ def main(argv=None) -> int:
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_ERROR
-        # legacy_stale is deliberately not applied here: it needs spin.json, and this branch
-        # exists for judging a bare pair of records that may not have one beside them.
         result = validate_records(sources, cfg)
 
     if args.json:

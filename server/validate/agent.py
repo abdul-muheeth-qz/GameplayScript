@@ -1,46 +1,65 @@
-"""LangChain agent that validates a slot spin. No tools -- the model itself
-computes the cash value and answers yes or no.
+"""The LLM that judges one spin. One call, no tools, a fixed JSON reply.
 
-The model owns the whole judgement: it adds, it compares, and its one word becomes the
-verdict. `runner.py` also computes `cash + win - bet` in `Decimal`, but only to fill the
-ledger the UI draws -- that number never overrides the model. When the two disagree the
-message says so, which is the only warning you get that the answer was reached wrongly.
+Both sets of meters go to a local model (LM Studio by default) together with the formula,
+and it answers with a `Verdict` object. **The model owns the verdict outright** -- nothing
+in Python adds these numbers up or compares them. That is deliberate: the point of this
+stage is a model checking the cabinet's arithmetic, and a Python cross-check would only be
+answering the question a second time.
 
-Know the cost before trusting a verdict from this. Measured against the local qwen2.5-7b
-over twelve records, the model doing the arithmetic alone scored 5/12 and dropped the
-`- bet` term deterministically; folding the comparison in as well puts the arithmetic
-*and* the judgement in a single forced token, which is where a small model is least
-reliable. If the verdicts stop being trustworthy, `git log` has two better-measured
-designs: the model returning a bare number with Python comparing (the same 5/12
-arithmetic, but a comparison that cannot be wrong), and a `cash_after_spin` tool doing
-the sum in `Decimal` (12/12).
+That is only survivable on a 7B because of the shape of `Verdict`, and every part of that
+shape was measured over the eight records in the table below. The predecessor of this
+module asked the same model for one word, yes or no, and scored **0/6** -- not unreliable
+but inverted, deterministically, at temperature 0.
 
-Three things differ from the standalone script this came from, and all three are what let
-it run inside the server rather than from a shell:
+Three findings, all against the local qwen2.5-7b through LM Studio:
 
-- `endpoint_settings()` reads config.json's "validate" section, with the LMSTUDIO_*
-  environment variables still winning over the file. `server/api.py`'s /api/health imports
-  it to check LM Studio is serving the configured model.
-- `build_agent` is keyed on those settings rather than on module constants, so a server
-  picking up an edited config.json builds a new client instead of quietly going on talking
-  to the old endpoint.
-- `FIELDS` comes from `records.py`, which is also where the extract step's keys are named,
-  so there is one definition of the record's shape.
+- **`working` must come before the numbers.** The model fills the fields in schema order,
+  so a schema that asks for `computed_cash` first is asking it to produce the answer cold,
+  which is the same one-forced-token trap as the yes/no design. Deleting this one field and
+  changing nothing else takes the shipped schema from **8/8 to 2/8** on the verdicts and
+  8/8 to 0/8 on the sums: it answered `2909.60 - 1.00 = 2908.60`, dropping the win outright.
+  Reordering these fields is not cosmetic; it is that measurement.
 
-Everything the original was careful about is kept: temperature 0, no client-side retries,
-an empty reply reported with the reason rather than as '', and a reply that is neither
-yes nor no raised rather than guessed at.
+  That control run is also why `records.PREVIOUS_FIELDS` no longer carries `win`. The
+  prompt at the time sent `pre_spin`'s stale WIN meter with a line saying to ignore it, and
+  on one record the model used it anyway. Telling a model not to look at a number is weaker
+  than not handing it the number; nothing sent up now is anything but a term of the sum.
+- **The amounts are `float`, not `str`, and that is the only thing keeping them numbers.**
+  A `str` field constrains nothing, and the model fills it with a placeholder rather than
+  arithmetic: over those same eight records it returned `"logarithmic"`, `"in_range"`,
+  `"synced"`, `"TBD"` and `"in this case: 2926.70"` -- **0/8** usable, while the verdict
+  beside them was right. Typed as numbers the grammar cannot emit anything but digits, and
+  the sums went to **8/8**. This is the one place in the codebase money is a float, and it
+  is safe only because nothing compares against it: the exact `Decimal`s are what go *to*
+  the model, and what comes back is its own working, formatted for the ledger.
+- **A JSON Schema `pattern` cannot be used to do that instead.** `^-?\\d+\\.\\d{2}$` on a
+  string field makes LM Studio answer **400** on every request -- its grammar engine fails
+  to initialise from the regex. Constraint here has to come from the field's *type*.
+
+`git log` has the design that scored 12/12: a `cash_after_spin` tool doing the sum in
+`Decimal`. It is where to go back to if these verdicts stop being trustworthy -- and
+re-measure on any model change, because none of these numbers transfer.
+
+`endpoint_settings()` reads config.json's "validate" section with the LMSTUDIO_*
+environment variables winning over the file, and `server/api.py`'s /api/health imports it
+to check LM Studio is serving the configured model. `build_model` is keyed on those
+settings rather than on module constants, so a server picking up an edited config.json
+builds a new client instead of quietly going on talking to the old endpoint.
 """
 
+from __future__ import annotations
+
+import json
 import os
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import urlsplit
 
-from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-from .records import FIELDS
+from .records import CURRENT_FIELDS, PREVIOUS_FIELDS
 
 DEFAULTS = {
     "base_url": "http://localhost:1234/v1",
@@ -48,6 +67,55 @@ DEFAULTS = {
     "api_key_env": "LMSTUDIO_API_KEY",
     "timeout_s": 120,
 }
+
+# What the model is asked to check, and what the UI prints under the ledger heading.
+FORMULA = "current cash = previous cash - bet + win"
+
+# Room for the JSON object. The old one-word design capped this at 8 tokens; a structured
+# reply that hits the cap is truncated JSON, which `judge` reports as such rather than
+# letting it surface as a parse error nobody can act on.
+MAX_TOKENS = 256
+
+
+class Verdict(BaseModel):
+    """The only shape a reply may take. **Field order is the reasoning order.**
+
+    The model writes these in the order they are declared, so it works the sum out in
+    prose, states the result, subtracts, and only then judges. Every one of the four is
+    load-bearing and the ordering was measured -- see the module docstring.
+    """
+
+    working: str = Field(
+        description="the subtraction and addition written out in full, "
+                    "e.g. '2909.60 - 1.00 + 18.10 = 2926.70'")
+    computed_cash: float = Field(description="the result of the working")
+    difference: float = Field(
+        description="computed_cash minus the current cash meter")
+    verdict: Literal["pass", "fail"] = Field(
+        description="pass if the difference is within the allowed tolerance, else fail")
+
+
+# Written for a 7B: the formula is spelled out as a numbered procedure rather than stated
+# as algebra, which measurably improves reliability. Every value named here is one the model
+# needs -- `pre_spin`'s stale WIN meter is not sent at all, so there is nothing to instruct
+# it to ignore and nothing for it to reach for. See `records.PREVIOUS_FIELDS`.
+SYSTEM_PROMPT_TEMPLATE = """You audit one slot machine spin against a single formula:
+
+    current cash = previous cash - bet + win
+
+You are given two sets of meter readings from the same spin:
+
+    previous   the meters before the spin: cash, bet
+    current    the meters after it settled: cash, win
+
+Work in this order:
+1. computed_cash = previous.cash - previous.bet + current.win
+2. difference = computed_cash - current.cash
+3. If difference is between -{tolerance} and {tolerance}, the verdict is "pass".
+   Otherwise the verdict is "fail".
+
+Amounts are plain decimal numbers to two places, with no currency symbol and no
+thousands separator."""
 
 
 def _endpoint(url: str) -> str:
@@ -60,11 +128,10 @@ def _endpoint(url: str) -> str:
     return trimmed if urlsplit(trimmed).path else f"{trimmed}/v1"
 
 
-# --- LM Studio -------------------------------------------------------------
-# Settings come from config.json's "validate" section; the environment still wins
-# over the file, so a different port or model needs no edit. `or` rather than a
-# getenv default throughout, so a set-but-empty variable falls back too:
-# ChatOpenAI(base_url="") quietly posts the record to api.openai.com.
+# Settings come from config.json's "validate" section; the environment still wins over the
+# file, so a different port or model needs no edit. `or` rather than a getenv default
+# throughout, so a set-but-empty variable falls back too: ChatOpenAI(base_url="") quietly
+# posts the record to api.openai.com.
 def endpoint_settings(cfg: dict | None = None) -> tuple[str, str, str, float]:
     """(model, base_url, api_key, timeout) for the configured LLM endpoint."""
     validate_cfg = {**DEFAULTS, **(cfg or {}).get("validate", {})}
@@ -75,45 +142,9 @@ def endpoint_settings(cfg: dict | None = None) -> tuple[str, str, str, float]:
     return model, base_url, api_key, float(validate_cfg["timeout_s"])
 
 
-# One word is the whole answer. Small enough that a model minded to explain itself gets
-# cut off rather than talked round, and `to_verdict` reads only the first word anyway.
-MAX_TOKENS = 8
-
-# Written for a 7B: the formula is spelled out as an arithmetic procedure rather than
-# stated as algebra, which measurably improves reliability. Plain ASCII subscripts, and
-# the bracket around the addition, are both there to stop the model dropping the `- bet`
-# term -- the one error it makes deterministically.
-#
-# Record 2 is its cash value alone, not the cash,win,bet triple record 1 uses: step 3
-# only needs cash2, and the after-spin frame's WIN and BET meters genuinely read blank,
-# so there is nothing honest to put in them.
-SYSTEM_PROMPT = f"""You validate slot machine records using this formula:
-
-Cₙ = (Cₙ₋₁ + Wₙ₋₁) − Bₙ₋₁
-
-C = cash amount, W = win amount, B = bet amount, n = iteration number.
-
-Record 1 is given as: {",".join(FIELDS)}
-Record 2 is given as its cash value alone.
-
-You will be given record 1 and record 2. Do this:
-1. Take cash, win and bet from record 1.
-2. Compute: cash1 + win1 - bet1
-3. Compare the result with cash2 (the cash value of record 2).
-4. If they are equal, the answer is yes. If not, the answer is no.
-
-Your answer must be exactly one word: yes or no.
-Do not show your working. Do not add punctuation or any other text."""
-
-
 @lru_cache(maxsize=4)
-def build_agent(model: str, base_url: str, api_key: str, timeout: float):
-    """A LangChain agent with an empty tool list, built once per endpoint and reused.
-
-    Keyed on the settings rather than cached on module constants, so the server
-    picking up an edited config.json builds a new client instead of quietly going on
-    talking to the old endpoint.
-    """
+def build_model(model: str, base_url: str, api_key: str, timeout: float):
+    """The chat model bound to the `Verdict` schema, built once per endpoint and reused."""
     llm = ChatOpenAI(
         model=model,
         base_url=base_url,
@@ -126,26 +157,26 @@ def build_agent(model: str, base_url: str, api_key: str, timeout: float):
         timeout=timeout,
     )
 
-    return create_agent(llm, [], system_prompt=SYSTEM_PROMPT)
+    # json_schema is LM Studio's constrained decoding, and it is also the one method here
+    # that is not a tool call in disguise -- `function_calling` would send this as a tool.
+    # include_raw keeps the unparsed message, which is the only way to tell a model that
+    # answered badly from one that was cut off at MAX_TOKENS.
+    return llm.with_structured_output(Verdict, method="json_schema", include_raw=True)
 
 
-def format_record(values: dict[str, Decimal]) -> str:
-    """Render the before-spin values as record 1: the cash,win,bet triple.
+def format_records(previous: dict[str, Decimal], current: dict[str, Decimal]) -> str:
+    """The two sets of meters as the JSON object the model is asked about.
 
-    Values go out exact, padded to two decimals. Rounding here would be
-    charged to the model, which can only answer from the digits it is handed:
-    precision dropped now returns as a mismatch against the after-spin cash,
-    and three roundings outrun the tolerance meant to absorb them.
+    Values go out exact, padded to two decimals. Rounding here would be charged to the
+    model, which can only answer from the digits it is handed.
     """
-    return ",".join(_pad(values[field]) for field in FIELDS)
+    return json.dumps(
+        {"previous": {f: pad(previous[f]) for f in PREVIOUS_FIELDS},
+         "current": {f: pad(current[f]) for f in CURRENT_FIELDS}},
+        indent=2)
 
 
-def format_cash(value: Decimal) -> str:
-    """Render the after-spin cash as record 2, on the same terms as record 1."""
-    return _pad(value)
-
-
-def _pad(value: Decimal) -> str:
+def pad(value: Decimal) -> str:
     """The exact value, padded to at least two decimal places."""
     # :f rather than str(), which would render a large value as 1.2E+3.
     whole, _, fraction = f"{value:f}".partition(".")
@@ -153,58 +184,34 @@ def _pad(value: Decimal) -> str:
     return f"{whole}.{fraction.ljust(2, '0')}"
 
 
-def ask(record_1: str, record_2: str, cfg: dict | None = None) -> str:
-    """Send both records to the model and return its raw reply."""
-    question = (
-        f"1. {record_1}\n"
-        f"2. {record_2}\n\n"
-        "Do records 1 and 2 satisfy the validation formula?"
-    )
+def judge(previous: dict[str, Decimal], current: dict[str, Decimal],
+          tolerance: Decimal, cfg: dict | None = None) -> Verdict:
+    """Send both sets of meters to the model and return its verdict object."""
+    messages = [
+        ("system", SYSTEM_PROMPT_TEMPLATE.format(tolerance=pad(tolerance))),
+        ("user", f"{format_records(previous, current)}\n\n"
+                 "Do these two readings satisfy the formula?"),
+    ]
 
-    print("question",question)
+    reply = build_model(*endpoint_settings(cfg)).invoke(messages)
+    if reply["parsed"] is None:
+        raise ValueError(f"the model did not answer in the required format -- "
+                         f"{_why_unparsed(reply)}")
 
-    state = build_agent(*endpoint_settings(cfg)).invoke({"messages": [("user", question)]})
-    message = state["messages"][-1]
-
-    # .text concatenates plain string content and content blocks alike, so a
-    # reply split across blocks survives.
-    reply = str(message.text)
-
-    print("reply",reply)
-
-    if not reply.strip():
-        raise ValueError(f"model returned {_why_empty(message)}")
-
-    return reply.strip()
+    return reply["parsed"]
 
 
-def _why_empty(message) -> str:
-    """Say why a reply carried no text, rather than reporting ''."""
-    if getattr(message, "tool_calls", None):
-        return "a tool call, but this agent has no tools"
+def _why_unparsed(reply: dict) -> str:
+    """Say why a reply could not be read, rather than surfacing a schema traceback."""
+    raw = reply["raw"]
+    if raw.response_metadata.get("finish_reason") == "length":
+        return (f"it was cut off at the {MAX_TOKENS} token cap. Raise MAX_TOKENS in "
+                "server/validate/agent.py, or use a model that answers more briefly")
 
-    if message.additional_kwargs.get("reasoning_content"):
-        return (
-            "reasoning but no answer -- a reasoning model needs more than the "
-            f"{MAX_TOKENS} token cap"
-        )
+    if raw.additional_kwargs.get("reasoning_content"):
+        return (f"it spent the {MAX_TOKENS} token cap reasoning. Use a non-reasoning "
+                "model, or set validate.model in config.json to one")
 
-    return "an empty reply"
-
-
-def to_verdict(reply: str) -> str:
-    """Map the model's yes/no onto the verdict vocabulary."""
-    # The first word, compared whole. A `startswith("no")` prefix test -- which is what
-    # this used to be -- reads "not sure" and "none of them" as a confident Fail, and a
-    # wrong verdict that looks certain is the one failure this stage must not produce.
-    words = reply.strip().lower().split()
-    answer = words[0].strip(".,;:!?\"'") if words else ""
-
-    print("answer=======================>",answer)
-
-    if answer == "yes":
-        return "pass"
-    if answer == "no":
-        return "fail"
-
-    raise ValueError(f"model did not answer yes or no, it said: {reply!r}")
+    return (f"{reply['parsing_error']}. If the server rejected the schema outright, it "
+            "does not support response_format: json_schema -- check validate.base_url "
+            "in config.json points at LM Studio")

@@ -1,12 +1,12 @@
 """Step 3 -- decide whether the spin's meters add up.
 
-The check is Cₙ = Cₙ₋₁ + Wₙ₋₁ - Bₙ₋₁: the cash meter after a spin should be the cash
-before it, plus the win that was standing, less the bet that was placed. A local LLM
-(LM Studio by default, configured under "validate" in config.json) does the arithmetic;
-Python compares its answer to the after-spin meter within half a cent.
+The check is `current cash = previous cash - bet + win`: the cash meter after a spin should
+be the cash before it, less the bet that was placed, plus the win this spin paid. A local
+LLM (LM Studio by default, configured under "validate" in config.json) is handed both sets
+of meters and answers with a structured verdict. Nothing in Python does the arithmetic.
 
     python -m server.validate.cli captured_files/<run_id>
-    python -m server.validate.cli server/validate/data --json
+    python -m server.validate.cli captured_files/<run_id> --json
 """
 
 from .runner import read_result, validate_records, validate_run

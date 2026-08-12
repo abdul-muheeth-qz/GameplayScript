@@ -777,77 +777,96 @@ gets covered for by one that doesn't.
 
 ## Deciding whether it adds up — `validate`
 
-The check is one line: the cash meter after a spin should be the cash before it, plus the win that
-was standing, less the bet that was placed.
+The check is one line: the cash meter after a spin should be the cash before it, less the bet that
+was placed, plus the win this spin paid.
 
 ```
-Cₙ = Cₙ₋₁ + Wₙ₋₁ - Bₙ₋₁
+current cash = previous cash - bet + win
 ```
 
 `validate.json` records the answer and the numbers behind it, because a verdict with nothing under
 it cannot be argued with:
 
 ```json
-{ "verdict": "pass", "expected_cash": "2207.35", "computed_cash": "2207.35",
-  "difference": "0.00", "tolerance": "0.005", "record": "2208.35,0.00,1.00",
-  "formula": "cash + win - bet", "model": "qwen2.5-7b-instruct-1m",
-  "inferred": ["win"], "message": "..." }
+{ "verdict": "pass", "expected_cash": "2926.70", "computed_cash": "2926.70",
+  "difference": "0.00", "tolerance": "0.005", "record": "2909.60,18.10,1.00",
+  "formula": "current cash = previous cash - bet + win",
+  "model": "qwen2.5-7b-instruct-1m", "inferred": [],
+  "message": "2909.60 - 1.00 + 18.10 = 2926.70",
+  "sources": { "cash_and_bet": "pre_spin.json", "win": "win_collected.json",
+               "final": "win_collected.json" },
+  "stages": ["pre_spin", "win_collected"] }
 ```
 
 Money crosses as strings. Reading it as `Decimal` and then putting it through a JSON float would
 undo the point of reading it as `Decimal`.
 
-### The model owns the verdict, and on this model it is measurably wrong
+### One call, no tools, and the shape of the reply is the whole design
 
-`create_agent(llm, [])` — an agent with an empty tool list, `MAX_TOKENS` of **8**. Both records go
-to it: record 1 as `cash,win,bet`, record 2 as the after-spin cash alone. It adds, it compares,
-and it answers one word. `to_verdict` maps yes→Pass and no→Fail, comparing the first word whole
-rather than by prefix, because `startswith("no")` reads "not sure" as a confident Fail.
+`ChatOpenAI(...).with_structured_output(Verdict, method="json_schema")`. Both sets of meters go up
+as one JSON object:
 
-Python still computes `cash + win - bet` in `runner.py`, but **only to draw the ledger** — that
-sum fills `computed_cash` and `difference` for the UI and never overrides the model's answer.
+```json
+{ "previous": { "cash": "2909.60", "bet": "1.00" },
+  "current":  { "cash": "2926.70", "win": "18.10" } }
+```
 
-**Know what this costs. Measured on the local qwen2.5-7b, 2026-08-10: 0/6** — not unreliable but
-inverted, and deterministically so at `temperature=0`:
+and the model answers with the four fields of `agent.Verdict`, in this order:
 
-| record 1 | record 2 | truth | model said |
-|---|---|---|---|
-| `2183.65,0.00,1.00` | `2182.65` | yes | **no** (three runs) |
-| `2183.65,0.00,1.00` | `9999.99` | no | **yes** |
-| `1175.76,20.00,40.00` | `1155.76` | yes | **no** |
-| `2188.20,0.00,1.00` | `2187.20` | yes | **no** |
+```json
+{ "working": "2909.60 - 1.00 + 18.10 = 2926.70",
+  "computed_cash": 2926.70, "difference": 0.00, "verdict": "pass" }
+```
 
-A spin whose meters add up perfectly reports **Fail**; a pair that is nonsense reports **Pass**.
+**Nothing in Python adds these up or compares them.** The tolerance is interpolated into the system
+prompt and the model applies it; `computed_cash` and `difference` in `validate.json` are the
+model's own numbers, formatted to two places for the ledger. `method="json_schema"` and not
+`function_calling`, because the latter would send this as a tool and there are no tools here.
 
-The cause is structural, not a prompt bug: asking for the arithmetic *and* the judgement in one
-forced token is exactly where a small model is least reliable. The lineage, same model, all in
-`git log`:
+The predecessor of this asked the same local qwen2.5-7b for one word, yes or no, and scored
+**0/6** — not unreliable but *inverted*, deterministically, at `temperature=0`. Everything about
+`Verdict` exists to avoid that, and was measured over eight records:
+
+| schema | verdicts | the numbers it returned |
+|---|---|---|
+| `working` first, amounts as `float` — **shipped** | **8/8** | **8/8** |
+| the same, with `working` removed | 2/8 | 0/8 — dropped the win, reached for `previous.win`, subtracted instead of added |
+| `working` first, amounts as `str` | **8/8** | 0/8 — `"in this case: 2926.70"`, `"mathematically computed to be 1155.76"` |
+| amounts as `str`, `computed_cash` declared first | 4/8 | 0/8 — `"logarithmic"`, `"in_range"`, `"synced"`, `"TBD"` |
+| amounts as `str` with a `pattern` of `^-?\d+\.\d{2}$` | — | LM Studio answers **400** on every request |
+
+Three things come out of that table, and none is cosmetic:
+
+- **`working` is declared before the numbers.** The model fills the fields in schema order, so a
+  schema asking for `computed_cash` first is asking for the answer cold — the same one-forced-token
+  trap as the yes/no design. Removing that one field and changing nothing else takes the shipped
+  schema from **8/8 to 2/8**: it answered `2909.60 - 1.00 = 2908.60`, dropping the win outright,
+  and on another record reached for `previous.win` in spite of the prompt telling it not to.
+- **The amounts are typed `float`, not `str`.** A string field constrains nothing, and the model
+  fills it with a placeholder while getting the verdict beside it right — a confident `"pass"` with
+  `"logarithmic"` where the sum should be. Typed as numbers the grammar cannot emit anything but
+  digits. This is the one place in the codebase money is a float, and it is only safe because
+  nothing compares against it: the exact `Decimal`s are what go *to* the model.
+- **A JSON Schema `pattern` cannot do that job instead.** LM Studio's grammar engine fails to
+  initialise from the regex and 400s the request. Constraint has to come from the field's *type*.
+
+The older lineage, same model, all still in `git log`:
 
 | design | who compares | score |
 |---|---|---|
 | `cash_after_spin` tool does the sum in `Decimal` | Python | **12/12** |
 | tool-less, model shows its working, parse last line | Python | **10/12** |
 | tool-less, model returns a bare number | Python | **5/12** |
-| **model answers yes/no** (current) | the model | **0/6** |
+| model answers yes/no | the model | **0/6** |
 
-Every step that moved judgement from Python to the model cost accuracy. If you need verdicts you
-can act on, walk back up that table and re-measure — and re-measure on any model change, because
+Go back up that table if these verdicts stop being trustworthy, and re-measure on any model change:
 none of these numbers transfer.
 
-Until then, the guard rail is in `message`: whenever Python's sum and the model's word disagree,
-the verdict carries **"but the arithmetic disagrees with that answer"**. With the model owning the
-decision that sentence is the only warning you get, so read it.
-
 Everything else stays deliberately strict: `temperature=0`; `max_retries=0`, because the OpenAI
-SDK's default of two would turn a wedged server into three timeouts and six silent minutes; a
-reply that hit the token cap reported rather than parsed as though it were whole; and a numeric
-parser that rejects anything ambiguous, since `Decimal()` also accepts `nan`, `inf`, `1e3` and
-`1_155.76`, and blindly stripping commas turns `1155,76` into `115576`.
-
-**The comparison is not the model's job.** Python does it, within half a cent as `Decimal` so the
-boundary sits exactly there rather than wherever binary float lands. An earlier version asked the
-model to compare as well, which put the arithmetic *and* the judgment in one forced token — the
-place a small model is least reliable.
+SDK's default of two would turn a wedged server into three timeouts and six silent minutes; and a
+reply that hit the token cap reported as such rather than surfacing as a schema traceback, which is
+the only reason `include_raw=True` is there. `MAX_TOKENS` is 256 rather than the old 8, because the
+JSON object has to fit inside it.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 
@@ -859,40 +878,56 @@ not zero credits, it is a failed read, and inferring a balance there would turn 
 into a verdict. Whatever was assumed comes back in `inferred` and is badged on screen, so a wrong
 assumption stays visible instead of hiding inside a Pass.
 
-### Each value comes from a different frame, and that mapping is the correctness question
+### Two records, and which frame each comes from is the correctness question
 
-A spin has two frames, or three if it won. Which one supplies which number is decided in
-`validate.Sources`:
+A spin has two frames, or three if it won. `validate.Sources` reads exactly two of them:
 
-| value | frame | why |
+| record | value | frame |
 |---|---|---|
-| cash, bet | `pre_spin` | the balance the spin started from, and its wager |
-| win | `spin_result` | the frame whose whole purpose is to show what it paid |
-| the cash checked against | the **last** frame | `win_collected` on a win, `spin_result` on a loss |
+| `previous` | cash, bet | `pre_spin` |
+| `current` | cash, win | the **last** frame — `win_collected` on a win, `spin_result` on a loss |
 
-The reason it cannot be simpler is that **the game announces a win without paying it**, and leaves
-a paid win on display afterwards. Measured on run `2026-08-11_204202`:
+So the win is always taken from the *second* record. `pre_spin`'s WIN meter is **not read and not
+sent** — it holds the **previous** spin's win, because the game leaves a paid win on display until
+the next spin clears it, so reading it there double-counts. An earlier version sent it with a
+prompt line saying to ignore it; that is strictly worse, and the measurement below is why. A value
+that is not in the prompt is one the model cannot reach for.
+
+The reason the final frame is not always `spin_result` is that **the game announces a win without
+paying it**. Measured on run `2026-08-11_204202`:
 
 | frame | CASH | WIN | BET |
 |---|---|---|---|
 | `pre_spin` | **2,892.70** | 0.15 — *stale, the previous spin's* | **1.00** |
-| `spin_result` | 2,891.70 — *bet taken, win unpaid* | **24.00** | 1.00 |
-| `win_collected` | **2,915.70** — *win paid in* | 24.00 — *stale* | 1.00 |
+| `spin_result` | 2,891.70 — *bet taken, win unpaid* | 24.00 | 1.00 |
+| `win_collected` | **2,915.70** — *win paid in* | **24.00** | 1.00 |
 
-`2892.70 + 24.00 - 1.00 = 2915.70`, exact. Both obvious shortcuts fail on this same run: reading
-the win from `pre_spin` gives 2,891.85, and checking against `spin_result` gives 2,891.70 — short
-by exactly the win. The WIN meter is stale on two of the three frames, which is why it is only
-ever read from the one frame that means it.
+`2892.70 - 1.00 + 24.00 = 2915.70`, exact. Checking against `spin_result` instead gives 2,891.70 —
+short by exactly the win. On a losing spin `spin_result` *is* the last frame, its WIN meter is
+blank and taken as `0.00`, and the sum reduces to `cash - bet`, verified at ±0.00. Verified on the
+winning run `2026-08-11_212236`: `2909.60 - 1.00 + 18.10 = 2926.70`.
 
-On a losing spin `spin_result` is both the win source and the final frame, the WIN meter is blank
-and taken as 0.00, and the sum reduces to `cash - bet` — verified at ±0.00.
+**The known cost of reading the win from the last frame** is that it depends on a third OCR pass
+over a meter `spin_result` had already read, and on run `2026-08-11_204202` that pass fails: extract
+returns `win: null` and `bet: null` for `win_collected.png`, so the win is taken as `0.00` and the
+run reports **Fail** with `difference` of exactly `-24.00`.
 
-Older two-frame folders (`extract/before.json`) are still read under the original rule, with the
-win taken from the first record, and so is the sample data in `data/`. That rule was correct for
-those runs: their before-frame win was genuinely pending, about to be collected by the very press
-being measured, and it closes to ±0.00 across the eight carry runs captured here. (The one
-exception, `2026-08-10_173530` at +0.90, is the `"$2,190"` + `"90"` OCR shred described above, not
-an arithmetic error.)
+That is an `extract` bug, not a crop or a game behaviour — worth knowing before chasing it in the
+wrong stage. The ROI crop for that frame is textbook (`CASH $2,915.70 | WIN $24.00 | BET $1.00`,
+tight and legible), and the three ROI methods each read a *different* subset of it:
+
+| method on `204202/win_collected.png` | CASH | WIN | BET |
+|---|---|---|---|
+| `configured` — what the run used | 2915.70, at confidence **0.0** | **null** | **null** |
+| `bands` | null | **24.00** at 95 | **1.00** at 93 |
+| `dynamic` | null | null | null |
+
+No method reads all three, and between the first two every value is legible. Until that is fixed in
+stage 2, a winning run whose `extract/win_collected.json` has a null `win` will report Fail; the
+`inferred: ["win"]` badge on the ledger's `+` row is what makes it visible rather than silent.
+
+Old two-frame folders (`extract/before.json`) and the `before_spin.json`/`after_spin.json` sample
+pair are no longer read; only the three-frame layout is.
 
 ### Running it
 
@@ -901,9 +936,12 @@ Needs LM Studio serving the configured model — `validate.base_url` / `validate
 it is serving is the one asked for.
 
 ```powershell
-python -m server.validate.cli server/validate/data          # the sample records: Pass, exit 0
+python -m server.validate.cli captured_files/<run>          # Pass or Fail, with the working
 python -m server.validate.cli captured_files/<run> --json  # the full verdict object
 ```
+
+The folder must be a capture run the extract step has already been run over, so that it holds
+`extract/pre_spin.json`, `extract/spin_result.json` and — if the spin won — `extract/win_collected.json`.
 
 Exit codes are `0` pass, `1` fail, `2` no verdict — a Fail is a judgement about the spin, an error
 means no judgement was reached, and keeping them apart is what lets a test runner tell them apart.
@@ -995,9 +1033,10 @@ never the current working directory, so a server started from anywhere writes in
 | `<file>: cash value is not a number: None` | the OCR read that meter blank. Open the `_roi.png` beside it: a crop showing most of the screen means the configured box missed and detection took over |
 | `cannot reach http://localhost:1234/v1` | LM Studio's server is off, or on another port. Start it, or set `validate.base_url` |
 | `is up but is not serving <model>` | LM Studio is running a different model; load the configured one or change `validate.model` |
-| `model did not answer yes or no` | the reply is quoted in the message. One word is all `MAX_TOKENS = 8` allows, so this usually means the model opened with prose; see [the agent](#the-model-owns-the-verdict-and-on-this-model-it-is-measurably-wrong) |
-| `model returned reasoning but no answer` | a reasoning model spent the whole 8-token budget thinking. Use a non-reasoning model, or raise `MAX_TOKENS` |
-| `but the arithmetic disagrees with that answer` | Python's sum and the model's yes/no point different ways. **Believe the arithmetic**: the model scores 0/6 on the measured set. See [the agent](#the-model-owns-the-verdict-and-on-this-model-it-is-measurably-wrong) |
-| a `Pass` or `Fail` you don't believe | the model owns the verdict and is measurably inverted on this model. Read `computed_cash` against `expected_cash` in `validate.json` — those two are Python's and are not the model's to get wrong |
+| `the model did not answer in the required format — it was cut off at the 256 token cap` | the reply was truncated mid-JSON. Raise `MAX_TOKENS` in `server/validate/agent.py`, or use a model that answers more briefly |
+| `... it spent the 256 token cap reasoning` | a reasoning model thought instead of answering. Use a non-reasoning model, or change `validate.model` |
+| `... If the server rejected the schema outright` | the endpoint doesn't support `response_format: json_schema`. Check `validate.base_url` points at LM Studio, not something else OpenAI-compatible |
+| a `Pass` or `Fail` you don't believe | the model owns the verdict and every number under it — nothing here is checked in Python. `message` holds its working, so read that first; then see [the agent](#one-call-no-tools-and-the-shape-of-the-reply-is-the-whole-design) |
+| a win that reports `Fail` with `computed_cash` short by exactly the win | extract missed the WIN meter on `win_collected.png`. Check `extract/win_collected.json` — if `win` is `null` there and `spin_result` read it fine, this is the known cost described [above](#two-records-and-which-frame-each-comes-from-is-the-correctness-question) |
 | `a spin is already running` | one at a time: they would share one OBS instance, one record directory and one cursor |
 | `no run called <id>` | the folder was deleted, or the capture failed before writing anything — `prune_empty` removes a run folder that captured nothing |
