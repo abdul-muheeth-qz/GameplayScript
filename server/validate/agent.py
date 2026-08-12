@@ -109,7 +109,7 @@ You are given two sets of meter readings from the same spin:
     current    the meters after it settled: cash, win
 
 Work in this order:
-1. computed_cash = previous.cash - previous.bet + current.win
+1. computed_cash = (previous.cash - previous.bet) + current.win
 2. difference = computed_cash - current.cash
 3. If difference is between -{tolerance} and {tolerance}, the verdict is "pass".
    Otherwise the verdict is "fail".

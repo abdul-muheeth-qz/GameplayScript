@@ -382,13 +382,44 @@ Three things there invert the i-Deck's rules, and each was measured rather than 
   attempt.
 - **Targets are normalized fractions**, because there is no `virtual_oled.xml` for Unity's UI and
   the client area moves: 612x961 when the ROI boxes were tuned, 638x1048 at the first probe,
-  510x928 an hour later. `[0.124, 0.917]` landed at all of them. `--calibrate` measures one from a
+  510x928 an hour later. `[0.124, 0.917]` landed at all of them.
+- **And they are keyed by `target.process`** (`game.games["FortuneOx.exe"]`, resolved by
+  `gameclick.targets_for`), because normalizing survives a *resize* and not a *different game*.
+  HuffNPuffLink's `take_win` is `[0.124, 0.917]` of 612x961; FortuneOx's is `[0.0713, 0.9724]` of
+  1080x1849, and 0.917 of 1849 px is the empty row beside FortuneOx's DEMO label — 100 px above
+  its TAKE WIN. Run `2026-08-12_131459` is that mistake: click delivered, landed on nothing,
+  capture dead with the win still on the offer. So `game.games` with no block for the running game
+  **raises and names the process**; it must never fall back to `game.targets` or to another game's
+  point, for `ROI_METHOD`'s reason. The flat `game.targets` shape is still honoured when
+  `game.games` is absent. `--calibrate` measures one from a
   real click and refuses to print a point the log did not confirm.
 
 `touch` is the glass and only the glass — an i-Deck press logs `SpinButtonMsg` with no `TouchMsg`.
-But all 87 `TouchMsg` in the log hit a live widget, so **nothing says what a touch on dead space
-does**, and silence after a click is genuinely ambiguous. `gameclick.verdict` reports both
-readings instead of picking one; don't "tidy" that into a confident sentence.
+But all 87 `TouchMsg` in HuffNPuffLink's log hit a live widget, so **nothing says what a touch on
+dead space does**, and silence after a click is genuinely ambiguous. `gameclick.verdict` reports
+both readings instead of picking one; don't "tidy" that into a confident sentence.
+
+**The `touch` rule matches two line shapes for the one GDK message, and both are load-bearing.**
+HuffNPuffLink logs `[GameSession.MsgToServer] ... msg[...TouchMsg]`; FortuneOx logs
+`ServerProxy.ClientToServerRequest: GDK.Common.ServerAPI.TouchMsg` and has **0** of the first
+against 36 of the second — so with only the first pattern this event never fired for FortuneOx and
+a dead-space click reported "nothing was logged at all" while advising `--method sendinput`, which
+was already the method in use. Both spell the message out in full, which is what keeps them off
+that file's 80 `CreditMeterTouchMsg` lines. Any new game needs this checked, not assumed: run
+`gamelog._parse` over its log and count every event before trusting a marker.
+
+**Not every marker survives the change of game, and two of them do not.** Counted over
+`FortuneOx_Client.log`: `win`, `take_win`, `results_done`, `win_bang_done`, `game_over`,
+`idle_state`, `gamble_state`, `spin_started` and `deck_changed` all fire, so the collect path
+works — but `bet_locked`, `reels_stopped` and `final_grid` come back **0**, because FortuneOx
+splits its logging into `FortuneOx_Client.log` and `FortuneOx_Server.log` and those three are in
+the *server* file, which `gamelog.path` does not point at. Consequences, neither of them fixed:
+`classify()` reports `reel_stops`/`final_stops` as empty for this game, and `gameclick.verdict`'s
+closing ", and did not start a spin" rests on `bet_locked`, which for FortuneOx can never appear.
+That clause is only wrong if a click lands on a bet button and *also* collects — FortuneOx's
+`BetValueButtonMsg` route does exactly that (`take_win` then `SpinMsg` 330 ms later, past
+`confirm`'s early return) — so it is a latent false assurance, not a live one, and reading two log
+files is the fix if it ever matters.
 
 ### A winning spin needs three frames, and each value comes from a different one
 

@@ -337,7 +337,7 @@ def await_meters(watcher: gamelog.GameLogWatcher,
     return seen, settled
 
 
-def take_win(window, watcher: gamelog.GameLogWatcher, game_cfg: dict,
+def take_win(window, watcher: gamelog.GameLogWatcher, game_cfg: dict, process: str,
              timeout_s: float) -> dict:
     """Collect a win on the glass, and wait for the game to finish doing it.
 
@@ -363,12 +363,16 @@ def take_win(window, watcher: gamelog.GameLogWatcher, game_cfg: dict,
     The bound is flat rather than an idle timeout that restarts, for the reason `await_meters`
     is: this waits for one specific marker with a measured worst case, not for an open-ended
     feature.
+
+    `process` is here because the target is per *game*, not per window size -- see
+    `gameclick.targets_for`. The point that collects a win in one game lands on the wallpaper of
+    another, and the failure is a run that ends with the win still on the offer.
     """
-    targets = game_cfg.get("targets") or {}
+    targets = gameclick.targets_for(game_cfg, process)
     if "take_win" not in targets:
         raise gameclick.GameClickError(
-            "there is no \"take_win\" target in \"game.targets\" in config.json, so the win "
-            "cannot be collected on the glass. Measure one with "
+            f"there is no \"take_win\" target for {process} in config.json, so the win cannot be "
+            "collected on the glass. Measure one with "
             "`python -m server.capture.gameclick --calibrate` while a win is pending.")
 
     record = gameclick.deliver(
@@ -532,7 +536,10 @@ def run(args) -> int:
         obs.check_source(source)
 
         # 2. The two windows, and everything the panel will tell us about itself.
-        game = winfocus.find_window(target_cfg.get("process", "HuffNPuffLink.exe"),
+        # The process name is kept, not just used: it is what picks the game's click targets out
+        # of config.json, since a normalized point is per game and not per window size.
+        game_process = target_cfg.get("process", "HuffNPuffLink.exe")
+        game = winfocus.find_window(game_process,
                                     target_cfg.get("window_class", "UnityWndClass"))
         LOG.info("game window: %s", game)
         # A minimised window gives OBS no frames to capture.
@@ -575,9 +582,16 @@ def run(args) -> int:
             LOG.info("dry run OK -- OBS, both windows, the panel layout, the game log and "
                      "screenshotting all work. It would press %s (position %d). Next: run it "
                      "without --dry-run", button.name, button.position)
-            target = (cfg.get("game", {}).get("targets") or {}).get("take_win")
-            named = target or ("<nothing -- there is no \"take_win\" in game.targets. Measure "
-                               "one with `gameclick --calibrate`>")
+            # Resolved rather than read straight out of the file, so a config whose targets
+            # belong to a *different* game says so here -- before a real run discovers it by
+            # clicking the wallpaper with a win standing on the offer.
+            try:
+                target = gameclick.targets_for(cfg.get("game", {}), game_process).get("take_win")
+            except gameclick.GameClickError as exc:
+                target = None
+                LOG.warning("WARNING: %s", exc)
+            named = target or (f"<nothing -- there is no \"take_win\" for {game_process}. "
+                               "Measure one with `gameclick --calibrate`>")
             if collect_after_spin:
                 LOG.info("if the spin wins, the win would then be taken by clicking %s, giving a "
                          "third frame (%s.%s)", named, frames.WIN_COLLECTED, img_format)
@@ -607,7 +621,8 @@ def run(args) -> int:
             # still standing. It is what makes the collect itself auditable.
             stale_win = shot(obs, source, os.path.join(run_dir, f"stale_win.{img_format}"),
                              size, img_format, quality)
-            stale_collect = take_win(game, watcher, cfg.get("game", {}), collect_timeout)
+            stale_collect = take_win(game, watcher, cfg.get("game", {}), game_process,
+                                     collect_timeout)
             carry = False
             # The game over lands while the last frame of the count-up is still being drawn --
             # the same reason the after shot waits.
@@ -670,7 +685,8 @@ def run(args) -> int:
         win_collected = win_collect = None
         if terminal == "win" and collect_after_spin:
             LOG.info("the spin won, so the win is being taken on the glass to settle it")
-            win_collect = take_win(game, watcher, cfg.get("game", {}), collect_timeout)
+            win_collect = take_win(game, watcher, cfg.get("game", {}), game_process,
+                                   collect_timeout)
             time.sleep(after_delay)
             win_collected = shot(obs, source,
                                  os.path.join(run_dir, f"{frames.WIN_COLLECTED}.{img_format}"),

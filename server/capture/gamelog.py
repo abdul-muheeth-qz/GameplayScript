@@ -86,8 +86,22 @@ EVENTS: list[tuple[str, re.Pattern]] = [
         r"reasonForChange\[(?P<reason>\w+)\]")),
     ("bet_button", re.compile(r"\[BetManager\.HandleBetButtonPressed\]")),
     #    The touchscreen. Nothing else in either log knows a touch happened, so without this a
-    #    collect or a Hold & Spin start made by hand is invisible until its consequence lands.
-    ("touch", re.compile(r"\[GameSession\.MsgToServer\].*msg\[GDK\.Common\.ServerAPI\.TouchMsg\]")),
+    #    collect or a Hold & Spin start made by hand is invisible until its consequence lands --
+    #    and `gameclick.verdict` loses the only thing that separates "delivered onto dead space"
+    #    from "never delivered at all", which is the difference between a wrong coordinate and a
+    #    wrong click method.
+    #
+    #    Two line shapes for the one GDK message, because different games on this platform log it
+    #    differently and there is no way to tell from the outside which a game writes. Counted
+    #    over FortuneOx_Client.log: **0** of the first shape and 36 of the second, so with only
+    #    the first this event never fires for that game and every failed click reads as silence.
+    #    Both spell `GDK.Common.ServerAPI.TouchMsg` out in full, which is what keeps them off the
+    #    80 `CreditMeterTouchMsg` lines in the same file -- a touch of the credit meter is not a
+    #    touch of a widget. Verified against that log: 36 matches, none of them a CreditMeter
+    #    line, and no other rule in this list matches any of the 36.
+    ("touch", re.compile(r"\[GameSession\.MsgToServer\].*msg\[GDK\.Common\.ServerAPI\.TouchMsg\]"
+                         r"|ServerProxy\.ClientToServerRequest: "
+                         r"GDK\.Common\.ServerAPI\.TouchMsg")),
 
     # -- the spin itself
     ("bet_locked", re.compile(

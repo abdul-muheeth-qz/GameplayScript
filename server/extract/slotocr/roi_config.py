@@ -22,7 +22,7 @@ class RoiMethod(str, Enum):
     DYNAMIC = "dynamic"
 
 
-ROI_METHOD = RoiMethod.BANDS
+ROI_METHOD = RoiMethod.CONFIGURED
 
 
 # ---------------------------------------------------------------------------

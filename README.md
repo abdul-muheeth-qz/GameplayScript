@@ -347,11 +347,39 @@ during the first probe and 510x928 an hour later, and `take_win: [0.124, 0.917]`
 them. `gameclick --calibrate` measures one from a real human click and refuses to print it unless
 the log confirms it hit.
 
+**Normalizing survives a resize, not a different game**, and nothing in the geometry says which
+it is looking at — so the points are keyed by the executable in `target.process`
+(`game.games["FortuneOx.exe"]`), and `gameclick.targets_for` resolves them. This is not a
+refinement; it is the fix for a real failed run. Pointed at FortuneOx with HuffNPuffLink's point
+still in the file, `0.917` of FortuneOx's 1849 px client area is y=1696 — the empty row beside
+its DEMO label, 30 px above GAMBLE and 100 above TAKE WIN:
+
+| game | client | `take_win` | where the *other* game's point lands |
+|---|---|---|---|
+| `HuffNPuffLink.exe` | 612x961 | `[0.124, 0.917]` | (44, 934) — below the buttons |
+| `FortuneOx.exe` | 1080x1849 | `[0.0713, 0.9724]` | (134, 1696) — beside the DEMO label |
+
+Run `2026-08-12_131459` is that failure: the click was delivered, landed on nothing, and the
+capture died with the win still standing on the offer and no `win_collected.png`. So a config
+that has `game.games` but no block for the running game is an **error naming the process**, never
+a quiet reuse of another game's points — `ROI_METHOD`'s rule, for `ROI_METHOD`'s reason. The flat
+`game.targets` shape stays valid for a checkout that only ever sees one game.
+
 Every click is confirmed the way a deck press is. `touch` is the glass specifically — verified,
 not assumed: an i-Deck press produces `SpinButtonMsg` with **no** `TouchMsg`, while all 87
-`TouchMsg` in the current log are followed in the same millisecond by a widget reacting. One gap
-worth knowing: all 87 hit a live widget, so nothing in the log says what a touch on *dead space*
-does, and silence after a click is therefore ambiguous. `verdict()` says so rather than guessing.
+`TouchMsg` in HuffNPuffLink's log are followed in the same millisecond by a widget reacting. One
+gap worth knowing: all 87 hit a live widget, so nothing in the log says what a touch on *dead
+space* does, and silence after a click is therefore ambiguous. `verdict()` says so rather than
+guessing.
+
+**The same GDK message is logged in two different shapes**, and the marker matches both, because
+a game that logs neither makes that ambiguity total instead of merely annoying. HuffNPuffLink
+writes `[GameSession.MsgToServer] ... msg[GDK.Common.ServerAPI.TouchMsg]`; FortuneOx writes
+`ServerProxy.ClientToServerRequest: GDK.Common.ServerAPI.TouchMsg` and has **0** of the first
+shape against 36 of the second. With only the first pattern, `touch` never fired for FortuneOx,
+so the dead-space click above reported "nothing was logged at all" and advised `--method
+sendinput` — which was already the method in use. Both patterns spell the message out in full,
+which keeps them off the 80 `CreditMeterTouchMsg` lines in the same file.
 
 ### Two markers that look like wins and are not
 
@@ -959,6 +987,9 @@ drops the SDK's plaintext-password line exists for exactly that.
 | | `scale` 1, `width`/`height` null, `quality` −1 | the size and compression to ask OBS for — see [the video and the resolution](#the-video-and-how-much-resolution-there-is-to-be-had) |
 | `record` | `enabled` true, `name` "spin", `start_wait_s` 10, `stop_wait_s` 20 | the video. `name` is what OBS's timestamped file is renamed to; the waits are for an output that starts and finishes lazily |
 | `target` | `process`, `window_class` | the game window |
+| `game` | `click_method` "sendinput", `foreground` true, `click_hold_ms` 80, `confirm_timeout_s` 2 | clicking the game's own glass — see [taking the win separately](#taking-the-win-separately--clicking-the-game-itself). `post` is selectable and known not to work on a Unity window |
+| | `games` | the normalized click points, **keyed by the executable in `target.process`** — `{"FortuneOx.exe": {"take_win": [0.0713, 0.9724], "gamble": [0.0694, 0.9383]}}`. A block per game because the points do not transfer between them; no block for the running game is an error, not a fallback |
+| | `targets` | the same points flat, for a checkout that only ever sees one game. Ignored when `games` is present |
 | `spin` | `timeout_s` 180, `after_delay_ms` 800, `meter_settle_s` 90 | the ceiling, the settle before the after shot, and how long to wait for a win meter to finish counting up (`0` disables) |
 | `gamelog` | `path`, `idle_timeout_s` 8 | the game's log, and the real wait |
 | `watch` | `idle_timeout_s` 35, `quiet_s` 2, `long_wait_s` 90, `player_wait_s` 0, `after_delay_ms` 800, `tail_quiet_s` 1, `action_timeout_s` 300, `poll_interval_ms` 50, `preroll_s` 1, `milestone_shots` true, `milestone_min_gap_ms` 400 | `watch.py` only; `preroll_s: 0` turns off the standing before-frame, `player_wait_s: 0` holds a round open for as long as the game waits for the player |
@@ -1022,6 +1053,8 @@ never the current working directory, so a server started from anywhere writes in
 | `could not find the panel layout virtual_oled.xml` | `%CABINET_MODULE%` isn't set; put the full path in `ideck.layout` |
 | `the log reported position N instead of M` | the layout file disagrees with the running panel |
 | `no press reached the panel` | something moved the mouse mid-press, or the panel is minimised |
+| `"game.games" ... has no targets for <exe>` | `target.process` was pointed at a game whose TAKE WIN has never been measured. `gameclick --calibrate` while a win is pending, and add the block it prints. Deliberately not a fallback to another game's point — that is the failure this replaced |
+| `could not collect the win ... nothing was logged at all` | the click landed on dead space, or was never delivered. If the game logs `touch` (both shapes are matched), silence means the coordinate; if it logs nothing for a touch either, `--calibrate` a point known to be live and `--probe` that. First suspect a `take_win` measured on a *different game* |
 | `the game logged nothing for 8s without reporting an outcome` | the shot was taken anyway and may be mid-animation; `terminal_event` is `null` in `spin.json` |
 | `OBS is already recording` | someone else started it; this run won't stop it, and there is no video in the run folder. Stop it in OBS and re-run |
 | `OBS would not change its recording folder` | needs obs-websocket 5.3+ (OBS 30+). The video is still made, in OBS's own folder — the warning names it |

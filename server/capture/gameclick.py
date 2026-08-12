@@ -57,9 +57,12 @@ Two things differ from the i-Deck, and both are the reason this is a separate mo
 
   * **The target has no layout file.** `virtual_oled.xml` gives the panel's buttons exactly;
     Unity's UI gives us nothing, so the point is a *normalized* fraction of the client area
-    (`config.json` -> `game.targets`), obtained with `--calibrate` from a real human click that
-    the log confirms hit TAKE WIN. Normalized rather than pixels because the client area does
-    change: it measured 612x961 when the extract ROI boxes were tuned and 638x1048 today.
+    (`config.json` -> `game.games[<exe>]`, or `game.targets` in a one-game checkout -- see
+    `targets_for`), obtained with `--calibrate` from a real human click that the log confirms hit
+    TAKE WIN. Normalized rather than pixels because the client area does change: it measured
+    612x961 when the extract ROI boxes were tuned, 638x1048 the same day, and 1080x1849 on
+    FortuneOx. Normalizing survives a resize, not a different game, which is why the points are
+    keyed by executable.
   * **A posted message is not enough, and that is measured.** SDL reads its message queue, which
     is why the panel works; Unity reads Raw Input, which `PostMessage` cannot forge. Both
     methods were probed at the *same* point, against a real pending win, on 2026-08-11:
@@ -132,6 +135,43 @@ def find_window(process: str, window_class: str) -> winfocus.Window:
 
 
 # -- where to click --------------------------------------------------------
+
+
+def targets_for(game_cfg: dict, process: str) -> dict:
+    """The click targets for the game named by `target.process`.
+
+    Normalizing a target to the client area makes it survive a *resized* window; it does not make
+    it survive a *different game*, and nothing in the geometry says which it is looking at. So the
+    points are keyed by the executable they were measured on. Measured on this cabinet, the two
+    games do not even agree on which corner the button is in:
+
+        HuffNPuffLink.exe   take_win [0.124,  0.917 ]   client 612x961
+        FortuneOx.exe       take_win [0.0713, 0.9724]   client 1080x1849
+
+    and 0.917 of FortuneOx's 1849 px is y=1696, which is the empty row beside its DEMO label --
+    30 px above the GAMBLE button and 100 above TAKE WIN. That was a real run
+    (`2026-08-12_131459`): the click was delivered, landed on nothing, and the collect failed
+    with a win still standing on the offer.
+
+    **`game.games` and `game.targets` are two shapes, not a fallback pair.** Which one is in use
+    is decided by whether `game.games` exists at all; a config that has it but has no block for
+    the running game is an *error*, never a quiet reuse of some other game's points. That is
+    `extract`'s `ROI_METHOD` rule for the same reason: a wrong coordinate is a click into dead
+    space that costs a whole run to find, and silently substituting one leaves "what was this
+    click aimed at?" unanswerable afterwards. The flat shape stays valid, because a checkout that
+    only ever sees one game has no reason to name it twice.
+    """
+    games = game_cfg.get("games")
+    if not games:
+        return game_cfg.get("targets") or {}
+    if process not in games:
+        raise GameClickError(
+            f"\"game.games\" in config.json has no targets for {process} -- it has "
+            + ", ".join(sorted(games)) + ". Every game draws TAKE WIN somewhere else, so there "
+            f"is nothing here that is safe to click. Add a \"{process}\" block, measuring its "
+            "points with `python -m server.capture.gameclick --calibrate` while a win is "
+            "pending.")
+    return games[process] or {}
 
 
 def resolve(window: winfocus.Window, point) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -434,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__.split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", nargs="?",
-                        help="a named target from \"game.targets\" in config.json, e.g. take_win")
+                        help="a named target for this game in config.json, e.g. take_win")
     parser.add_argument("--probe", nargs=2, type=float, metavar=("X", "Y"),
                         help="click this normalized point instead of a named target")
     parser.add_argument("--calibrate", action="store_true",
@@ -477,9 +517,10 @@ def run(args) -> int:
     # force it when the config says otherwise.
     foreground = args.foreground or bool(game_cfg.get("foreground", True))
 
+    process = target_cfg.get("process", "HuffNPuffLink.exe")
+
     try:
-        window = find_window(target_cfg.get("process", "HuffNPuffLink.exe"),
-                             target_cfg.get("window_class", "UnityWndClass"))
+        window = find_window(process, target_cfg.get("window_class", "UnityWndClass"))
         winfocus.ensure_restored(window)
 
         if args.calibrate:
@@ -489,16 +530,16 @@ def run(args) -> int:
         if args.probe:
             point = args.probe
         elif args.target:
-            targets = game_cfg.get("targets") or {}
+            targets = targets_for(game_cfg, process)
             if args.target not in targets:
                 raise GameClickError(
-                    f"no target called {args.target!r}. \"game.targets\" in config.json holds: "
+                    f"no target called {args.target!r} for {process}. config.json holds: "
                     + (", ".join(sorted(targets)) if targets else "nothing yet -- run "
                                                                   "--calibrate to measure one"))
             point = targets[args.target]
         else:
-            raise GameClickError("nothing to click. Give a named target from \"game.targets\", "
-                                 "or --probe X Y, or --calibrate.")
+            raise GameClickError("nothing to click. Give a named target for this game, or "
+                                 "--probe X Y, or --calibrate.")
 
         ok = probe(window, point, method, hold_ms, log_path, confirm_timeout, args.expect,
                    args.allow_idle, foreground)
