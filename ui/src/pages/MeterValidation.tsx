@@ -20,11 +20,36 @@ import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
  * The meter audit: capture a spin, read the meters off the frames, check the money.
  *
  * Lifted out of App.tsx unchanged when the payline audit was added -- same three steps, same
- * gating, same endpoints. The only difference is that the header and the step rail now come
- * from PageShell, so the two audits cannot drift apart.
+ * gating, same endpoints. The header and the step rail come from PageShell, so the two audits
+ * cannot drift apart.
+ *
+ * **One step, at request** -- the same collapse the payline tab already had. The three stages
+ * were never independent choices on this page: extract was locked until capture finished and
+ * validate until extract did, so the rail's gating was describing an order the user had no say
+ * in. `PHASES` runs them back to back against the same three endpoints, and each stage's answer
+ * is put on screen as it arrives rather than at the end, so the frames still appear while the
+ * meters are still being read.
+ *
+ * **The pipeline is still three stages**, and that is the point of doing this in the page rather
+ * than by adding a fourth endpoint: `POST /api/capture`, `/api/extract` and `/api/validate` are
+ * untouched, each still runnable on its own, and `python -m server.extract.cli` /
+ * `server.validate.cli` still stop where they always did. Only the clicks collapsed.
+ *
+ * **It resumes rather than re-spinning.** A run that already holds its frames continues from the
+ * first stage that has not run, because extract fails on real frames (the `win_collected` OCR
+ * nulls in CLAUDE.md are one), and making that retry cost another spin of a live cabinet would
+ * be paying money to re-read a picture already on disk. The button says which of the two it is
+ * about to do; "New run" in the header clears the run and puts it back to spinning.
  */
 
 type Stage = "capture" | "extract" | "validate"
+
+/** The audit in order: what to call, and what the button says while it is calling it. */
+const PHASES: { stage: Stage; label: string }[] = [
+  { stage: "capture", label: "Spinning…" },
+  { stage: "extract", label: "Reading meters…" },
+  { stage: "validate", label: "Checking the ledger…" },
+]
 
 export function MeterValidation({
   mode,
@@ -49,19 +74,41 @@ export function MeterValidation({
 
   useEffect(refreshHealth, [refreshHealth])
 
-  async function step(stage: Stage, call: () => Promise<RunState>) {
-    setBusy(stage)
+  /** One stage, against the endpoint it always had. */
+  function call(stage: Stage, run_id: string | null): Promise<RunState> {
+    if (stage === "capture") return api.capture()
+    // Only reachable if the resume rule let a stage start with nothing captured, which it
+    // cannot -- but a named error beats a crash if that ever stops being true.
+    if (!run_id) throw new Error(`Nothing to ${stage}: capture a spin first.`)
+    return stage === "extract" ? api.extract(run_id) : api.validate(run_id)
+  }
+
+  /**
+   * The whole audit from `from` onwards, one press.
+   *
+   * The run is handed up after every stage rather than once at the end, so the frames land on
+   * the page while the meters are still being read -- an ordinary spin answers in ~3 s and the
+   * extract that follows it takes a couple more. A stage that fails stops the ones after it and
+   * keeps whatever the earlier ones returned; the frames of a spin whose OCR failed are still
+   * on disk and still worth looking at.
+   */
+  async function audit(from: Stage) {
     setFailed(null)
     setError(null)
-    try {
-      onRun(await call())
-    } catch (exc) {
-      setFailed(stage)
-      setError(exc instanceof Error ? exc.message : String(exc))
-      if (stage === "capture") refreshHealth()
-    } finally {
-      setBusy(null)
+    let state = run
+    for (const phase of PHASES.slice(PHASES.findIndex((p) => p.stage === from))) {
+      setBusy(phase.stage)
+      try {
+        state = await call(phase.stage, state?.run_id ?? null)
+        onRun(state)
+      } catch (exc) {
+        setFailed(phase.stage)
+        setError(exc instanceof Error ? exc.message : String(exc))
+        if (phase.stage === "capture") refreshHealth()
+        break
+      }
     }
+    setBusy(null)
   }
 
   function reset() {
@@ -71,73 +118,69 @@ export function MeterValidation({
     refreshHealth()
   }
 
-  function statusOf(stage: Stage, unlocked: boolean, done: boolean): StepStatus {
-    if (busy === stage) return "running"
-    if (failed === stage) return "failed"
-    if (done) return "done"
-    return unlocked && !busy ? "ready" : "locked"
-  }
-
   // The two frames every spin has. A win adds a third, which is not required to call the
-  // capture step done -- a losing spin never gets one.
+  // capture done -- a losing spin never gets one.
   const captured = Boolean(run?.frames.pre_spin && run?.frames.spin_result)
   const extracted = Boolean(run?.extraction)
   const validated = Boolean(run?.validation)
 
+  // Where the button starts. Frames on disk and no verdict over them means the spin already
+  // happened -- read them again rather than paying for another one. See the resume note above.
+  const from: Stage = !captured ? "capture" : !extracted ? "extract" : !validated ? "validate" : "capture"
+  const resuming = captured && !validated
+
+  function status(): StepStatus {
+    if (busy) return "running"
+    if (failed) return "failed"
+    return validated ? "done" : "ready"
+  }
+
   const steps: Step[] = [
     {
       ordinal: "01",
-      name: "Capture",
-      blurb: "Opens OBS, presses Repeat Bet on the i-Deck, and shoots a frame either side of the spin — and a third after taking the win, if it won.",
-      action: busy === "capture" ? "Spinning…" : "Start",
-      status: statusOf("capture", true, captured),
-      detail: run?.spin && (
+      name: "Meter audit",
+      blurb: resuming
+        ? "Reads the meters off the frames already captured, then checks that the money adds up. The spin is not repeated."
+        : "Presses Repeat Bet on the i-Deck and shoots a frame either side of the spin — and a third after taking the win, if it won — then reads cash, win and bet off every frame and checks that the cash after the spin is the cash before it, plus the win, less the bet.",
+      action:
+        PHASES.find((p) => p.stage === busy)?.label ??
+        (resuming ? "Read and validate" : "Run audit"),
+      status: status(),
+      // Every stage's own line, in the order they ran. With no rail to hang them off, this is
+      // the only place the run says which button was pressed, which crop each meter was read
+      // from and how far out the ledger was -- and each appears as its stage answers.
+      detail: (run?.spin || run?.extraction || run?.validation) && (
         <dl className="space-y-1">
-          <Detail term="Outcome" value={run.spin.outcome} />
-          <Detail
-            term="Took"
-            value={run.spin.measured_s === null ? null : `${run.spin.measured_s}s`}
-          />
-          <Detail term="Ended on" value={run.spin.terminal_event ?? "a timeout"} />
-          <Detail term="Pressed" value={run.spin.button} />
-          {run.spin.won && (
-            <Detail
-              term="Win"
-              value={run.spin.win_collected ? "taken on the glass" : "left on the offer"}
-            />
+          {run.spin && (
+            <>
+              <Detail term="Outcome" value={run.spin.outcome} />
+              <Detail
+                term="Took"
+                value={run.spin.measured_s === null ? null : `${run.spin.measured_s}s`}
+              />
+              <Detail term="Ended on" value={run.spin.terminal_event ?? "a timeout"} />
+              <Detail term="Pressed" value={run.spin.button} />
+              {run.spin.won && (
+                <Detail
+                  term="Win"
+                  value={run.spin.win_collected ? "taken on the glass" : "left on the offer"}
+                />
+              )}
+            </>
+          )}
+          {run.extraction &&
+            FRAME_STAGES.filter((k) => run.extraction![k]).map((k) => (
+              <Detail key={k} term={FRAME_LABELS[k]} value={run.extraction![k]!.roi_source} />
+            ))}
+          {run.validation && (
+            <>
+              <Detail term="Verdict" value={run.validation.verdict} />
+              <Detail term="Out by" value={run.validation.difference} />
+            </>
           )}
         </dl>
       ),
-      onRun: () => step("capture", () => api.capture()),
-    },
-    {
-      ordinal: "02",
-      name: "Extract",
-      blurb: "Crops every frame to the meter strip and reads cash, win and bet off them.",
-      action: busy === "extract" ? "Reading…" : "Extract",
-      status: statusOf("extract", captured, extracted),
-      detail: run?.extraction && (
-        <dl className="space-y-1">
-          {FRAME_STAGES.filter((k) => run.extraction![k]).map((k) => (
-            <Detail key={k} term={FRAME_LABELS[k]} value={run.extraction![k]!.roi_source} />
-          ))}
-        </dl>
-      ),
-      onRun: () => run && step("extract", () => api.extract(run.run_id)),
-    },
-    {
-      ordinal: "03",
-      name: "Validate",
-      blurb: "Checks that the cash after the spin is the cash before it, plus the win, less the bet.",
-      action: busy === "validate" ? "Checking…" : "Validate",
-      status: statusOf("validate", extracted, validated),
-      detail: run?.validation && (
-        <dl className="space-y-1">
-          <Detail term="Verdict" value={run.validation.verdict} />
-          <Detail term="Out by" value={run.validation.difference} />
-        </dl>
-      ),
-      onRun: () => run && step("validate", () => api.validate(run.run_id)),
+      onRun: () => audit(from),
     },
   ]
 
@@ -178,7 +221,7 @@ function Empty() {
   return (
     <div className="rounded-sm border border-dashed border-rule px-8 py-16 text-center">
       <p className="text-sm text-muted-foreground">
-        Press Start to spin the cabinet once and capture it.
+        Press Run audit to spin the cabinet once, read its meters and check the money.
       </p>
       <p className="mt-2 text-xs text-muted-foreground/70">
         Or open a past run with <span className="tnum">?run=&lt;folder name&gt;</span>.

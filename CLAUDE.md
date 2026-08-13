@@ -1080,8 +1080,27 @@ renders them, so `validate.json`'s `record` is digit-for-digit what was read off
 
 ## The UI
 
-Two audits: the meter one is three gated steps, the payline one is a single step (it used to be two
-— see "Two steps in the pipeline, one button on the page"). `ui/src/App.tsx` holds only which audit is showing and which
+**Both audits are one step and one button now.** The payline one collapsed first (it used to be
+two — see "Two steps in the pipeline, one button on the page"); the meter one followed, at request,
+and for the same reason: its three steps were never a choice, since extract was locked until
+capture finished and validate until extract did, so the rail was gating an order the user had no
+say in. `MeterValidation.PHASES` chains `POST /api/capture`, `/api/extract` and `/api/validate` in
+that order on one press. **The collapse is in the page, not the server** — there is no combined
+endpoint, each stage is still its own call and its own CLI, and chaining in the browser is also
+what lets each stage's answer land on screen as it arrives instead of all three at the end.
+
+Two rules there, both load-bearing:
+
+- **It resumes; it does not re-spin.** The button starts at the first stage that has not run, so a
+  run whose frames are on disk is re-read rather than re-captured — `extract` fails on real frames
+  (the `win_collected` nulls above are one), and a single button that retried by spinning a live
+  cabinet again would be paying money to re-read a picture already on disk. `resuming` changes what
+  the button and its blurb say, so the two behaviours are never silent; "New run" clears the run and
+  puts it back to capturing.
+- **A failed stage stops the ones after it and keeps what the earlier ones returned.** The frames of
+  a spin whose OCR failed are still worth looking at, and `onRun` has already handed them up.
+
+`ui/src/App.tsx` holds only which audit is showing and which
 run is open; every endpoint returns the whole `RunState`, so a reload or a
 `?run=<id>&mode=payline` link rebuilds the page from the server. No router — two modes and a run
 id fit in the query string.

@@ -13,7 +13,7 @@ up. Three stages, one app:
 python -m pip install -r server/requirements.txt      # one venv (server/.venv) for all three stages
 cd ui; npm install; npm run build; cd ..
 
-python -m server                               # http://127.0.0.1:8000 -- the three buttons
+python -m server                               # http://127.0.0.1:8000 -- one button per audit
 ```
 
 Or run any stage on its own, over the same folder:
@@ -52,8 +52,11 @@ captured_files/2026-08-05_224937/
 So a losing spin leaves two frames and a winning one leaves three. `server/frames.py` owns those
 names and which part of the ledger each supplies.
 
-The web page is the same three stages with a button each, and holds nothing but the run id — so a
-reload, a second tab, or `?run=<folder name>` a week later all rebuild from those files.
+The web page runs all three on **one button** — it chains the same three endpoints in order and
+puts each answer on screen as it arrives — and holds nothing but the run id, so a reload, a second
+tab, or `?run=<folder name>` a week later all rebuild from those files. The stages themselves did
+not merge: they are still three endpoints and three CLIs, and a run whose frames are already on
+disk resumes from the first stage that has not run rather than spinning the cabinet again.
 
 Most of this document is about `capture`, which came first, is by far the most delicate, and
 explains the machinery the rest sits on. [Reading the meters](#reading-the-meters--extract) and
