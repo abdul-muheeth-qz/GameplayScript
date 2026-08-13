@@ -1044,8 +1044,15 @@ because a missing row reads as agreement.
 
 Every similarity number in this stage is meaningless if the crop is half a cell out, and
 `payline/tiles/contact_sheet.png` is the only thing that shows that in one glance. So cutting the
-tiles is its own step with its own output, and the UI puts the sheet on screen before any cosine has
-been produced to be believed.
+tiles is its own step with its own output -- `payline/tiles.json`, reachable on its own through
+`--tiles-only` and `POST /api/payline/tiles`, and the boundary `runner._tiles_are_current` checks
+against.
+
+**The page runs both on one button**, though, and that is a change from how this shipped: the payline
+tab used to have "Cut the reels" and then "Validate paylines", and now has one step, because
+`validate_paylines` cuts the tiles itself whenever they are missing or stale. The sheet is therefore
+no longer on screen before the cosines exist -- it is one click into the disclosure below the verdict,
+whose trigger names it for that reason.
 
 ### The captions have to be measured, not sized
 

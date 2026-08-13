@@ -146,8 +146,7 @@ export function MeterValidation({
       mode={mode}
       onMode={onMode}
       title="Meter audit"
-      subtitle="does the money add up"
-      runId={run?.run_id}
+      subtitle=""
       health={health}
       onReset={run ? reset : undefined}
       rail={<StepRail steps={steps} />}

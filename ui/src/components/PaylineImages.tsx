@@ -1,5 +1,3 @@
-import type { ReactNode } from "react"
-
 import {
   api,
   type PaylineResult,
@@ -7,6 +5,7 @@ import {
   type PaylineTiles,
   type RunState,
 } from "@/lib/api"
+import { Figure } from "@/components/Figure"
 import { Heading } from "@/components/FramePanel"
 
 /**
@@ -24,9 +23,12 @@ import { Heading } from "@/components/FramePanel"
  * It still has to be *stated* — a stale setting auditing the wrong picture is invisible in the
  * pixels — but stating it in red would make the intended case look broken.
  *
- * **The contact sheet is the one to look at first when a number looks wrong.** Every similarity
- * in this stage is meaningless if the crop is half a cell out, and the sheet shows that
- * immediately where a table of cosines never would.
+ * **The crops are no longer here.** The reel window and the contact sheet moved into
+ * `PaylineDetails`, the one disclosure below the verdict, so this panel is now only the frame
+ * itself and the summary of every paying line drawn on it. The contact sheet is still the thing
+ * to look at first when a number looks wrong -- every similarity in this stage is meaningless if
+ * the crop is half a cell out, and the sheet shows that immediately where a table of cosines
+ * never would -- it is just one click away instead of unprompted.
  */
 
 export function PaylineImages({
@@ -73,59 +75,26 @@ export function PaylineImages({
     <section>
       <Heading label="Validating this image" note={note || undefined} />
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Figure
-          caption={name}
-          blurb={
-            supplied
-              ? "a supplied image — payline.image in config.json"
-              : "the latest spin result, as captured"
-          }
-        >
-          {imageUrl ? (
-            <img
-              src={imageUrl}
-              alt="The image the paylines are read from"
-              className="mx-auto block h-auto max-h-[34rem] w-auto max-w-full"
-            />
-          ) : (
-            <p className="px-4 py-10 text-center text-xs text-muted-foreground">
-              {source?.detail}
-            </p>
-          )}
-        </Figure>
-
-        <div className="space-y-4">
-          {run && files?.reels && (
-            <Figure caption="Reel window" blurb="the region this geometry crops to">
-              <img
-                src={api.fileUrl(run.run_id, files.reels, run.run_id)}
-                alt="The cropped reel window"
-                className="block h-auto w-full"
-              />
-            </Figure>
-          )}
-          {run && files?.contact_sheet && (
-            <Figure
-              caption="Contact sheet"
-              blurb="check this first — a crop half a cell out invalidates every number below"
-            >
-              <img
-                src={api.fileUrl(run.run_id, files.contact_sheet, run.run_id)}
-                alt="Every cell of the grid, labelled"
-                className="block h-auto w-full"
-              />
-            </Figure>
-          )}
-          {!files && (
-            <div className="flex h-full min-h-40 items-center justify-center rounded-sm border border-dashed border-rule px-6 py-10">
-              <p className="text-center text-xs text-muted-foreground">
-                Cut the reels to see the reel window and the contact sheet.
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
+      <Figure
+        caption={name}
+        blurb={
+          supplied
+            ? "a supplied image — payline.image in config.json"
+            : "the latest spin result, as captured"
+        }
+      >
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt="The image the paylines are read from"
+            className="mx-auto block h-auto max-h-[34rem] w-auto max-w-full"
+          />
+        ) : (
+          <p className="px-4 py-10 text-center text-xs text-muted-foreground">
+            {source?.detail}
+          </p>
+        )}
+      </Figure>
 
       {run && files?.annotated?.summary && (
         <div className="mt-4">
@@ -145,24 +114,3 @@ export function PaylineImages({
   )
 }
 
-function Figure({
-  caption,
-  blurb,
-  children,
-}: {
-  caption: string
-  blurb: string
-  children: ReactNode
-}) {
-  return (
-    <figure className="min-w-0">
-      <figcaption className="mb-2">
-        <span className="eyebrow text-numeral">{caption}</span>
-        <span className="mt-0.5 block text-xs text-muted-foreground">{blurb}</span>
-      </figcaption>
-      <div className="overflow-auto rounded-sm border border-rule bg-ink/60 p-2">
-        {children}
-      </div>
-    </figure>
-  )
-}

@@ -622,12 +622,26 @@ for line — the cheapest evidence that the threshold is not doing the work. A s
 reads as agreement. The shipped `library` method has no symbol art to work from: the POC repo
 documents `data/symbols/`, `src/calibrate.py` and `scripts/` and ships none of them.
 
-### Two steps, because the contact sheet has to be looked at
+### Two steps in the pipeline, one button on the page
 
 Every similarity number is meaningless if the crop is half a cell out, and
 `payline/tiles/contact_sheet.png` is the only thing that shows that in one glance. Cutting the tiles
-is therefore its own step with its own output in the run folder, and the UI puts the sheet on screen
-before any cosine exists to be believed. Do not collapse the two steps into one.
+is therefore its own step with its own output in the run folder — `payline/tiles.json`,
+`runner.build_tiles_for`, `--tiles-only`, `POST /api/payline/tiles`. **Do not collapse the two steps
+in the runner**; `_tiles_are_current` depends on that boundary existing.
+
+**The UI no longer has two buttons for them**, at request: the payline tab is one step, and
+`POST /api/payline` crops and matches in one call — which it could always do, since
+`validate_paylines` cuts the tiles itself whenever they are missing or were cut from another image
+or geometry. Removing the button removed a click, not a stage; verified against a run folder holding
+only `spin_result.png`, where the single call wrote `tiles.json`, `reels.png`, the contact sheet and
+`payline.json` together.
+
+What the second button *was* for was making the sheet unavoidable, and that is now the job of the
+one disclosure below the verdict (`PaylineDetails`, closed by default). It is the only place that
+check lives, which is why its trigger names the reel window and the contact sheet rather than saying
+"Details". If a wrong crop is ever believed because nobody opened it, default it open — do not put
+the button back.
 
 ### The payline tab never captures
 
@@ -1066,7 +1080,8 @@ renders them, so `validate.json`'s `record` is digit-for-digit what was read off
 
 ## The UI
 
-Two audits, three gated steps each. `ui/src/App.tsx` holds only which audit is showing and which
+Two audits: the meter one is three gated steps, the payline one is a single step (it used to be two
+— see "Two steps in the pipeline, one button on the page"). `ui/src/App.tsx` holds only which audit is showing and which
 run is open; every endpoint returns the whole `RunState`, so a reload or a
 `?run=<id>&mode=payline` link rebuilds the page from the server. No router — two modes and a run
 id fit in the query string.
