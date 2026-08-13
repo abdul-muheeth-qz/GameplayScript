@@ -974,6 +974,204 @@ The folder must be a capture run the extract step has already been run over, so 
 Exit codes are `0` pass, `1` fail, `2` no verdict — a Fail is a judgement about the spin, an error
 means no judgement was reached, and keeping them apart is what lets a test runner tell them apart.
 
+## Reading the paylines -- `payline`
+
+The second audit, and it shares only the spin with the first. Where `extract` and `validate` read
+the meter strip and ask whether the money adds up, this reads the **reel grid** off `spin_result.png`
+and asks whether the lines on screen pay what they say. Ported from the payline POC; the rule is
+Payline.xlsx's, unchanged:
+
+```
+COMPARE cell1 & cell2
+    IF NO  -> STOP                                    (line does not pay)
+    IF YES -> INITIALIZE PAY COUNTER AT 2
+for each following adjacent pair:
+    IF YES -> INCREMENT PAY COUNTER BY 1
+    IF NO  -> DISPLAY "LINE n PAYS {counter}"  and stop
+DISPLAY "LINE n PAYS {counter}"
+```
+
+Left to right, adjacent pairs only, no skipping -- so the counter is the length of the matching run
+that starts on reel 1. Cells are `E{row}{reel}`, row 1 at the top and reel 1 at the left, and the
+five lines are the middle row, the top row, the bottom row, a V and an inverted V.
+
+### Every number in the geometry is a fraction
+
+The POC's geometry was pixels measured on a 1073x1852 screenshot. This cabinet captures at
+1080x1849, so those numbers were already ~7 px out here, and would be meaningless on a bigger
+screen. [server/payline/geometry.py](server/payline/geometry.py) is fractions instead, at three
+nested levels, because the thing being located is nested:
+
+| | fractions of | what it locates |
+|---|---|---|
+| `reels_roi` | the whole **frame** | where the reel window is |
+| `reel_bounds` / `row_bounds` | that **ROI** | where the cells are inside it |
+| `inner_margin_frac` | each **cell** | how much to trim off every side |
+
+The margin is the one that would be easy to leave as a pixel count and must not be: the POC's flat
+8 px is a fifth of a cell at 0.6x and a fortieth at 3x. Verified by resampling one frame and
+re-reading it from the fractions alone -- 648x1109, 1080x1849, 1620x2774, 2160x3698 and 3240x5547
+all returned the identical grid and the identical five verdicts.
+
+The numbers came from the reel background's own edges rather than from an image editor. The purple
+field behind the symbols is a colour nothing else on screen shares, so all four edges are hard:
+0.0% of it above y1042 or below y1528, none left of x49 or right of x1032. The four gutters between
+reels are 8 px of non-background at x239-246, 438-445, 636-643 and 835-842 -- which is where
+`reel_bounds`' *gaps* come from, so the gold frame between reels falls outside every cell instead of
+inside one. Rows have no gutter at all, so their even three-way split is the layout rather than an
+approximation.
+
+### Keyed by the game, and no fallback
+
+`GAMES` is keyed by `target.process`, and a game with no block **raises and names the process**.
+Fractions survive a change of screen size; they do not survive a change of aspect ratio or of game
+art. FortuneOx's reel window is 0.045-0.956 of the width and 0.564-0.827 of the height, and applying
+that to HuffNPuffLink's 612x961 portrait window lands on unrelated pixels while reporting a perfectly
+confident grid. This is the same rule -- and the same reason -- as `game.games` in
+[taking the win separately](#taking-the-win-separately--clicking-the-game-itself), where run
+`2026-08-12_131459` clicked one game's normalized point on another and killed the capture.
+
+Adding a game is `--profile` plus a block:
+
+```powershell
+python -m server.payline.cli --profile captured_files/<run>/spin_result.png 0 900 1080 1600
+```
+
+Give it a rough box around the reels and it reports where the background actually starts and stops
+and where the gutters are. **It does not find the box for you**, and that is deliberate: two
+auto-detection approaches were written and measured against this cabinet's nine FortuneOx frames,
+and both failed. Thresholding row density collapses on large symbol art -- a row of J's is 70%
+background, a row of pots and fish under 50%, so the window shrank to a 39 px sliver of 487 -- and
+loosening the threshold swept in the purple UI chrome instead and reported nearly the whole screen.
+Connected components with a morphological close to stop symbols splitting a reel merged all five
+reels into one blob, because the kernel that bridges a symbol also bridges an 8 px gutter. A wrong
+crop here does not crash; it reads a confident grid off the wrong pixels, which is worth a minute of
+a person's attention. `tiles.profile`'s docstring keeps that record so neither is retried.
+
+### COMPARE is not equality, so the threshold is the weak point
+
+Two embeddings of the same symbol are never equal, so a decision rule is needed, and the rule is the
+one thing here that is chosen rather than measured off the frame. Three are implemented and all read
+the same embeddings: `threshold` (cosine similarity), `cluster` (agglomerative, so "same symbol"
+means "same group") and `library` (nearest neighbour against reference art, which is the only mode
+that can name a symbol -- and the POC ships no art, so it is inert until some exists).
+
+The **pixel** backend is the default and not as a fallback. On this cabinet's own frames
+same-symbol pairs sit at 0.996-0.9998 and the nearest different-symbol pair at 0.28, so the shipped
+0.90 has a wide margin either side. The `clip` backend is the client-specified OpenCLIP path and its
+0.93 is **not calibrated here** -- the POC's author had no network to the weight host and never ran
+it, and CLIP puts all slot symbols in a much narrower band than raw pixels do. Switching backend
+without re-measuring the threshold is how you get a confident wrong grid. torch is imported lazily
+and commented out of `requirements.txt`, so the default path needs neither it nor the 2.5 GB.
+
+`cross_check` runs the other available strategies over the same embeddings and reports whether they
+agree line for line. Agreement across independent methods is the cheapest evidence that the
+threshold is not doing the work; disagreement means recalibrate before trusting the pays. A strategy
+that cannot run -- no scikit-learn, no symbol library -- is reported as **skipped**, never omitted,
+because a missing row reads as agreement.
+
+### Two steps, and the contact sheet is why
+
+Every similarity number in this stage is meaningless if the crop is half a cell out, and
+`payline/tiles/contact_sheet.png` is the only thing that shows that in one glance. So cutting the
+tiles is its own step with its own output, and the UI puts the sheet on screen before any cosine has
+been produced to be believed.
+
+### The captions have to be measured, not sized
+
+`annotated_line{n}.png` and `annotated_summary.png` caption themselves under the reel window,
+and the canvas is only as wide as that window -- 984 px on the 1080x1849 captures the geometry
+was measured on, 375 px on a 412x720 one. A fixed font size therefore clips, and did: every one
+of the five line images overflowed by 190-280 px at 375 px wide, cutting the text off mid-word.
+The same hardcoded-pixel mistake the geometry itself avoids, in the one place that was still
+drawing rather than measuring.
+
+`report._fit` shrinks the type until the caption fits, down to a floor of 12 pt, and wraps below
+that -- one line of slightly smaller type reads better than two of full size, but type small
+enough to fit any caption at any width would be illegible. The caption strip's height then comes
+from the number of lines actually needed, because sizing the strip before fitting the text is
+what clipped it. Checked from 960 px down to 40 px of usable width: 1 line at 22 pt through 16
+lines at the floor, nothing clipped. The summary's legend picks one font for every row from the
+longest of them, since rows in mixed sizes would read as a ranking the lines do not have.
+
+### It does not check itself against the meters
+
+Both verdicts land in the same run folder and the UI shows them together, but neither gates the
+other. Run `2026-08-12_124044` is why: `spin.json` says `won=False`, the bottom row is unambiguously
+five J's, and the reason is that the capture ended on a **timeout** -- `terminal_event: null`, 29.8 s
+-- so the game's log never reported an outcome at all. The payline reading was right and the log side
+was the one with nothing to say. A stage that "corrected" itself against the meters would have
+thrown that away, so a disagreement is surfaced instead, and the UI says so when a capture timed out.
+
+Across the run folders on disk the two agree wherever both have something to say: every FortuneOx run
+that ended on a real terminal event reports "no win" and all five lines paying 0. The positive
+direction is untested -- there is no winning FortuneOx run with a clean terminal event captured yet.
+
+### Running it
+
+```powershell
+python -m server.payline.cli                                    # the newest usable capture
+python -m server.payline.cli captured_files/<run>               # the grid, every COMPARE, the pays
+python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, then stop
+python -m server.payline.cli captured_files/<run> --json        # the whole record
+python -m server.payline.cli --image <path>                     # a loose image, no run folder
+python -m server.payline.test_paylines                          # the rule, without any pixels
+```
+
+Exit codes are `0` some line pays, `1` an error, `2` nothing pays -- the same shape as
+`validate.cli`'s, and for the same reason.
+
+### Which image gets validated
+
+**The payline tab never spins.** It opens on the image it is about to judge, and the capture
+step lives only on the Meter Validation tab -- putting OBS, the i-Deck and a three-minute wait
+in front of an audit that needs none of them was the wrong shape, and for a demo it buried the
+thing being demonstrated.
+
+Two sources, and the one in use is always named above the image and in the record's
+`image_source`:
+
+| | when |
+|---|---|
+| the newest capture's `spin_result` | the default. "Newest" skips folders that captured nothing readable, rather than offering the top of the list and then failing on it -- a capture that died early leaves a `run.log` and no frame |
+| `payline.image` in `config.json` | whenever it is set. It **overrides** the capture |
+
+An override rather than a fallback, and that is the point of it: a chosen screenshot has to be
+validatable while real captures are sitting on disk, or the only way to demonstrate this stage
+on a particular image would be to empty `captured_files/` first.
+
+```json
+"payline": { "image": "data/input/demo_spin.png" }
+```
+
+Relative paths resolve against the repository root, not the working directory. Set it back to
+`null` to go back to reading the latest spin. A path that does not exist is refused by name
+rather than quietly ignored, because a typo that silently reverted to the last capture would be
+a verdict about the wrong picture.
+
+The cost of an override is that a stale setting audits the wrong image, so nothing about it is
+silent: the path is logged, the record names it, and the page prints it above the frame. It is
+stated as a *mode*, not flagged as a warning -- a supported feature that reads as an error is
+its own kind of bug.
+
+**Changing the image invalidates the cut tiles.** `payline/tiles.json` records the resolved
+`image_path` and the geometry it was cut with, and `runner._tiles_are_current` re-cuts whenever
+either has moved. Reusing them unconditionally is what makes the two steps independent, and it
+was also a live correctness bug: pointing `payline.image` somewhere new left the previous
+image's tiles in place, and the next validation described the old picture in wording nobody
+would question -- 0 lines paying where the supplied image pays 2. A missing `payline.image`
+slipped through the same hole, answering 200 because the source was never resolved.
+
+`GET /api/payline/source` answers "what would you read next" without running anything, which is
+what lets the page show the image up front, and `GET /api/payline/image` serves a supplied one
+(a captured frame is served out of its own run folder; this is the one source that lives
+outside the folder it is audited in). The two POST endpoints take an **optional** `run_id`; the
+meter ones require it, because the meter audit compares a *set* of frames against each other
+and guessing which set is meant would be guessing which ledger to audit.
+
+The run's frame is resolved through `server/frames.py`, so legacy `after.png` folders and any
+configured image format work unchanged.
+
 ## Configuration
 
 `config.json`, git-ignored because it holds the obs-websocket password. `OBS_WS_PASSWORD` in the
@@ -996,6 +1194,10 @@ drops the SDK's plaintext-password line exists for exactly that.
 | `ideck` | `process`, `window_class`, `log`, `layout`, `button`, `actions` | `layout: null` means find it via `%CABINET_MODULE%` |
 | `output` | `dir` | base folder that run folders are created in |
 | `extract` | `tesseract_cmd` null, `save_roi_crops` true | `null` means look at `%TESSERACT_CMD%`, then the per-user Windows install, then whatever is on `PATH` |
+| `payline` | `backend` "pixel", `method` "threshold" | the embedding backend and the decision rule -- see [COMPARE is not equality](#compare-is-not-equality-so-the-threshold-is-the-weak-point). `"clip"` needs torch and open_clip_torch, which are commented out of `requirements.txt` |
+| | `thresholds` `{pixel: 0.90, clip: 0.93}`, `cluster_distance` `{pixel: 0.10, clip: 0.07}` | per backend, because CLIP and pixel similarities are not on the same scale. The pixel number is measured on this cabinet; the clip one is not |
+| | `cross_check` true, `annotate` true, `save_tiles` true, `save_embeddings` true | the agreement check and the artefacts. Tiles and embeddings on disk are what let a reading be re-judged without re-embedding |
+| | `image` null, `symbol_library` null | `image` **overrides** the captured frame whenever it is set, so a supplied screenshot can be validated with captures on disk -- see [which image gets validated](#which-image-gets-validated). `symbol_library` is the reference art `method: "library"` needs, which the POC does not ship |
 | `validate` | `base_url`, `model`, `api_key_env`, `tolerance` "0.005", `timeout_s` 120 | the LM Studio endpoint. `LMSTUDIO_BASE_URL` and `LMSTUDIO_MODEL` override the file |
 | `server` | `host` 127.0.0.1, `port` 8000 | `python -m server --host/--port` override these |
 
@@ -1011,7 +1213,8 @@ never the current working directory, so a server started from anywhere writes in
 | File | |
 |---|---|
 | [server/settings.py](server/settings.py) | the one config loader, and the root every relative path anchors on |
-| [server/api.py](server/api.py) | the three endpoints, health, and the files the page shows |
+| [server/geometry.py](server/geometry.py) | normalized boxes, and the one rule for turning them into pixels |
+| [server/api.py](server/api.py) | the endpoints, health, and the files the page shows |
 | [server/runs.py](server/runs.py) | the run folder as state, and the capture lock |
 | [server/__main__.py](server/__main__.py) | `python -m server` |
 | **server/capture** | |
@@ -1031,13 +1234,26 @@ never the current working directory, so a server started from anywhere writes in
 | [server/extract/slotocr/extraction.py](server/extract/slotocr/extraction.py) | the two methods that read a meter panel, and the elimination pass |
 | [server/extract/slotocr/matching.py](server/extract/slotocr/matching.py) | fuzzy label matching and label↔value pairing |
 | [server/extract/slotocr/config.py](server/extract/slotocr/config.py) | the field keys, the label synonyms, the ROI boxes |
+| **server/payline** | |
+| [server/payline/geometry.py](server/payline/geometry.py) | where the reels are and what a payline is -- the only file to edit for a new game |
+| [server/payline/tiles.py](server/payline/tiles.py) | the ROI crop, the cells, the contact sheet, and `--profile` |
+| [server/payline/embeddings.py](server/payline/embeddings.py) | one vector per cell: the pixel backend and the OpenCLIP one |
+| [server/payline/matcher.py](server/payline/matcher.py) | turning COMPARE into yes or no, three ways, and the agreement check |
+| [server/payline/paylines.py](server/payline/paylines.py) | the rule itself -- pure logic, no pixels |
+| [server/payline/report.py](server/payline/report.py) | the record, the CSVs, and the annotated images |
+| [server/payline/runner.py](server/payline/runner.py) | the two steps over a run folder |
+| [server/payline/cli.py](server/payline/cli.py) | pays / error / no pay |
+| [server/payline/test_paylines.py](server/payline/test_paylines.py) | the rule checked against the spreadsheet's own fixtures |
 | **server/validate** | |
 | [server/validate/agent.py](server/validate/agent.py) | the agent, its arithmetic tool, and the LM Studio endpoint |
 | [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
 | [server/validate/runner.py](server/validate/runner.py) | the verdict object |
 | [server/validate/cli.py](server/validate/cli.py) | Pass / Fail / no verdict |
 | **ui** | |
-| [ui/src/App.tsx](ui/src/App.tsx) | the three steps |
+| [ui/src/App.tsx](ui/src/App.tsx) | which audit is showing, and which run |
+| [ui/src/components/PageShell.tsx](ui/src/components/PageShell.tsx) | the chrome both audits share, and the mode switch |
+| [ui/src/pages/MeterValidation.tsx](ui/src/pages/MeterValidation.tsx) | capture, extract, validate |
+| [ui/src/pages/PaylineValidation.tsx](ui/src/pages/PaylineValidation.tsx) | capture, tiles, paylines |
 | **root** | |
 | [config.json](config.json) | settings (git-ignored) |
 

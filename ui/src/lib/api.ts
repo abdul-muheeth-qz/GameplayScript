@@ -1,10 +1,14 @@
 /**
- * The three buttons, and the shapes they hand back.
+ * The buttons, and the shapes they hand back.
  *
  * Every call returns the same RunState -- the whole of what is known about one run --
  * rather than just its own stage's output. That is what makes a page reload cheap: the
  * UI holds a run id and asks for the state, and it does not matter whether the answer
  * comes from a button press or from GET /api/runs/<id> a day later.
+ *
+ * Two audits share that state. The meter one reads every frame's CASH/WIN/BET and asks a
+ * model whether the money adds up; the payline one reads the reel grid off `spin_result`
+ * and walks the lines. They share the capture and nothing else.
  */
 
 export type MeterField = {
@@ -80,6 +84,119 @@ export const FRAME_BLURBS: Record<FrameStage, string> = {
   win_collected: "the win taken on the glass, now paid in",
 }
 
+/* -- the payline audit ----------------------------------------------------
+ *
+ * The second audit over the same capture. It reads `spin_result`'s pixels rather than its
+ * meters: crop the reel window, cut it into cells, decide which cells hold the same symbol,
+ * and walk each payline left to right counting the matching run.
+ *
+ * Mirrors `server/payline/report.py`. Neither audit gates the other -- a run may hold one
+ * verdict, both or neither, and they can disagree, which is information rather than a bug.
+ */
+
+/** One COMPARE, and why it answered the way it did. */
+export type PaylineStep = {
+  compare: [string, string]
+  similarity: number
+  match: boolean
+  /** "cos 0.9963 >= 0.9000", or "GROUP_1 vs GROUP_4" -- the rule that decided it. */
+  detail: string
+}
+
+export type PaylineLine = {
+  line: number
+  name: string
+  cells: string[]
+  /** The length of the matching run starting at reel 1. Below 2 the line does not pay. */
+  pays: number
+  wins: boolean
+  winning_cells: string[]
+  /** Symbol names, only when the matcher can name one (the `library` method). */
+  symbols: string[]
+  message: string
+  /** The cell that ended the run, or null when the line ran to the end. */
+  broken_at: string | null
+  steps: PaylineStep[]
+}
+
+export type PaylineGeometry = {
+  process: string
+  label: string
+  measured_on: string | null
+  grid: string
+  reels_roi: number[]
+  inner_margin_frac: number
+}
+
+/** `{threshold: {pays: [...]}, cluster: {skipped: "why"}}` -- a strategy that could not run
+ *  says so, because an omitted row would read as agreement. */
+export type PaylineCrossCheck = Record<string, { pays?: number[]; skipped?: string }>
+
+export type PaylineFiles = {
+  reels?: string
+  contact_sheet?: string
+  tiles?: Record<string, string>
+  line_details?: string
+  similarity_matrix?: string
+  annotated?: Record<string, string>
+}
+
+export type PaylineResult = {
+  verdict: "pays" | "no pay"
+  image: string
+  /** "spin_result of this run", or the configured fallback image it read instead. */
+  image_source: string
+  backend: string
+  method: string
+  matcher: string
+  geometry: PaylineGeometry
+  reels_size: string | null
+  tile_size: string | null
+  frame_size: string | null
+  symbol_grid: Record<string, string>
+  lines_paying: number
+  total_pay: number
+  lines: PaylineLine[]
+  cross_check: PaylineCrossCheck
+  /** Do every strategy that ran agree, line for line? null when only one ran. */
+  agreement: boolean | null
+  files: PaylineFiles
+  message: string
+}
+
+/**
+ * Which frame the payline audit would read next, before anything has been run.
+ *
+ * `run_id` is null when no capture on disk holds a spin_result -- then `source` names the
+ * configured fallback image, or says there is nothing at all. `state` rides along so the page
+ * can show the frame without a second request.
+ */
+export type PaylineSource = {
+  /** The run folder results land in — the newest capture holding a spin_result. */
+  run_id: string | null
+  /** True when `payline.image` is set and so overrides the captured frame. */
+  supplied: boolean
+  /** False when there is nothing to read at all, or the supplied path is missing. */
+  readable: boolean
+  /** Short label: "spin_result.png", or "payline.image (demo_spin.png)". */
+  source: string
+  /** The long form — the run id, or the full configured path. */
+  detail: string
+  state: RunState | null
+}
+
+/** What the tiles step recorded -- present as soon as the reels have been cut. */
+export type PaylineTiles = {
+  image: string
+  image_source: string
+  frame_size: string | null
+  reels_size: string
+  tile_size: string
+  cells: number
+  geometry: PaylineGeometry
+  files: PaylineFiles
+}
+
 export type RunState = {
   run_id: string
   frames: Partial<Record<FrameStage, string>>
@@ -87,6 +204,8 @@ export type RunState = {
   extraction: Partial<Record<FrameStage, FrameRecord>> | null
   crops: Partial<Record<FrameStage, string>>
   validation: Verdict | null
+  payline_tiles: PaylineTiles | null
+  payline: PaylineResult | null
 }
 
 export type Check = { ok: boolean; detail: string }
@@ -126,6 +245,26 @@ export const api = {
 
   validate: (run_id: string) =>
     request<RunState>("/api/validate", { method: "POST", body: JSON.stringify({ run_id }) }),
+
+  /** Which image the payline audit would read next, without running anything. */
+  paylineSource: () => request<PaylineSource>("/api/payline/source"),
+
+  /** URL of the configured `payline.image` — the one source that lives outside a run folder. */
+  paylineImageUrl: (bust?: string | number) =>
+    `/api/payline/image${bust ? `?v=${bust}` : ""}`,
+
+  /** `run_id` omitted means the newest capture holding a spin_result. */
+  paylineTiles: (run_id?: string) =>
+    request<RunState>("/api/payline/tiles", {
+      method: "POST",
+      body: JSON.stringify(run_id ? { run_id } : {}),
+    }),
+
+  payline: (run_id?: string) =>
+    request<RunState>("/api/payline", {
+      method: "POST",
+      body: JSON.stringify(run_id ? { run_id } : {}),
+    }),
 
   run: (run_id: string) => request<RunState>(`/api/runs/${run_id}`),
 

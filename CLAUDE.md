@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-One app in three stages, auditing the credit meters of the slot game `HuffNPuffLink.exe` on an
-ICE cabinet dev machine. Capture a spin, read the meters off the frames, check that the money
-adds up.
+One app, one capture, **two audits** of it, on an ICE cabinet dev machine. Capture a spin, then
+either read the credit meters off the frames and check that the money adds up, or read the reel
+grid off the result frame and check that the paylines pay what they say. `config.json`'s
+`target.process` says which game (`HuffNPuffLink.exe`, `FortuneOx.exe`); the meter audit works on
+both, the payline audit needs a geometry block per game and currently has FortuneOx's.
 
 - **`server/capture/`** — `spin.py` **causes** one spin: opens OBS, finds the game and i-Deck windows,
   starts OBS recording into the run folder, screenshots, clicks Repeat Bet on the i-Deck, waits
@@ -23,8 +25,12 @@ adds up.
 - **`server/validate/`** — asks a local LLM (LM Studio) whether the cash meter after the spin follows
   from the meters before it, `current cash = previous cash - bet + win`. One structured call, no
   tools. Writes a verdict of pass, fail or error.
-- **`server/`** + **`ui/`** — a FastAPI app exposing those three as three endpoints, and a
-  React/Vite/shadcn page with the three buttons that drive them.
+- **`server/payline/`** — the **second audit**, sharing only the capture. Crops the reel window out
+  of `spin_result.png` with normalized fractions, cuts it into one tile per cell, embeds each tile,
+  decides which cells hold the same symbol, and walks each payline left to right counting the
+  matching run from reel 1. No OCR, no model, no cabinet. Writes `payline.json`.
+- **`server/`** + **`ui/`** — a FastAPI app exposing those stages as endpoints, and a
+  React/Vite/shadcn page with two tabs — Meter Validation and Payline Validation — over one run.
 
 [README.md](README.md) is the primary document and is unusually detailed — most non-obvious
 behaviour in this codebase is explained there and in module docstrings, with the measurement that
@@ -75,18 +81,32 @@ python -m server.extract.cli <img> --out <dir>
 python -m server.validate.cli captured_files/<run>          # Pass / Fail, exit 0 / 1 / 2
 python -m server.validate.cli captured_files/<run> --json   # the full verdict object
 python -m server.validate.cli captured_files/<run> --write  # also write validate.json
+
+# the payline audit -- the other reading of the same capture
+python -m server.payline.cli captured_files/<run>               # the grid, every COMPARE, the pays
+python -m server.payline.cli                                    # ...over the newest usable capture
+python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, then stop
+python -m server.payline.cli captured_files/<run> --json        # the whole record
+python -m server.payline.cli --image <path>                     # a loose image, no run folder
+python -m server.payline.cli --profile <img> X0 Y0 X1 Y1        # measure a new game's reels
+python -m server.payline.test_paylines                          # the rule, no pixels needed
 ```
 
 Python 3.12 here (3.10+ for the `X | Y` annotations). Exit codes: `0` ok, `1` error, `2`
 interrupted — and for `validate.cli`, `0` pass, `1` fail, `2` no verdict, which is the one
-distinction a test runner needs. There is no test suite, build step, or linter for the Python —
-and no meaningful way to add unit tests for the capture core, because every module there talks to
-live Windows APIs, a running game, a running `OledPanelSvc.exe`, and OBS. Verification is
-`--dry-run` followed by a real run, then reading `captured_files/<run>/run.log` and `spin.json`.
+distinction a test runner needs; `payline.cli` is the same shape, `0` some line pays, `2` nothing
+pays. There is no build step or linter for the Python, and no meaningful way to add unit tests for
+the capture core, because every module there talks to live Windows APIs, a running game, a running
+`OledPanelSvc.exe`, and OBS. Verification is `--dry-run` followed by a real run, then reading
+`captured_files/<run>/run.log` and `spin.json`.
 `extract` runs offline against the fixtures in `server/extract/Images/` and should be checked there
 after any change. `validate` needs LM Studio up but no cabinet, so it is checked by re-running it
 over the run folders already in `captured_files/` — there are winning and losing ones on disk, and
-both paths through `Sources` need covering.
+both paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
+with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures —
+the one genuinely unit-testable thing in the repo) and by re-running `payline.cli` over the
+FortuneOx run folders on disk, then **looking at `payline/tiles/contact_sheet.png`**, which is the
+only thing that shows whether the crop is right.
 
 `config.json` is git-ignored (it holds the obs-websocket password). A checkout has none — copy the
 table in the README's Configuration section to recreate it, or read the current password from OBS:
@@ -94,17 +114,19 @@ Tools → WebSocket Server Settings → Show Connect Info. `OBS_WS_PASSWORD` ove
 
 ## Architecture
 
-Two top-level folders: `server/` (every line of Python) and `ui/`. Inside `server/`, three
-packages, one per stage, plus the API itself. No framework beyond FastAPI, which sequences
-and serves and owns no logic of its own.
+Two top-level folders: `server/` (every line of Python) and `ui/`. Inside `server/`, one package
+per stage plus the API itself. No framework beyond FastAPI, which sequences and serves and owns no
+logic of its own.
 
 ```
 server/
   settings.py         the one config loader, and ROOT (the repo root, one level up). Everything
                        relative anchors here, not on CWD
   frames.py           the frame names a run folder holds (pre_spin, spin_result, win_collected),
-                       and which part of the ledger each supplies. No dependencies, so all
-                       three stages can import it
+                       and which part of the ledger each supplies. No dependencies, so every
+                       stage can import it
+  geometry.py         normalized boxes -> pixels, one rule. Imported by extract (the meter strip)
+                       and payline (the reel window). No dependencies, same reason as frames.py
   runs.py              the run folder as state: name it, fill it, read it back. The capture lock
   api.py               the three endpoints, /api/health, and the files the UI shows
   __main__.py          `python -m server`
@@ -137,7 +159,23 @@ server/
     runner.py         the verdict object, written to validate.json
     cli.py            Pass / Fail / no verdict, with the exit codes to match
 
-ui/                   React + Vite + Tailwind + shadcn; three steps, one page
+  payline/            THE OTHER AUDIT -- does the grid pay the lines it claims
+    geometry.py       where the reels are (normalized, per game) and what a payline is. The only
+                       file to edit for a new game, and it RAISES for a game it has no block for
+    tiles.py          the ROI crop, the 15 cells, the contact sheet, and --profile
+    embeddings.py     one vector per cell: the pixel backend (default) and OpenCLIP
+    matcher.py        COMPARE -> yes/no, three ways, plus the cross-check between them
+    paylines.py       the rule itself. Pure logic over a matcher, no pixels -- do not touch
+    report.py         payline.json, the CSV audit trail, the annotated images
+    runner.py         the two steps over a run folder
+    cli.py            pays / error / no pay
+    test_paylines.py  the rule against Payline.xlsx's own fixtures. Runs without pytest
+
+ui/                   React + Vite + Tailwind + shadcn; two audits, one shell
+  src/App.tsx           which audit is showing and which run is open. Nothing else
+  src/components/PageShell.tsx   the chrome both audits share, and the mode switch
+  src/pages/            MeterValidation (capture, extract, validate)
+                        PaylineValidation (capture, tiles, paylines)
 ```
 
 Every module below is imported with a package-relative import (`from . import gamelog`,
@@ -169,7 +207,16 @@ captured_files/<run_id>/
        part of the ledger; the click is in spin.json's `stale_collect`)
     extract/pre_spin.json  extract/spin_result.json  *_roi.png     extract
     validate.json                                                 validate
+    payline/reels.png  tiles/e11.png ...  tiles.json              payline
+      (tiles/contact_sheet.png is the thing to look at when a number looks wrong)
+    payline/embeddings/  line_details.csv  annotated_*.png        payline
+    payline.json                                                  payline
 ```
+
+**The two audits are independent tenants of the same folder.** Either can run without the other,
+in either order, and `runs.state` returns both so one page can show them side by side. Neither
+gates the other, and they are allowed to disagree — see the payline section below for the run where
+the disagreement was the payline audit being right.
 
 **`server/frames.py` owns those three names** and is imported by capture, extract, validate and
 `runs.py` — one definition of the contract rather than four string literals that drift. Nothing
@@ -501,6 +548,173 @@ OBS's own profile names. Hence `obs_client.Recording`, and three rules in it:
 - `spin.capture_size` refuses OBS's first answer until it is plausible against the game window's
   client area — a source still acquiring reported 185x9, which clears OBS's own 8px floor and
   yields a useless PNG while everything reports success.
+
+## Payline
+
+### The geometry is fractions all the way down, and that is the whole feature
+
+The POC this came from hardcoded pixels measured on a 1073x1852 screenshot. This cabinet captures at
+1080x1849, so those numbers were already ~7 px off, and on a bigger screen they are meaningless.
+`payline/geometry.py` is fractions at three nested levels, because the thing being located is nested:
+`reels_roi` is a fraction of the **frame**, `reel_bounds`/`row_bounds` are fractions of that **ROI**,
+and `inner_margin_frac` is a fraction of each **cell**.
+
+**The margin is the one that matters most and is easiest to get wrong.** Left as the POC's flat 8 px
+it is a fifth of a cell at 0.6x and a fortieth at 3x. Verified by resampling one frame and re-reading
+it from the fractions alone: 648x1109, 1080x1849, 1620x2774, 2160x3698 and 3240x5547 all return the
+identical grid and the identical five verdicts.
+
+The numbers were measured off the reel background's own edges, not in an image editor. The purple
+field behind the symbols is a colour nothing else on screen shares, so all four edges are hard —
+0.0% of it above y1042 or below y1528, none left of x49 or right of x1032 — and the four gutters
+between reels are 8 px of non-background at x239-246, 438-445, 636-643 and 835-842. `reel_bounds`'
+**gaps** are those gutters, which is what keeps the gold frame outside every cell instead of inside
+one. Rows have no gutter at all, so their even three-way split is the layout rather than a guess.
+
+`server/geometry.py` owns the fraction→pixel rule and is shared with `extract`, which crops the meter
+strip by the same one. Verified equivalent to the definition it replaced over 200,000 random
+(image size, box) pairs, so `crop_horizontal_bands`' shared-edge guarantee is untouched.
+
+### Keyed by `target.process`, and it must never fall back
+
+A game with no block **raises and names the process**. Fractions survive a change of scale; they do
+not survive a change of aspect ratio or of game art. FortuneOx's reel window applied to
+HuffNPuffLink's 612x961 portrait window lands on unrelated pixels and reports a perfectly confident
+grid. This is `game.games`'s rule for `gameclick`'s normalized click points, for the identical
+reason — run `2026-08-12_131459` is the one where a fallback would have been indistinguishable from
+correct behaviour until the money was wrong.
+
+Adding a game is `payline.cli --profile <image> X0 Y0 X1 Y1` plus a block. **`--profile` reports, it
+does not detect**, and that is deliberate: two auto-detection approaches were written and measured
+against this cabinet's nine FortuneOx frames, and both failed.
+
+- Thresholding row density collapses on large symbol art. A row of J's leaves 70% background; a row
+  of pots and fish leaves under 50%, so the detected window shrank to a 39 px sliver of the 487 px it
+  should be. Loosening the threshold instead swept in the purple UI chrome above and below the reels
+  and reported nearly the whole screen.
+- Connected components over the background mask, with a morphological close so symbol art cannot
+  split a reel in two, merged all five reels into one blob: the kernel that bridges a symbol also
+  bridges an 8 px gutter, and there is no kernel that does one without the other.
+
+`tiles.profile`'s docstring holds that record so neither is retried. A wrong crop here does not
+crash — it reads a confident grid off the wrong pixels — which is why it is worth a person's minute.
+
+### `paylines.py` is not to be touched
+
+It is pure logic over a matcher, it knows nothing about images, and it is the rule that was verified
+against the POC's own `run_all.py`. It is also the only genuinely unit-testable module in this
+repository, and `test_paylines.py` covers it with Payline.xlsx's own fixtures plus the edge cases of
+the counter rule. Change the vision layer freely; leave this alone.
+
+### COMPARE is not equality, and the threshold is the one unmeasured number
+
+`pixel` is the default backend and not as a fallback: on this cabinet's frames same-symbol pairs sit
+at 0.996-0.9998 against a nearest different-symbol pair of 0.28, so the shipped 0.90 has a wide
+margin either side. `clip` is the client-specified OpenCLIP path and its 0.93 is **not calibrated
+here** — the POC's author had no network to the weight host and never ran it, and CLIP puts all slot
+symbols in a much narrower band than raw pixels do. Switching backend without re-measuring the
+threshold is how you get a confident wrong grid. torch is imported lazily and commented out of
+`requirements.txt`; the default path needs neither it nor the 2.5 GB.
+
+`cross_check` runs the other available strategies over the same embeddings and reports agreement line
+for line — the cheapest evidence that the threshold is not doing the work. A strategy that cannot run
+(no scikit-learn, no symbol library) is reported as **skipped**, never omitted, because a missing row
+reads as agreement. The shipped `library` method has no symbol art to work from: the POC repo
+documents `data/symbols/`, `src/calibrate.py` and `scripts/` and ships none of them.
+
+### Two steps, because the contact sheet has to be looked at
+
+Every similarity number is meaningless if the crop is half a cell out, and
+`payline/tiles/contact_sheet.png` is the only thing that shows that in one glance. Cutting the tiles
+is therefore its own step with its own output in the run folder, and the UI puts the sheet on screen
+before any cosine exists to be believed. Do not collapse the two steps into one.
+
+### The payline tab never captures
+
+There is no spin button on it, deliberately. The audit reads an image; capturing one is the meter
+tab's job, and duplicating it here put OBS, the i-Deck and a 180 s backstop in front of a stage
+whose only dependencies are Pillow and numpy. The page instead opens on the image it is about to
+judge -- `App.tsx` adopts the newest capture when no run is open, and it is `App` that decides
+that rather than the page, because only `App` knows whether the URL named a run. `remember` writes
+the open run back into `?run=`, so a page adopting "the latest" on its own mount could not tell a
+deliberate link from its own leftovers; waiting for the URL fetch to settle removes the race
+instead of papering over it.
+
+### `payline.image` is an override, and it invalidates the tiles
+
+Set it and it is read *instead of* the captured frame, whether or not captures exist -- because a
+chosen screenshot has to be demonstrable without emptying `captured_files/` first. It is stated as
+a mode rather than flagged as a warning: a supported feature that renders as an error is its own
+kind of bug. What keeps it honest is that it is never silent -- logged, named in `image_source`,
+and printed above the image on the page -- and that a missing path is refused by name rather than
+reverting to the last capture, which would be a verdict about the wrong picture.
+
+**`runner._tiles_are_current` is load-bearing and was bought with two bugs.** Saved tiles are
+reused only when `tiles.json`'s recorded `image_path` *and* geometry both still match what would
+be read now. Reusing them unconditionally is what made the two steps independent, and it also
+meant: pointing `payline.image` at a new picture left the old image's tiles in place and the next
+validation reported the old grid while its record said `spin_result of this run` (0 lines paying
+where the supplied image pays 2); and a missing `payline.image` answered 200, because
+`source_image` was never called at all. The source is now resolved unconditionally, before the
+cache is consulted.
+
+### Which frame, and the one asymmetry in the API
+
+`POST /api/payline` and `/api/payline/tiles` take an **optional** `run_id`, defaulting to
+`runs.latest(cfg, frame=frames.SPIN_RESULT)` -- the newest capture that actually holds a frame, not
+the newest folder (four folders here have no `spin.json` at all, and offering one would fail a step
+for a reason unrelated to paylines). The meter endpoints keep requiring it: this audit reads *one*
+frame so "which spin" has an obvious default, while the meter audit compares a set of frames
+against each other and guessing the set is guessing which ledger to audit. Don't "consistency-fix"
+one to match the other.
+
+`GET /api/payline/source` answers the same question without running anything, so the page can show
+the frame before a button is pressed -- "which image is this?" being the first question a payline
+verdict raises. Its `fallback` is a flag rather than something the UI infers from the prose, so the
+wording stays free to change without altering what the page unlocks.
+
+`api._payline_run` decides the run *folder* (where artefacts land); `runner.source_image` decides
+the *image*. They are separate because a supplied image is audited inside a run folder like
+anything else -- and when there is no capture at all, a fresh folder is created for the results
+rather than writing outside the contract, so a machine that has never captured anything still
+produces a run folder the UI and the CLI read the normal way.
+
+### Annotated captions are fitted, never sized
+
+The caption strip under `annotated_line{n}.png` is as wide as the reel window, which varies with
+the game window -- 984 px at 1080x1849, 375 px at 412x720. A fixed font size clips, and did:
+190-280 px of overflow on all five line images at the smaller size. `report._fit` shrinks to a
+12 pt floor and wraps below it, and the strip height is computed from the fitted line count
+rather than assumed -- sizing the canvas before measuring the text is the actual bug. Verified
+from 960 px down to 40 px of usable width. Don't reintroduce a literal font size or a literal
+strip height here; it is the same class of mistake as a pixel ROI.
+
+### It does not check itself against the meters, and that is load-bearing
+
+Run `2026-08-12_124044`: `spin.json` says `won=False`, the bottom row is unambiguously five J's, and
+the reason is that the capture ended on a **timeout** — `terminal_event: null` at 29.8 s, its event
+list being the *previous* uncollected win's gamble resolving — so the game's log never reported an
+outcome for that spin at all. The payline reading was right and the log side had nothing to say. A
+stage that reconciled itself against the meters would have discarded that, so disagreement is
+surfaced instead, and the UI says so explicitly when a capture timed out.
+
+Where both have something to say they agree: every FortuneOx run on disk that ended on a real
+terminal event reports "no win" and all five lines paying 0. The positive direction is untested —
+there is no winning FortuneOx run with a clean terminal event captured yet.
+
+**The ratios have now been tested across a change of game, not just of scale.** Run
+`2026-08-12_215150` is a 412x720 capture of *Lion Link Fortune* -- a different game, running under
+`FortuneOx.exe`'s process and log, at a slightly different aspect ratio (0.572 against the 0.584 the
+block was measured on). The FortuneOx fractions landed on it cleanly: all 15 cells centred, no
+gutter bleed on the contact sheet, and all five lines correctly reading 0. That is a happy accident
+rather than a guarantee -- the two games share a reel layout -- and it does not weaken the
+per-game rule above. What it does show is that the contact sheet is the check that settles it:
+the numbers were only trustworthy *because* the sheet showed the crop had landed.
+
+Also worth knowing before trusting the pays as a paytable check: the five lines are Payline.xlsx's
+spec, not FortuneOx's real paytable, and `classify()` cannot help — CLAUDE.md's note that
+`reels_stopped` and `final_grid` come back **0** for FortuneOx (they are in `FortuneOx_Server.log`,
+which `gamelog.path` does not point at) means there is no log oracle for the symbol grid on this game.
 
 ## Extract
 
@@ -868,9 +1082,18 @@ shown.
 
 ## The UI
 
-Three steps, gated in order, in `ui/src/App.tsx`. The only state it holds between the buttons is
-the run id; every endpoint returns the whole `RunState`, so a reload or a `?run=<id>` link rebuilds
-the page from the server. The palette is sampled off the cabinet's own meter strip and the fonts
+Two audits, three gated steps each. `ui/src/App.tsx` holds only which audit is showing and which
+run is open; every endpoint returns the whole `RunState`, so a reload or a
+`?run=<id>&mode=payline` link rebuilds the page from the server. No router — two modes and a run
+id fit in the query string.
+
+**The run is held in `App`, not in either page**, so switching tabs keeps the spin you are looking
+at: one capture, two readings, and a spin captured on one page can be audited on the other without
+spinning again. That is the point of joining them at all. `PageShell` owns the chrome both pages
+share, so they cannot drift apart into two products; everything audit-specific is the step rail and
+the body. Health gating is per-page and deliberately not shared — the payline audit needs no
+LM Studio and the meter audit needs no reel geometry, so `/api/health`'s `ok` covers only config,
+tesseract and the model, and `checks.payline` is reported without gating anything. The palette is sampled off the cabinet's own meter strip and the fonts
 are bundled through `@fontsource-variable` rather than fetched from a CDN — the cabinet is not
 guaranteed to have internet, and a font that silently falls back changes the alignment of every
 meter column.

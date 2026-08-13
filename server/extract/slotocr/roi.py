@@ -45,6 +45,7 @@ re-implementing a weaker one-off check).
 import logging
 from typing import NamedTuple, Optional
 
+from ...geometry import crop_normalized_box
 from .roi_config import (BAND_COUNT, BANDS, CONFIDENT_FIELDS, CONFIGURED_BOXES,
                          DYNAMIC_MIN_PAD_Y, DYNAMIC_PAD_FRAC_X, DYNAMIC_PAD_FRAC_Y,
                          ROI_METHOD, RoiMethod)
@@ -70,20 +71,6 @@ class MeterROI(NamedTuple):
     image: object
     source: str
     extracted: Optional[tuple] = None
-
-
-def crop_normalized_box(image, box):
-    """Crop `image` to a normalized [x0, y0, x1, y1] box (fractions of
-    width/height, 0.0-1.0). Returns None if the box is empty or inverted."""
-    h_img, w_img = image.shape[:2]
-    x0f, y0f, x1f, y1f = box
-    x0 = max(0, min(w_img, int(round(x0f * w_img))))
-    y0 = max(0, min(h_img, int(round(y0f * h_img))))
-    x1 = max(0, min(w_img, int(round(x1f * w_img))))
-    y1 = max(0, min(h_img, int(round(y1f * h_img))))
-    if x1 <= x0 or y1 <= y0:
-        return None
-    return image[y0:y1, x0:x1]
 
 
 def _fields_resolved(extracted):

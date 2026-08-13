@@ -10,9 +10,16 @@ replays exactly like one from a minute ago.
         win_collected.png                                             capture, wins only
         extract/pre_spin.json  extract/spin_result.json  *_roi.png    extract
         validate.json                                                 validate
+        payline/reels.png  tiles/  tiles.json  annotated_*.png        payline
+        payline.json                                                  payline
 
 A winning spin has three frames, because a win is not in the cash meter until it is
 collected -- see `server.frames`, which owns those names.
+
+The two audits are independent tenants of the same folder: the meter one reads all the
+frames and asks a model whether the money adds up, the payline one reads `spin_result`'s
+pixels and walks the lines. Either can be run without the other, in either order, and
+`state` returns both so one page can show them side by side.
 """
 
 from __future__ import annotations
@@ -28,6 +35,8 @@ from datetime import datetime
 from . import frames as frame_names
 from .settings import ROOT, captures_dir
 from .extract.runner import extract_dir, read_frames
+from .payline.runner import read_result as read_payline
+from .payline.runner import read_tiles as read_payline_tiles
 from .validate.runner import read_result
 
 LOG = logging.getLogger("server")
@@ -211,24 +220,51 @@ def summarise(spin: dict | None) -> dict | None:
 
 
 def state(cfg: dict, run_id: str) -> dict:
-    """Everything known about a run, so a page refresh can rebuild itself."""
+    """Everything known about a run, so a page refresh can rebuild itself.
+
+    Both audits are in here, and neither depends on the other: a run may hold a meter
+    verdict, a payline verdict, both or neither, and the two pages read the same object.
+    """
     require_run(cfg, run_id)
     spin = read_spin(cfg, run_id)
+    folder = run_dir(cfg, run_id)
     return {
         "run_id": run_id,
         "frames": frames(cfg, run_id),
         "spin": summarise(spin),
-        "extraction": read_frames(run_dir(cfg, run_id)),
+        "extraction": read_frames(folder),
         "crops": crops(cfg, run_id),
-        "validation": read_result(run_dir(cfg, run_id)),
+        "validation": read_result(folder),
+        "payline_tiles": read_payline_tiles(folder),
+        "payline": read_payline(folder),
     }
+
+
+def all_runs(cfg: dict) -> list[str]:
+    """Every run id, newest first. Ids are timestamps, so that is a reverse name sort."""
+    base = captures_dir(cfg)
+    if not os.path.isdir(base):
+        return []
+    return sorted((name for name in os.listdir(base)
+                   if os.path.isdir(os.path.join(base, name)) and RUN_ID_RE.match(name)),
+                  reverse=True)
 
 
 def recent(cfg: dict, limit: int = 20) -> list[str]:
     """The most recent run ids, newest first."""
-    base = captures_dir(cfg)
-    if not os.path.isdir(base):
-        return []
-    runs = [name for name in os.listdir(base)
-            if os.path.isdir(os.path.join(base, name)) and RUN_ID_RE.match(name)]
-    return sorted(runs, reverse=True)[:limit]
+    return all_runs(cfg)[:limit]
+
+
+def latest(cfg: dict, frame: str | None = None) -> str | None:
+    """The newest run id, or the newest one that actually captured `frame`.
+
+    The `frame` filter is what makes this useful to a stage rather than to a listing: the
+    newest folder is not necessarily the newest *usable* one. A capture that failed early
+    leaves a folder holding a run.log and nothing else -- four of the folders on this machine
+    have no spin.json at all -- so a stage that took the top of the list would offer a run and
+    then fail on it. Asking for the newest run holding a `spin_result` skips those instead.
+    """
+    for run_id in all_runs(cfg):
+        if frame is None or frame_names.find(run_dir(cfg, run_id), frame):
+            return run_id
+    return None

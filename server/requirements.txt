@@ -13,6 +13,21 @@ opencv-python>=4.8,<6
 numpy>=1.24,<3
 pytesseract>=0.3.10,<0.4
 
+# -- payline ---------------------------------------------------------------
+# Pillow crops the reels and draws the annotations; numpy above does the embeddings.
+Pillow>=10.0,<13
+
+# Only for payline.method / cross-check "cluster". Everything else runs without it, and a
+# missing sklearn is reported as a skipped cross-check rather than a failure.
+scikit-learn>=1.3
+
+# Only for payline.backend "clip" -- the client-specified OpenCLIP ViT-B-32 path. These two
+# are ~2.5 GB installed, and the default backend is "pixel", which needs neither. Uncomment
+# to enable CLIP, and re-measure payline.thresholds.clip afterwards: CLIP puts slot symbols
+# in a much narrower similarity band than raw pixels, so the shipped 0.93 is a guess.
+# torch>=2.0
+# open_clip_torch>=2.24
+
 # -- validate --------------------------------------------------------------
 # Pinned exactly: create_agent moved package in LangChain 1.x and the reply-parsing
 # here depends on response_metadata["finish_reason"] surviving the OpenAI-compatible

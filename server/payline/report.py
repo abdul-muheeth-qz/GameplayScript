@@ -1,0 +1,384 @@
+"""STEP 2c - what the reading leaves on disk, and what it prints.
+
+    payline.json                       the verdict, and every COMPARE behind it
+    payline/line_details.csv           one row per COMPARE -- the audit trail
+    payline/similarity_matrix.csv      every pairwise cosine
+    payline/annotated_line{n}.png      one image per line, drawn on the reel window
+    payline/annotated_summary.png      every paying line on one image
+
+The annotated images matter more here than they would elsewhere: this stage's verdict rests
+entirely on a crop being right, and the only honest way to show that is the pixels it read
+with the cells drawn on them. Captions go on a strip *below* the reels rather than over the
+symbols, so nothing the reader needs to check is covered by the annotation.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import logging
+import os
+
+from PIL import Image, ImageDraw
+
+from .paylines import total_pays
+from .tiles import REELS_FILE, cell_boxes
+
+LOG = logging.getLogger("payline")
+
+# One colour per line, reused if a game defines more lines than there are colours.
+PALETTE = [(0, 220, 120), (255, 205, 0), (0, 190, 255), (255, 110, 200), (170, 130, 255)]
+
+FONT_PATHS = [
+    "C:/Windows/Fonts/arialbd.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+]
+
+
+def _font(size=20):
+    from PIL import ImageFont
+
+    for path in FONT_PATHS:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+# Caption sizing. The canvas is as wide as the reel window, and that varies with the game
+# window: 984 px on the 1080x1849 captures the geometry was measured on, 375 px on a 412x720
+# one. A fixed font size therefore clips -- measured at 190-280 px of overflow on every one of
+# the five line images at 375 px wide, which is exactly the "hardcoded pixel against a
+# variable-size image" mistake the geometry itself avoids.
+CAPTION_PREFERRED = 22
+CAPTION_MINIMUM = 12   # below this it is unreadable, so wrap instead of shrinking further
+LEGEND_PREFERRED = 19
+LEGEND_MINIMUM = 11
+
+
+def _width(text, font) -> float:
+    """How wide `text` is in `font`. `getlength` works for TrueType and the bitmap default."""
+    try:
+        return font.getlength(text)
+    except AttributeError:            # very old Pillow
+        return font.getbbox(text)[2]
+
+
+def _line_height(font) -> int:
+    """A whole line's height, ascender to descender, with a little leading."""
+    ascent, descent = (font.getmetrics() if hasattr(font, "getmetrics") else (10, 2))
+    return int((ascent + descent) * 1.25)
+
+
+def _wrap(text, font, max_width) -> list[str]:
+    """Greedy word wrap. A single word wider than the line is left long rather than broken --
+    every caption here is words and cell names, so there is nothing to gain from hyphenating
+    and a mid-token break would make `E21` unreadable."""
+    lines, current = [], ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}".strip()
+        if current and _width(candidate, font) > max_width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines or [text]
+
+
+def _fit(text, max_width, preferred=CAPTION_PREFERRED, minimum=CAPTION_MINIMUM):
+    """A font and the lines to draw so `text` fits inside `max_width`.
+
+    Shrink first, wrap only if shrinking to `minimum` still does not fit -- one line of
+    slightly smaller type reads better than two of full size, but type small enough to fit any
+    caption on any width would be illegible, so there is a floor and wrapping takes over below
+    it. Returns `(font, lines)`; the caller sizes its strip from `len(lines)`.
+    """
+    for size in range(preferred, minimum - 1, -1):
+        font = _font(size)
+        if _width(text, font) <= max_width:
+            return font, [text]
+    font = _font(minimum)
+    return font, _wrap(text, font, max_width)
+
+
+# ---------------------------------------------------------------------------
+# the record
+# ---------------------------------------------------------------------------
+
+def build_record(results, matcher, geometry, *, image, image_source, backend,
+                 method, tiles_info, checks, agree) -> dict:
+    """The whole verdict as a JSON-able object. This is `payline.json`."""
+    lines_paying, total_pay = total_pays(results)
+    labels = matcher.labels()
+    return {
+        "verdict": "pays" if lines_paying else "no pay",
+        "image": image,
+        "image_source": image_source,
+        "backend": backend,
+        "method": method,
+        "matcher": matcher.describe(),
+        "geometry": geometry.describe(),
+        "reels_size": tiles_info.get("reels_size"),
+        "tile_size": tiles_info.get("tile_size"),
+        "frame_size": tiles_info.get("frame_size"),
+        "symbol_grid": labels,
+        "lines_paying": lines_paying,
+        "total_pay": total_pay,
+        "lines": [
+            {
+                "line": r.line_id,
+                "name": r.name,
+                "cells": r.cells,
+                "pays": r.pays,
+                "wins": r.wins,
+                "winning_cells": r.winning_cells,
+                "symbols": [labels[c] for c in r.winning_cells] if labels else [],
+                "message": r.message,
+                # The cell that ended the run, or null when the line ran to the end. This
+                # is what the annotated image outlines in red.
+                "broken_at": (r.cells[r.stopped_at + 1] if r.stopped_at >= 0 else None),
+                "steps": [
+                    {"compare": [s.a, s.b], "similarity": round(s.similarity, 6),
+                     "match": s.match, "detail": s.detail}
+                    for s in r.steps
+                ],
+            }
+            for r in results
+        ],
+        "cross_check": checks,
+        "agreement": agree,
+        "files": {},
+        "message": "",
+    }
+
+
+def print_results(record: dict) -> None:
+    """The console form, for the CLI. Same information as the record, laid out to read."""
+    bar = "=" * 74
+    print(bar)
+    print("PAYLINE VALIDATION")
+    print(bar)
+    print(f"  Image      : {record['image']}  ({record['image_source']})")
+    print(f"  Frame      : {record.get('frame_size') or '?'}"
+          f"   reels {record.get('reels_size') or '?'}"
+          f"   tile {record.get('tile_size') or '?'}")
+    geom = record["geometry"]
+    print(f"  Geometry   : {geom['label']} for {geom['process']}, "
+          f"{geom['grid']}, measured on {geom['measured_on']}")
+    print(f"  Embedding  : {record['backend']}")
+    print(f"  Matching   : {record['matcher']}")
+
+    grid = record.get("symbol_grid") or {}
+    if grid:
+        rows, reels = (int(n) for n in geom["grid"].split("x"))
+        width = max(len(v) for v in grid.values()) + 2
+        print("\nSYMBOL GRID")
+        print("-" * 74)
+        print("     " + "".join(f"R{c}".ljust(width) for c in range(1, reels + 1)))
+        for r in range(1, rows + 1):
+            print(f"  {r}  " + "".join(grid.get(f"E{r}{c}", "?").ljust(width)
+                                       for c in range(1, reels + 1)))
+
+    for line in record["lines"]:
+        print()
+        print("-" * 74)
+        print(f"LINE {line['line']}  ({line['name']})   {' -> '.join(line['cells'])}")
+        print("-" * 74)
+        for i, step in enumerate(line["steps"]):
+            if not step["match"]:
+                tag = "STOP" if i == 0 else "STOP (run ends)"
+            else:
+                tag = "INIT COUNTER = 2" if i == 0 else "COUNTER +1"
+            verdict = "YES" if step["match"] else "NO"
+            print(f"  COMPARE {step['compare'][0]} & {step['compare'][1]}  "
+                  f"cos={step['similarity']:.4f}  {verdict:<3}  "
+                  f"{step['detail']:<28} {tag}")
+        suffix = f"   [{', '.join(line['symbols'])}]" if line["symbols"] else ""
+        note = "" if line["wins"] else "   (no match on the first pair - STOP)"
+        print(f"  >> {line['message']}{suffix}{note}")
+
+    print()
+    print(bar)
+    print("SUMMARY")
+    print(bar)
+    for line in record["lines"]:
+        print(f"  {'WIN ' if line['wins'] else '    '}{line['message']}")
+    print(f"\n  {record['lines_paying']} of {len(record['lines'])} lines pay.")
+    print(f"  TOTAL PAY  : {record['total_pay']}")
+    print(bar)
+
+    checks = record.get("cross_check") or {}
+    ran = {m: c["pays"] for m, c in checks.items() if "pays" in c}
+    if len(ran) > 1:
+        print()
+        print(bar)
+        print("CROSS-CHECK  (do the matching strategies agree?)")
+        print(bar)
+        methods = list(ran)
+        print("  LINE  " + "".join(m.upper().ljust(14) for m in methods))
+        for i in range(len(record["lines"])):
+            values = [ran[m][i] for m in methods]
+            flag = "" if len(set(values)) == 1 else "  <-- DISAGREE"
+            print(f"  {i + 1:<6}" + "".join(f"pays {v}".ljust(14) for v in values) + flag)
+        print()
+        print("  All strategies agree." if record.get("agreement")
+              else "  Strategies disagree - recalibrate before trusting the result.")
+        print(bar)
+    for method, check in checks.items():
+        if "skipped" in check:
+            print(f"  (cross-check {method!r} skipped: {check['skipped']})")
+
+
+# ---------------------------------------------------------------------------
+# the files
+# ---------------------------------------------------------------------------
+
+def write_line_csv(out_dir: str, record: dict) -> str:
+    name = "line_details.csv"
+    with open(os.path.join(out_dir, name), "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["line", "step", "cell_a", "cell_b", "cosine", "match", "detail",
+                         "line_pays"])
+        for line in record["lines"]:
+            for i, step in enumerate(line["steps"], start=1):
+                writer.writerow([line["line"], i, step["compare"][0], step["compare"][1],
+                                 f"{step['similarity']:.6f}",
+                                 "YES" if step["match"] else "NO",
+                                 step["detail"], line["pays"]])
+    return name
+
+
+def write_matrix_csv(out_dir: str, matcher) -> str:
+    name = "similarity_matrix.csv"
+    names, matrix = matcher.similarity_matrix()
+    with open(os.path.join(out_dir, name), "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([""] + names)
+        for i, cell in enumerate(names):
+            writer.writerow([cell] + [f"{v:.4f}" for v in matrix[i]])
+    return name
+
+
+def _canvas(reels, strip_h):
+    """The reel window with a dark caption strip underneath, so no annotation covers a
+    symbol the reader is being asked to check."""
+    canvas = Image.new("RGB", (reels.width, reels.height + strip_h), (12, 12, 16))
+    canvas.paste(reels, (0, 0))
+    return canvas
+
+
+def _centres(boxes):
+    return {name: ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2) for name, b in boxes.items()}
+
+
+def _draw_path(draw, line, centres, colour, width=7):
+    """A thin dark line for the whole path, a thick coloured one for the run that pays."""
+    points = [centres[c] for c in line["cells"]]
+    draw.line(points, fill=(25, 25, 25), width=3, joint="curve")
+    if line["wins"]:
+        run = points[: line["pays"]]
+        draw.line(run, fill=colour, width=width, joint="curve")
+        for x, y in run:
+            draw.ellipse([x - 9, y - 9, x + 9, y + 9], fill=colour)
+
+
+def annotate(out_dir: str, record: dict, geometry) -> dict:
+    """One image per line plus a summary. Returns {"line1": name, ..., "summary": name}."""
+    reels_path = os.path.join(out_dir, REELS_FILE)
+    if not os.path.isfile(reels_path):
+        return {}
+    reels = Image.open(reels_path).convert("RGB")
+    boxes = cell_boxes(geometry, reels.size)
+    centres = _centres(boxes)
+    written = {}
+
+    margin = 12
+    for line in record["lines"]:
+        colour = PALETTE[(line["line"] - 1) % len(PALETTE)]
+
+        caption = f"{line['message']}   ({line['name']}: {' - '.join(line['cells'])})"
+        if line["symbols"]:
+            caption += f"   [{', '.join(line['symbols'])}]"
+        # Fitted before the canvas is made, because the strip has to be tall enough for however
+        # many lines the caption needs -- sizing it first is what clipped the text.
+        font, lines = _fit(caption, reels.width - margin * 2)
+        step = _line_height(font)
+        canvas = _canvas(reels, margin * 2 + step * len(lines))
+
+        draw = ImageDraw.Draw(canvas)
+        for cell in line["winning_cells"]:
+            x0, y0, x1, y1 = boxes[cell]
+            draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y1 - 2], outline=colour, width=6)
+        if line["broken_at"]:
+            x0, y0, x1, y1 = boxes[line["broken_at"]]
+            draw.rectangle([x0 + 2, y0 + 2, x1 - 2, y1 - 2], outline=(230, 40, 40), width=6)
+        _draw_path(draw, line, centres, colour)
+
+        fill = colour if line["wins"] else (170, 170, 170)
+        for i, text in enumerate(lines):
+            draw.text((margin, reels.height + margin + i * step), text, fill=fill, font=font)
+
+        name = f"annotated_line{line['line']}.png"
+        canvas.save(os.path.join(out_dir, name))
+        written[f"line{line['line']}"] = name
+
+    # The legend sits beside a colour swatch, so its usable width is the canvas less the swatch
+    # and both margins. One font for every row, chosen so the longest of them fits -- rows in
+    # mixed sizes would read as a ranking the lines do not have.
+    margin, swatch_w, gap = 12, 28, 12
+    text_x = margin + swatch_w + gap
+    usable = reels.width - text_x - margin
+    captions = [f"{line['message']}   ({line['name']})" for line in record["lines"]]
+    longest = max(captions, key=len)
+    font, _ = _fit(longest, usable, LEGEND_PREFERRED, LEGEND_MINIMUM)
+    # Wrapping is applied per row with that shared font, so a row longer than the sample still
+    # fits rather than running off the edge.
+    wrapped = [_wrap(caption, font, usable) for caption in captions]
+
+    step = _line_height(font)
+    rows_h = sum(step * len(lines) for lines in wrapped)
+    canvas = _canvas(reels, margin * 2 + rows_h)
+    draw = ImageDraw.Draw(canvas)
+
+    for line in record["lines"]:
+        if line["wins"]:
+            _draw_path(draw, line, centres,
+                       PALETTE[(line["line"] - 1) % len(PALETTE)], width=6)
+
+    y = reels.height + margin
+    for line, lines in zip(record["lines"], wrapped):
+        colour = PALETTE[(line["line"] - 1) % len(PALETTE)]
+        swatch_y = y + step // 2 - 3
+        if line["wins"]:
+            draw.rectangle([margin, swatch_y, margin + swatch_w, swatch_y + 6], fill=colour)
+            text_colour = colour
+        else:
+            draw.rectangle([margin, swatch_y, margin + swatch_w, swatch_y + 6],
+                           outline=(90, 90, 90), width=2)
+            text_colour = (150, 150, 150)
+        for i, text in enumerate(lines):
+            draw.text((text_x, y + i * step), text, fill=text_colour, font=font)
+        y += step * len(lines)
+
+    canvas.save(os.path.join(out_dir, "annotated_summary.png"))
+    written["summary"] = "annotated_summary.png"
+    return written
+
+
+def write_all(out_dir: str, record: dict, matcher, geometry, annotate_images=True) -> dict:
+    """Write the CSVs and the annotated images, and return their names by role."""
+    files = {"line_details": write_line_csv(out_dir, record),
+             "similarity_matrix": write_matrix_csv(out_dir, matcher)}
+    if annotate_images:
+        files["annotated"] = annotate(out_dir, record, geometry)
+    return files
+
+
+def dump_json(path: str, record: dict) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, indent=2)
+    LOG.info("wrote %s", path)
