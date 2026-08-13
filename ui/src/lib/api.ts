@@ -6,9 +6,9 @@
  * UI holds a run id and asks for the state, and it does not matter whether the answer
  * comes from a button press or from GET /api/runs/<id> a day later.
  *
- * Two audits share that state. The meter one reads every frame's CASH/WIN/BET and asks a
- * model whether the money adds up; the payline one reads the reel grid off `spin_result`
- * and walks the lines. They share the capture and nothing else.
+ * Two audits share that state. The meter one reads every frame's CASH/WIN/BET and checks
+ * that the money adds up; the payline one reads the reel grid off `spin_result` and walks
+ * the lines. They share the capture and nothing else.
  */
 
 export type MeterField = {
@@ -51,7 +51,6 @@ export type Verdict = {
   tolerance: string | null
   record: string | null
   formula: string
-  model: string | null
   /** Fields assumed rather than read -- a blank WIN meter is taken as 0.00. */
   inferred: string[]
   message: string

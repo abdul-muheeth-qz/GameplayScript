@@ -27,13 +27,13 @@ reads the win: the ROI crop for that frame is clean and legible, and the three R
 each read a different subset of it -- `configured` gets cash (at confidence 0.0) and nothing
 else, `bands` gets win 24.00 at 95 and bet 1.00 at 93 but no cash, `dynamic` gets nothing.
 
-The verdict, and every number under it, comes from the model: see `agent.Verdict`. Nothing
-here adds these up or compares them. The result is written to `validate.json` beside the
-frames it judged, with money as strings so it stays exact across the JSON boundary:
+The verdict, and every number under it, comes from `ledger.judge` -- exact `Decimal`
+arithmetic in Python. The result is written to `validate.json` beside the frames it judged,
+with money as strings so it stays exact across the JSON boundary:
 
     { "verdict": "pass" | "fail" | "error", "expected_cash": "2926.70",
       "computed_cash": "2926.70", "difference": "0.00", "tolerance": "0.005",
-      "record": "2909.60,18.10,1.00", "formula": "...", "model": "...",
+      "record": "2909.60,18.10,1.00", "formula": "...",
       "inferred": ["win"], "message": "...", "sources": {...}, "stages": [...] }
 """
 
@@ -48,15 +48,15 @@ from typing import NamedTuple
 
 from .. import frames
 from ..extract.runner import EXTRACT_SUBDIR
-from .agent import FORMULA, endpoint_settings, judge, pad
+from .ledger import FORMULA, judge, pad
 from .records import CURRENT_FIELDS, PREVIOUS_FIELDS, RecordError, load_values
 
 LOG = logging.getLogger("validate")
 
 # Cash values are decimal currency; treat differences under half a cent as rounding noise
-# rather than a real mismatch. This is an *input* -- it goes into the prompt, and the model
-# applies it. Carried as Decimal so the boundary sits exactly on half a cent instead of
-# wherever binary float lands.
+# rather than a real mismatch. Overridable from config.json's validate.tolerance, and
+# carried as Decimal so the boundary sits exactly on half a cent instead of wherever binary
+# float lands.
 DEFAULT_TOLERANCE = Decimal("0.005")
 
 RESULT_FILE = "validate.json"
@@ -98,38 +98,37 @@ def validate_records(sources: Sources, cfg: dict | None = None) -> dict:
     tolerance = Decimal(str(cfg.get("validate", {}).get("tolerance", DEFAULT_TOLERANCE)))
     result = {"verdict": "error", "expected_cash": None, "computed_cash": None,
               "difference": None, "tolerance": str(tolerance), "record": None,
-              "formula": FORMULA, "model": endpoint_settings(cfg)[0], "inferred": [],
+              "formula": FORMULA, "inferred": [],
               "message": "", "stages": list(sources.stages),
               "sources": {"cash_and_bet": sources.previous.name,
                           "win": sources.current.name,
                           "final": sources.current.name}}
 
     try:
-        # Both files are read before the model is called, so a broken record fails in
-        # milliseconds instead of after a round trip. `previous` returns no inferences by
-        # construction: it is read for cash and bet, and neither of those is in
-        # `records.INFERABLE` -- a blank one is a failed read, not a zero.
+        # `previous` returns no inferences by construction: it is read for cash and bet,
+        # and neither of those is in `records.INFERABLE` -- a blank one is a failed read,
+        # not a zero.
         previous, _ = load_values(sources.previous, PREVIOUS_FIELDS)
         current, current_inferred = load_values(sources.current, CURRENT_FIELDS)
 
         # The ledger the UI draws, in the order it draws it: the cash before, the win this
         # spin paid, the bet that was placed -- `win` being the *current* frame's, see the
-        # module docstring. Padded, so validate.json holds digit-for-digit what the model
-        # was shown: `str(Decimal)` alone renders a JSON 2926.7 as "2926.7", which reads
-        # as a different number from the "2926.70" in the prompt.
+        # module docstring. Padded, so validate.json holds digit-for-digit what was read
+        # off the frames: `str(Decimal)` alone renders a JSON 2926.7 as "2926.7", which
+        # reads as a different number from the 2926.70 on the meter.
         result["inferred"] = sorted(set(current_inferred))
         result["record"] = ",".join(pad(v) for v in
                                     (previous["cash"], current["win"], previous["bet"]))
         result["expected_cash"] = pad(current["cash"])
 
-        verdict = judge(previous, current, tolerance, cfg)
+        verdict = judge(previous, current, tolerance)
     except Exception as exc:
         result["message"] = str(exc)
         return result
 
     # Formatted to two places on the way out, so the ledger reads as money rather than as
-    # whatever JSON float the model happened to emit -- 2926.7, or 0.009999999999990905
-    # for a difference of a penny. These are the model's numbers, not a check on them.
+    # whatever the meters happened to carry: a cash meter OCR'd as "2926.7" would otherwise
+    # put a one-place number in the ledger beside two-place ones.
     result["verdict"] = verdict.verdict
     result["computed_cash"] = f"{verdict.computed_cash:.2f}"
     result["difference"] = f"{verdict.difference:.2f}"
@@ -144,7 +143,7 @@ def validate_run(run_dir: str, cfg: dict | None = None) -> dict:
     except RecordError as exc:
         return {"verdict": "error", "message": str(exc), "formula": FORMULA,
                 "inferred": [], "expected_cash": None, "computed_cash": None,
-                "difference": None, "tolerance": None, "record": None, "model": None,
+                "difference": None, "tolerance": None, "record": None,
                 "sources": None, "stages": []}
 
     result = validate_records(sources, cfg)

@@ -17,27 +17,28 @@ The folder must be a capture run [extract](../extract/) has already been run ove
 `0` pass, `1` fail, `2` no verdict. A Fail is a judgement about the spin; an error means no
 judgement was reached, and keeping them apart is what lets a test runner tell them apart.
 
-Needs LM Studio serving the model named in `config.json`'s `validate` section — `/api/health` says
-whether it is up and whether the model it is serving is the one asked for.
+Needs nothing running — no cabinet, no OBS, no model. The one key read from `config.json` is
+`validate.tolerance`, and it has a default.
 
 This was a standalone project (`spin-validator`) that read two files with fixed names and printed
 one word. It now reads what extract wrote into the run folder and writes a verdict object with the
 arithmetic behind it, because a verdict with nothing under it cannot be argued with.
 
-Three things are decided for a measured reason, all written up in the root
+Two things are decided for a measured reason, both written up in the root
 [README](../../README.md#deciding-whether-it-adds-up--validate):
 
-- **One call, no tools, and the model owns every number.** Both sets of meters go up as one JSON
-  object and `agent.Verdict` comes back — `working`, `computed_cash`, `difference`, `verdict`.
-  Nothing in Python adds these up or compares them; the tolerance is in the prompt and the model
-  applies it. That is only survivable on a 7B because of the shape of the schema: `working` is
-  declared *before* the numbers, and the amounts are typed `float` rather than `str`. Deleting the
-  first costs 6 of 8 verdicts; leaving the second as `str` gets `"logarithmic"` where the sum
-  should be. The root README has the table.
+- **The sum is Python's, in exact `Decimal`.** `ledger.judge` works out
+  `previous.cash - previous.bet + current.win`, subtracts the cash meter, and passes if what is
+  left is within the tolerance. It used to be one call to a local LLM that owned every number;
+  that model is in `git log`, along with the measurements of the reply schema that kept a 7B
+  honest. Re-run over the 14 folders on disk holding a `validate.json`, the two disagree in the
+  arithmetic's favour — the model reported two exactly-balancing spins as Fail, out by 60c and by
+  a dollar. The reply *shape* is unchanged (`working`, `computed_cash`, `difference`, `verdict`),
+  so nothing downstream moved.
 - **Which frame each value comes from.** cash and bet from `pre_spin`; cash and win from the *last*
-  frame — `win_collected` on a win, `spin_result` on a loss. `pre_spin`'s WIN meter is neither read
-  nor sent: it holds the *previous* spin's win, and a value that is not in the prompt is one the
-  model cannot reach for.
+  frame — `win_collected` on a win, `spin_result` on a loss. `pre_spin`'s WIN meter is not read at
+  all: it holds the *previous* spin's win, so reading it there double-counts. That, and not the
+  arithmetic, was always the correctness question in this stage.
 - **A blank WIN meter is taken as 0.00.** That is the correct reading of an empty meter and what
   every losing spin's result frame looks like; erroring on it meant an ordinary spin could never be
   validated. Cash and bet get no such treatment — a blank cash meter is a failed read, not zero

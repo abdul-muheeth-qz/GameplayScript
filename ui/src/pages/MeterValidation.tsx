@@ -134,7 +134,7 @@ export function MeterValidation({
       detail: run?.validation && (
         <dl className="space-y-1">
           <Detail term="Verdict" value={run.validation.verdict} />
-          <Detail term="Model" value={run.validation.model} />
+          <Detail term="Out by" value={run.validation.difference} />
         </dl>
       ),
       onRun: () => run && step("validate", () => api.validate(run.run_id)),

@@ -22,9 +22,9 @@ both, the payline audit needs a geometry block per game and currently has Fortun
 - **`server/extract/`** — crops each frame to the CASH/WIN/BET meter strip with OpenCV and reads it with
   Tesseract, writing one record per frame. No fixed pixel coordinates: a normalized ROI box per
   known layout, and dark-panel detection when none of them fits.
-- **`server/validate/`** — asks a local LLM (LM Studio) whether the cash meter after the spin follows
-  from the meters before it, `current cash = previous cash - bet + win`. One structured call, no
-  tools. Writes a verdict of pass, fail or error.
+- **`server/validate/`** — checks whether the cash meter after the spin follows from the meters
+  before it, `current cash = previous cash - bet + win`. Exact `Decimal` arithmetic in Python,
+  within a configurable tolerance. Writes a verdict of pass, fail or error.
 - **`server/payline/`** — the **second audit**, sharing only the capture. Crops the reel window out
   of `spin_result.png` with normalized fractions, cuts it into one tile per cell, embeds each tile,
   decides which cells hold the same symbol, and walks each payline left to right counting the
@@ -100,9 +100,9 @@ the capture core, because every module there talks to live Windows APIs, a runni
 `OledPanelSvc.exe`, and OBS. Verification is `--dry-run` followed by a real run, then reading
 `captured_files/<run>/run.log` and `spin.json`.
 `extract` runs offline against the fixtures in `server/extract/Images/` and should be checked there
-after any change. `validate` needs LM Studio up but no cabinet, so it is checked by re-running it
-over the run folders already in `captured_files/` — there are winning and losing ones on disk, and
-both paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
+after any change. `validate` needs nothing running at all, so it is checked by re-running it over
+the run folders already in `captured_files/` — there are winning and losing ones on disk, and both
+paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
 with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures —
 the one genuinely unit-testable thing in the repo) and by re-running `payline.cli` over the
 FortuneOx run folders on disk, then **looking at `payline/tiles/contact_sheet.png`**, which is the
@@ -155,7 +155,7 @@ server/
 
   validate/           STAGE 3 -- decide whether the money adds up
     records.py        read the two records as exact Decimals; a blank WIN meter means 0.00
-    agent.py          the LangChain agent, its one arithmetic tool, and the LM Studio endpoint
+    ledger.py         the sum, the tolerance and the verdict -- exact Decimal, no model
     runner.py         the verdict object, written to validate.json
     cli.py            Pass / Fail / no verdict, with the exit codes to match
 
@@ -997,68 +997,53 @@ was started rather than beside the frames they came from.
 
 ## Validate
 
-### One LLM call, no tools, and the whole verdict comes back from it
+### The arithmetic is Python's, in exact `Decimal`
 
-`ChatOpenAI(...).with_structured_output(Verdict, method="json_schema")`. Two sets of meters go up
-as one JSON object, the model works the sum out and judges it, and `agent.Verdict` comes back:
-`working`, `computed_cash`, `difference`, `verdict`. **Nothing in Python adds these up or compares
-them** — `computed_cash` and `difference` in `validate.json` are the model's own numbers, formatted
-to two places. That is deliberate; don't "fix" it back to a Python cross-check without being asked.
+`ledger.judge`: `computed_cash = previous.cash - previous.bet + current.win`,
+`difference = computed_cash - current.cash`, pass if `abs(difference) <= tolerance`. Every term,
+the tolerance included, is a `Decimal`, so the boundary sits exactly on half a cent instead of
+wherever binary float lands. `working` is that sum written out as a sentence, which is what the CLI
+prints and what the UI falls back to when the meters could not be read as numbers.
 
-Which frame each number comes from is the correctness question, and it is one rule:
+**This was one call to a local LLM** (LM Studio, qwen2.5-7b, `ChatOpenAI(...)
+.with_structured_output(Verdict, method="json_schema")`) and the model owned every number. Removed
+on request. What is worth keeping from it:
+
+- The reply *shape* is unchanged — `Verdict` still has `working`, `computed_cash`, `difference`,
+  `verdict` in that order — so `runner`, `validate.json`, the CLI and the UI ledger did not move.
+  The only field dropped is `model`.
+- `git log` holds the model version and the eight-record table that measured its schema (`working`
+  declared before the numbers was worth 6 of 8 verdicts; amounts typed `float` rather than `str`
+  was worth 8 of 8 sums; a JSON Schema `pattern` makes LM Studio answer 400). Go there before
+  reintroducing a model, and re-measure — none of those numbers transfer across a model change.
+- Re-running the 14 folders on disk that hold a `validate.json`, **11 agree** and all three
+  disagreements are the model having been wrong: `2026-08-12_144541` (model: fail, computed 1075.41
+  — actually `1075.49 - 0.88 + 0.20` = 1074.81, exact), `2026-08-12_162510` (model: fail, computed
+  999.94 — actually 998.94, exact) and `2026-08-12_130905` (model: `Connection error.`). Two real
+  spins were reported out by 60c and by a dollar because the model mis-added three two-place
+  numbers it had itself written out correctly one line above. Across all 22 folders: 15 pass,
+  0 fail, 7 error, every error a `pre_spin` record `extract` could not read.
+
+Which frame each number comes from is the correctness question in this stage — it always was, the
+arithmetic never being in doubt — and it is one rule:
 
 | value | frame |
 |---|---|
 | cash, bet | `pre_spin` |
 | cash, win | the **last** frame — `win_collected` on a win, `spin_result` on a loss |
 
-So the win is always read from the *second* record. `pre_spin`'s WIN meter is **not read and not
-sent**: it holds the previous spin's win (see `server/frames.py`), and `records.PREVIOUS_FIELDS` is
-`("cash", "bet")` for that reason. An earlier version sent it with a prompt line telling the model
-to ignore it, which is strictly worse — the control run below shows the model reaching for it
-anyway. Don't add it back "for completeness". Verified on run `2026-08-11_212236`:
+So the win is always read from the *second* record. `pre_spin`'s WIN meter is **not read**: it
+holds the previous spin's win (see `server/frames.py`), and `records.PREVIOUS_FIELDS` is
+`("cash", "bet")` for that reason. Don't add it back "for completeness" — a field nothing reads
+cannot be added into the sum by mistake. Verified on run `2026-08-11_212236`:
 `2909.60 - 1.00 + 18.10 = 2926.70`.
 
-`method="json_schema"` and not `function_calling` — the latter would send this as a tool, and there
-are no tools here. Only the three-frame layout is read; the old `before.json`/`after.json` folders
-and the `before_spin.json` sample pair were dropped when this was simplified.
+Only the three-frame layout is read; the old `before.json`/`after.json` folders and the
+`before_spin.json` sample pair were dropped when this was simplified.
 
-**The shape of `Verdict` is the whole design, and every part of it was measured** over eight
-records against the local qwen2.5-7b. The predecessor asked the same model for one word, yes or
-no, and scored **0/6** — inverted, deterministically, at `temperature=0`.
-
-| schema | verdicts | the numbers it returned |
-|---|---|---|
-| `working` first, amounts as `float` — **shipped** | **8/8** | **8/8** |
-| the same, with `working` removed | 2/8 | 0/8 — dropped the win, reached for `previous.win`, subtracted instead of added |
-| `working` first, amounts as `str` | **8/8** | 0/8 — `"in this case: 2926.70"`, `"mathematically computed to be 1155.76"` |
-| amounts as `str`, `computed_cash` declared first | 4/8 | 0/8 — `"logarithmic"`, `"in_range"`, `"synced"`, `"TBD"` |
-| amounts as `str` with a `pattern` of `^-?\d+\.\d{2}$` | — | LM Studio answers **400** on every request |
-
-Three rules fall out of that table, and none of them is cosmetic:
-
-- **`working` is declared before the numbers**, because the model fills the fields in schema order
-  and a schema that asks for `computed_cash` first is asking for the answer cold — the same
-  one-forced-token trap as the yes/no design. Removing that one field and changing nothing else
-  takes the shipped schema from **8/8 to 2/8**: it answered `2909.60 - 1.00 = 2908.60`, dropping
-  the win outright, and on another record reached for `previous.win` in spite of the prompt.
-- **The amounts are typed `float`, not `str`.** A string field constrains nothing and the model
-  fills it with a placeholder while getting the verdict beside it right. Typed as numbers, the
-  grammar cannot emit anything but digits. This is the one place in the codebase money is a float,
-  and it is safe only because nothing compares against it: the exact `Decimal`s are what go *to*
-  the model, and what comes back is its own working, formatted for the ledger.
-- **A JSON Schema `pattern` cannot be used for that instead.** LM Studio's grammar engine fails to
-  initialise from the regex and answers 400. Constraint has to come from the field's *type*.
-
-`git log` still holds the design that scored **12/12** — a `cash_after_spin` tool doing the sum in
-`Decimal`. Go back to it if these verdicts stop being trustworthy, and re-measure on any model
-change: none of these numbers transfer.
-
-Everything the original was careful about still stands and should not be relaxed: `temperature=0`,
-`max_retries=0` (the OpenAI SDK's default of two would turn a wedged server into six silent
-minutes), and a reply that hit the token cap reported as such — `agent._why_unparsed` separates
-that from a model that answered badly, which is the only reason `include_raw=True` is there.
-`MAX_TOKENS` is 256 rather than the old 8 because the JSON object has to fit in it.
+Nothing outside this stage needs to be up for it to run — no cabinet, no OBS, no model — and
+`/api/health` has no check for it, deliberately: there is nothing that could be down. The LM Studio
+probe that used to sit there gated the whole meter page on a server that has no part in it any more.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 
@@ -1074,11 +1059,10 @@ a Pass.
 Only the *second* record's inference is reported. The only field `pre_spin` can ever infer is
 `win`, which takes no part in the sum, and badging it would point the UI at the wrong ledger row.
 
-`DEFAULT_TOLERANCE` (half a cent) is now an **input**: it is interpolated into the system prompt
-and the model applies it. Nothing in Python compares anything. Money still crosses the JSON
-boundary as strings — the values read off the frames are `Decimal` all the way to the prompt, and
-`agent.pad` renders them, so `validate.json`'s `record` is digit-for-digit what the model was
-shown.
+`DEFAULT_TOLERANCE` (half a cent) is an **input**, overridable from `config.json`'s
+`validate.tolerance`, and it is compared as a `Decimal` against a `Decimal`. Money crosses the JSON
+boundary as strings — the values read off the frames are `Decimal` the whole way, and `ledger.pad`
+renders them, so `validate.json`'s `record` is digit-for-digit what was read off the meters.
 
 ## The UI
 
@@ -1091,9 +1075,9 @@ id fit in the query string.
 at: one capture, two readings, and a spin captured on one page can be audited on the other without
 spinning again. That is the point of joining them at all. `PageShell` owns the chrome both pages
 share, so they cannot drift apart into two products; everything audit-specific is the step rail and
-the body. Health gating is per-page and deliberately not shared — the payline audit needs no
-LM Studio and the meter audit needs no reel geometry, so `/api/health`'s `ok` covers only config,
-tesseract and the model, and `checks.payline` is reported without gating anything. The palette is sampled off the cabinet's own meter strip and the fonts
+the body. Health gating is per-page and deliberately not shared — the meter audit needs no reel
+geometry, so `/api/health`'s `ok` covers only config and tesseract, and `checks.payline` is
+reported without gating anything. The palette is sampled off the cabinet's own meter strip and the fonts
 are bundled through `@fontsource-variable` rather than fetched from a CDN — the cabinet is not
 guaranteed to have internet, and a font that silently falls back changes the alignment of every
 meter column.
