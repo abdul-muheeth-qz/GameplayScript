@@ -4,9 +4,9 @@ import { AlertCircle } from "lucide-react"
 import { api, type Health, type PaylineSource, type RunState } from "@/lib/api"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Detail, PageShell, type Mode } from "@/components/PageShell"
+import { PaylineDetails } from "@/components/PaylineDetails"
 import { PaylineImages } from "@/components/PaylineImages"
 import { PaylineVerdict } from "@/components/PaylineVerdict"
-import { ReelGrid } from "@/components/ReelGrid"
 import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
 
 /**
@@ -19,13 +19,21 @@ import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
  * duplicating it here put OBS, the i-Deck and a three-minute wait in front of an audit that
  * needs none of them.
  *
- * Two steps, and the first is optional in practice: validating cuts the tiles itself if they
- * are not there, so this is one click when you trust the crop and two when you want to check
- * the contact sheet first. That check is worth keeping a button for -- every similarity number
- * below it is meaningless if the crop is half a cell out.
+ * **One step, at request.** There used to be two buttons -- cut the reels, then validate -- and
+ * the first was already optional: `runner.validate_paylines` cuts the tiles itself whenever they
+ * are missing, or were cut from a different image or geometry (`_tiles_are_current`), so the
+ * single call does the crop and the matching and writes both `tiles.json` and `payline.json`.
+ * Removing the button removed a click, not a stage.
+ *
+ * What the two buttons were *for* was making the contact sheet unavoidable -- every similarity
+ * number here is meaningless if the crop is half a cell out, and that sheet is the only thing
+ * that shows it. It is now in the disclosure below the verdict instead of in front of it. The
+ * pipeline is still two steps and still says so: `payline/tiles.json` is its own output, and
+ * `python -m server.payline.cli --tiles-only` and `POST /api/payline/tiles` both still stop
+ * after the crop. Only the page collapsed them.
  */
 
-type Stage = "tiles" | "payline"
+type Stage = "payline"
 
 export function PaylineValidation({
   mode,
@@ -78,7 +86,6 @@ export function PaylineValidation({
     return unlocked && !busy ? "ready" : "locked"
   }
 
-  const tiled = Boolean(run?.payline_tiles)
   const validated = Boolean(run?.payline)
   // Something to read: the run on screen has a frame, or the server named a readable source.
   const readable =
@@ -88,47 +95,46 @@ export function PaylineValidation({
   // block is worth saying before a button is pressed rather than after.
   const geometry = health?.checks?.payline
 
+  // One step. The crop's own facts stay on it beside the verdict's, because they are the
+  // numbers that say *which pixels* the pays were read from -- with no separate reels step to
+  // report them, dropping them would leave the geometry unstated anywhere on the page.
   const steps: Step[] = [
     {
       ordinal: "01",
-      name: "Reels",
-      blurb: "Crops the reel window out of the image and cuts it into one tile per cell. Check the contact sheet before trusting anything below it.",
-      action: busy === "tiles" ? "Cutting…" : "Cut the reels",
-      status: statusOf("tiles", readable, tiled),
-      detail: run?.payline_tiles && (
-        <dl className="space-y-1">
-          <Detail term="Cells" value={String(run.payline_tiles.cells)} />
-          <Detail term="Reels" value={run.payline_tiles.reels_size} />
-          <Detail term="Tile" value={run.payline_tiles.tile_size} />
-          <Detail term="Geometry" value={run.payline_tiles.geometry.label} />
-        </dl>
-      ),
-      onRun: () => step("tiles", () => api.paylineTiles(run?.run_id)),
-    },
-    {
-      ordinal: "02",
       name: "Paylines",
-      blurb: "Embeds every tile, decides which cells hold the same symbol, and counts each line's run from reel 1.",
-      action: busy === "payline" ? "Matching…" : "Validate paylines",
+      blurb: "Crops the reel window out of the image and cuts it into one tile per cell, then embeds every tile, decides which cells hold the same symbol, and counts each line's run from reel 1.",
+      action: busy === "payline" ? "Validating…" : "Validate paylines",
       status: statusOf("payline", readable, validated),
-      detail: run?.payline && (
+      detail: (run?.payline || run?.payline_tiles) && (
         <dl className="space-y-1">
-          <Detail
-            term="Pays"
-            value={`${run.payline.lines_paying} of ${run.payline.lines.length} lines`}
-          />
-          <Detail term="Total" value={String(run.payline.total_pay)} />
-          <Detail term="Matching" value={run.payline.matcher} />
-          <Detail
-            term="Agree"
-            value={
-              run.payline.agreement === null
-                ? null
-                : run.payline.agreement
-                  ? "all strategies"
-                  : "no — recalibrate"
-            }
-          />
+          {run.payline_tiles && (
+            <>
+              <Detail term="Cells" value={String(run.payline_tiles.cells)} />
+              <Detail term="Reels" value={run.payline_tiles.reels_size} />
+              <Detail term="Tile" value={run.payline_tiles.tile_size} />
+              <Detail term="Geometry" value={run.payline_tiles.geometry.label} />
+            </>
+          )}
+          {run.payline && (
+            <>
+              <Detail
+                term="Pays"
+                value={`${run.payline.lines_paying} of ${run.payline.lines.length} lines`}
+              />
+              <Detail term="Total pay" value={String(run.payline.total_pay)} />
+              <Detail term="Matching" value={run.payline.matcher} />
+              <Detail
+                term="Agree"
+                value={
+                  run.payline.agreement === null
+                    ? null
+                    : run.payline.agreement
+                      ? "all strategies"
+                      : "no — recalibrate"
+                }
+              />
+            </>
+          )}
         </dl>
       ),
       onRun: () => step("payline", () => api.payline(run?.run_id)),
@@ -140,8 +146,7 @@ export function PaylineValidation({
       mode={mode}
       onMode={onMode}
       title="Payline audit"
-      subtitle="does the grid pay its lines"
-      runId={run?.run_id}
+      subtitle=""
       health={health}
       rail={<StepRail steps={steps} />}
     >
@@ -170,7 +175,7 @@ export function PaylineValidation({
         <Alert className="border-vermilion/50 bg-vermilion/5">
           <AlertCircle className="size-4 text-vermilion" />
           <AlertTitle className="eyebrow text-vermilion">
-            {failed === "payline" ? "Payline validation" : "Cutting the reels"} did not finish
+            Payline validation did not finish
           </AlertTitle>
           <AlertDescription className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-muted-foreground">
             {error}
@@ -188,75 +193,19 @@ export function PaylineValidation({
       )}
 
       {run?.payline && <PaylineVerdict result={run.payline} />}
-      {run?.payline && <ReelGrid run_id={run.run_id} result={run.payline} />}
 
-      {/* Both audits' results live in the same run folder and neither gates the other, so the
-          meter side's answer is worth a line once it exists -- and a spin whose capture timed
-          out is worth flagging, because the game log then has nothing to say about the outcome
-          and this reading is the only evidence there is. */}
-      {run?.payline && <Alongside run={run} />}
-    </PageShell>
-  )
-}
-
-function Alongside({ run }: { run: RunState }) {
-  const payline = run.payline!
-  const meter = run.validation
-  const timedOut = run.spin && !run.spin.terminal_event
-  const gameSaidWon = run.spin?.won
-
-  if (!meter && !timedOut && (gameSaidWon === undefined || gameSaidWon === null)) return null
-
-  return (
-    <div className="rounded-sm border border-rule bg-slab/60 px-5 py-4">
-      <h4 className="eyebrow text-xs text-muted-foreground">Alongside</h4>
-      <dl className="mt-2 grid gap-x-8 gap-y-1.5 text-xs sm:grid-cols-2">
-        <Pair
-          term="This audit"
-          value={`${payline.lines_paying} of ${payline.lines.length} lines pay`}
+      {/* The crops and the lines, folded into one disclosure under the verdict. It renders on
+          whatever exists, so a folder whose tiles were cut on their own -- by the CLI's
+          --tiles-only, or POST /api/payline/tiles -- still shows its contact sheet here with
+          no verdict above it. */}
+      {run && (
+        <PaylineDetails
+          run={run}
+          tiles={run.payline_tiles ?? null}
+          result={run.payline ?? null}
         />
-        {gameSaidWon !== undefined && gameSaidWon !== null && (
-          <Pair term="The game's log" value={gameSaidWon ? "a win" : "no win"} />
-        )}
-        {meter && (
-          <Pair
-            term="Meter audit"
-            value={
-              meter.verdict === "pass"
-                ? "Pass"
-                : meter.verdict === "fail"
-                  ? `Fail, out by ${meter.difference}`
-                  : "No verdict"
-            }
-          />
-        )}
-        {run.extraction?.spin_result && (
-          <Pair
-            term="WIN meter read"
-            value={
-              run.extraction.spin_result.win.value === null
-                ? "blank"
-                : run.extraction.spin_result.win.value.toFixed(2)
-            }
-          />
-        )}
-      </dl>
-      {timedOut && (
-        <p className="mt-3 text-xs text-amber">
-          This capture ended on a timeout rather than a terminal event, so the game's log never
-          reported an outcome for it — “no win” above means “nothing was seen”, not “nothing was
-          won”. The grid on the frame is the only evidence there is.
-        </p>
       )}
-    </div>
-  )
-}
 
-function Pair({ term, value }: { term: string; value: string }) {
-  return (
-    <div className="flex gap-2">
-      <dt className="w-32 shrink-0 text-muted-foreground/70">{term}</dt>
-      <dd className="tnum min-w-0 text-numeral/85">{value}</dd>
-    </div>
+    </PageShell>
   )
 }

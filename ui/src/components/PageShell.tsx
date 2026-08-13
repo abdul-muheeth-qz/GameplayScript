@@ -7,13 +7,18 @@ import { HealthStrip } from "@/components/HealthStrip"
 import { cn } from "@/lib/utils"
 
 /**
- * The chrome both audits share: the header, the mode switch, the run id, the health strip
- * and the step rail down the left.
+ * The chrome both audits share: the header, the mode switch, the health strip and the step
+ * rail down the left.
  *
  * It exists so the two pages cannot drift apart visually. They are two readings of one
  * spin, not two products, and the moment each owned its own header they would have started
- * disagreeing about spacing, about where the run id lives, and about what a running step
- * looks like. Everything specific to an audit is in `rail` and `children`.
+ * disagreeing about spacing, about what a running step looks like, and about what the header
+ * says at all. Everything specific to an audit is in `rail` and `children`.
+ *
+ * The run id was in that header and is not any more, at request. It is still the thing the
+ * whole app is keyed on -- `?run=` in the URL, the folder every artefact is served out of --
+ * so nothing about which spin is open has changed; it is simply not printed. If it needs to
+ * be visible again it belongs here rather than in either page, for the reason above.
  */
 
 export type Mode = "meter" | "payline"
@@ -28,7 +33,6 @@ export function PageShell({
   onMode,
   title,
   subtitle,
-  runId,
   health,
   onReset,
   rail,
@@ -38,7 +42,6 @@ export function PageShell({
   onMode: (mode: Mode) => void
   title: string
   subtitle: string
-  runId?: string
   health: Health | null
   /** Absent until there is a run to clear. */
   onReset?: () => void
@@ -54,7 +57,6 @@ export function PageShell({
             <p className="text-xs text-muted-foreground">{subtitle}</p>
           </div>
           <div className="flex items-center gap-6">
-            {runId && <span className="tnum text-xs text-muted-foreground">{runId}</span>}
             <HealthStrip health={health} />
             {onReset && (
               <Button

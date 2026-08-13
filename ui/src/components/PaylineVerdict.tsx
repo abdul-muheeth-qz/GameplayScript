@@ -31,7 +31,11 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
         <div className="mx-auto flex max-w-xl flex-col items-center gap-6">
           <div className="flex items-baseline gap-8">
             <Figure value={String(result.lines_paying)} of={String(result.lines.length)} label="lines pay" />
-            <Figure value={String(result.total_pay)} label="paying symbols" />
+            {/* `total_pay` is the sum of the paying runs -- the paying symbol count across every
+                line that won, not a currency amount. The label says Total Pay because that is
+                what the CLI's summary calls it and what the audit trail is read against; the
+                unit is spelled out underneath so nobody reads it as money. */}
+            <Figure value={String(result.total_pay)} label="total pay" sub="paying symbols" />
           </div>
 
           <div
@@ -124,7 +128,17 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
   )
 }
 
-function Figure({ value, of, label }: { value: string; of?: string; label: string }) {
+function Figure({
+  value,
+  of,
+  label,
+  sub,
+}: {
+  value: string
+  of?: string
+  label: string
+  sub?: string
+}) {
   return (
     <div className="text-center">
       <p className="tnum text-4xl font-semibold text-white">
@@ -132,6 +146,7 @@ function Figure({ value, of, label }: { value: string; of?: string; label: strin
         {of && <span className="text-xl text-muted-foreground"> / {of}</span>}
       </p>
       <p className="mt-1 text-xs text-muted-foreground">{label}</p>
+      {sub && <p className="text-[0.625rem] text-muted-foreground/60">{sub}</p>}
     </div>
   )
 }
