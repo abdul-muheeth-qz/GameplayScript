@@ -114,7 +114,17 @@
     "save_tiles": true,
     "save_embeddings": true,
     "image": null,
-    "symbol_library": null
+    "symbol_library": null,
+    "reel_stops": {
+      "enabled": true,
+      "telemetry_dir": "C:/logs/Telemetry/Data/FortuneOx",
+      "strips": "server/assets/payline_excel.xlsx",
+      "band": [
+        0.7,
+        0.9
+      ],
+      "tolerance_s": 900
+    }
   },
   "validate": {
     "base_url": "http://localhost:1234/v1",

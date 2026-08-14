@@ -1043,6 +1043,69 @@ threshold is not doing the work; disagreement means recalibrate before trusting 
 that cannot run -- no scikit-learn, no symbol library -- is reported as **skipped**, never omitted,
 because a missing row reads as agreement.
 
+### The reel-stop checkpoint: the same symbol at a low cosine
+
+The failure a threshold cannot fix, and the reason this stage now has an oracle. On run
+`2026-08-13_153618` the inverted V is **five Arm Bands** and its first pair reads
+
+    COMPARE E31 & E22   cos=0.7622   NO      (threshold 0.9000)
+
+so the line paid 0 where it should have paid 5 -- and the other three pairs on it sit at 0.7533,
+0.7664 and 0.7657. The art is identical; the pixels are not, because the win animation draws a
+highlight across E22 that E31 does not have. No threshold fixes that: 0.7622 is nowhere near the
+0.996-0.9998 that same-symbol pairs otherwise sit at here, and coming down to catch it walks into the
+0.28 of a genuinely different pair from the other side. It bites hardest on the V and the inverted V,
+whose pairs cross both a reel and a row, so the two cells rarely carry the same overlay.
+
+So between 0.70 and the threshold -- and **only** there -- the decision is handed to the game's own
+account of the spin:
+
+    telemetry.py    C:\logs\Telemetry\Data\FortuneOx\*.log  ->  "BaseGameReelStops":["86",...]
+    reelstrips.py   server/assets/payline_excel.xlsx        ->  strip[reel][stop + row - 1]
+    matcher.py      two symbol names, which either match or do not
+
+`E{row}{reel}` is `strip[reel][stop + row - 1]`, row 1 at the top, and that rule was measured rather
+than assumed: the mapping supplied with the request (stops `[24, 79, 153, 25, 0]`) reproduces all
+fifteen names exactly, and run `2026-08-13_153618` (`[86, 121, 127, 138, 86]`) is 15/15 against its
+own contact sheet. Both are fixtures in `test_reelstrips.py`, which needs no cabinet, no model and no
+telemetry service. Position 200 of every reel is an `X` terminator rather than a symbol, so the strips
+are 200 long and that is the modulus for the wrap.
+
+**Outside the band nothing changes.** A confident pixel reading is never overturned, which is what
+keeps a stale telemetry file or a drifted reel strip from rewriting a verdict it has no business
+touching. Four further rules, each of them a way to be confidently wrong:
+
+- **It only speaks about the spin the frame can be proved to be.** The stops entry lands 3-4 s before
+  the `spin_result.png` it belongs to, measured across six consecutive captures, so the entry used is
+  the last one at or before the frame's own timestamp. With none, the checkpoint stands down and says
+  `status: "unavailable"` instead of judging on whatever is last in the file. Run `2026-08-13_114200`
+  is why -- captured at 11:42 against a file that begins at 12:08, where the nearest entry is a spin
+  four hours later. `payline.reel_stops.allow_latest_fallback` opts into the by-hand reading ("open the
+  newest log, take the last stops"), correct only while auditing the spin you have just made.
+- **A mystery symbol cannot decide a pair.** `Mystery1`, `Mystery2` and `Mystery (Orb)` are 15% of
+  every strip and reveal as other art -- the supplied example has `Mystery1` at E13 where the frame
+  shows an Ace; run `2026-08-13_155048` has it on all three cells of reel 1 where the frame shows three
+  Ox. Those names abstain and the pixel verdict stands. `WILD` does not: it has its own art and was
+  drawn as itself on both frames checked. Wild *substitution* is not modelled -- `paylines.py`
+  implements plain COMPARE and nothing here changes that.
+- **Every pair it reaches is reported**, agreed with or overturned: `reel_stops.adjudications` in
+  `payline.json`, a line under the COMPARE in the CLI, a row in the UI, and `pays_without_checkpoint`
+  beside the verdict. One disagreement between the sheet and a frame is on the record --
+  `2026-08-13_155048` is 14/15, the sheet having `Wealth Pot` at R2 position 89 where the frame shows an
+  Ox -- and reporting rather than merely applying is what makes that visible.
+- **The cross-check still runs over the pixels.** It answers "do the vision strategies agree with each
+  other", and the checkpoint is not a vision strategy; feeding it in would report the checkpoint doing
+  its job as a threshold to recalibrate.
+
+Two things about the inputs are worth knowing before touching either reader. The telemetry lines are
+**not valid JSON** -- `"Event":FortuneOx    [monitoring]` has a bare word where a value belongs,
+`ProgressiveQualified:False` is Python's spelling, and `"2026-08-13T15:58:0905:30"` is missing the `+`
+of its offset -- so they are read with regex, and only the `_server_` files carry the marker at all
+(the newest file in the folder here is a `_client_` one with none). And the spreadsheet's symbol names
+are `t="str"`, **cached XLOOKUP results against an external workbook**, not shared strings: a reader
+that handles only shared and inline strings finds an empty sheet, which is exactly what the first
+version of `reelstrips.py` did. It is parsed with `zipfile` and `xml.etree`, so no new dependency.
+
 ### Two steps, and the contact sheet is why
 
 Every similarity number in this stage is meaningless if the crop is half a cell out, and
@@ -1096,6 +1159,7 @@ python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, 
 python -m server.payline.cli captured_files/<run> --json        # the whole record
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.test_paylines                          # the rule, without any pixels
+python -m server.payline.test_reelstrips                        # the reel-stop checkpoint
 ```
 
 Exit codes are `0` some line pays, `1` an error, `2` nothing pays -- the same shape as
@@ -1179,6 +1243,8 @@ drops the SDK's plaintext-password line exists for exactly that.
 | | `cross_check` true, `annotate` true, `save_tiles` true, `save_embeddings` true | the agreement check and the artefacts. Tiles and embeddings on disk are what let a reading be re-judged without re-embedding |
 | | `image` null, `symbol_library` null | `image` **overrides** the captured frame whenever it is set, so a supplied screenshot can be validated with captures on disk -- see [which image gets validated](#which-image-gets-validated). `symbol_library` is the reference art `method: "library"` needs, which the POC does not ship |
 | `validate` | `tolerance` "0.005" | how far the cash meter may be out and still pass — half a cent. The only key this stage reads; the LM Studio endpoint that used to live here (`base_url`, `model`, `api_key_env`, `timeout_s`) is gone with the model, and is ignored if left in the file |
+| | `reel_stops.enabled` true, `telemetry_dir` null, `strips` `"server/assets/payline_excel.xlsx"`, `band` null, `tolerance_s` 900, `allow_latest_fallback` false | the reel-stop checkpoint -- see [the same symbol at a low cosine](#the-reel-stop-checkpoint-the-same-symbol-at-a-low-cosine). `telemetry_dir: null` derives the folder from `target.process` (`FortuneOx.exe` -> `C:\logs\Telemetry\Data\FortuneOx`); `band: null` runs from 0.70 up to whatever `thresholds` says, so the two cannot drift apart; `allow_latest_fallback` lets it use the newest stops in the file for a frame it cannot identify, which is right only for the spin you have just made |
+| `validate` | `base_url`, `model`, `api_key_env`, `tolerance` "0.005", `timeout_s` 120 | the LM Studio endpoint. `LMSTUDIO_BASE_URL` and `LMSTUDIO_MODEL` override the file |
 | `server` | `host` 127.0.0.1, `port` 8000 | `python -m server --host/--port` override these |
 
 `ideck.actions` maps a role to a hardware button, which is what lets `"button": "spin"` mean

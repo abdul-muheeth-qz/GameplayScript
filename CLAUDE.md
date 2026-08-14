@@ -28,7 +28,10 @@ both, the payline audit needs a geometry block per game and currently has Fortun
 - **`server/payline/`** — the **second audit**, sharing only the capture. Crops the reel window out
   of `spin_result.png` with normalized fractions, cuts it into one tile per cell, embeds each tile,
   decides which cells hold the same symbol, and walks each payline left to right counting the
-  matching run from reel 1. No OCR, no model, no cabinet. Writes `payline.json`.
+  matching run from reel 1. No OCR, no model, no cabinet. Writes `payline.json`. One COMPARE in the
+  ambiguous 0.70-threshold band is settled not by pixels but by the game's own reel stops, read from
+  its telemetry log and mapped through `server/assets/payline_excel.xlsx` -- the reel-stop
+  checkpoint, which is the only oracle this audit has.
 - **`server/`** + **`ui/`** — a FastAPI app exposing those stages as endpoints, and a
   React/Vite/shadcn page with two tabs — Meter Validation and Payline Validation — over one run.
 
@@ -90,6 +93,7 @@ python -m server.payline.cli captured_files/<run> --json        # the whole reco
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.cli --profile <img> X0 Y0 X1 Y1        # measure a new game's reels
 python -m server.payline.test_paylines                          # the rule, no pixels needed
+python -m server.payline.test_reelstrips                        # the reel-stop checkpoint, ditto
 ```
 
 Python 3.12 here (3.10+ for the `X | Y` annotations). Exit codes: `0` ok, `1` error, `2`
@@ -107,6 +111,16 @@ with `python -m server.payline.test_paylines` (the rule, against the spreadsheet
 the one genuinely unit-testable thing in the repo) and by re-running `payline.cli` over the
 FortuneOx run folders on disk, then **looking at `payline/tiles/contact_sheet.png`**, which is the
 only thing that shows whether the crop is right.
+after any change. `validate` needs LM Studio up but no cabinet, so it is checked by re-running it
+over the run folders already in `captured_files/` — there are winning and losing ones on disk, and
+both paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
+with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures)
+and `python -m server.payline.test_reelstrips` (the reel-stop checkpoint, against two real spins'
+stops) — between them the only genuinely unit-testable things in the repo — and by re-running
+`payline.cli` over the FortuneOx run folders on disk, then **looking at
+`payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop is right.
+The checkpoint needs the telemetry folder to exist but no cabinet: with it missing it reports
+`status: "unavailable"` and the audit still runs on the pixels.
 
 `config.json` is git-ignored (it holds the obs-websocket password). A checkout has none — copy the
 table in the README's Configuration section to recreate it, or read the current password from OBS:
@@ -164,12 +178,16 @@ server/
                        file to edit for a new game, and it RAISES for a game it has no block for
     tiles.py          the ROI crop, the 15 cells, the contact sheet, and --profile
     embeddings.py     one vector per cell: the pixel backend (default) and OpenCLIP
-    matcher.py        COMPARE -> yes/no, three ways, plus the cross-check between them
+    matcher.py        COMPARE -> yes/no, three ways, the cross-check between them, and the
+                       reel-stop CHECKPOINT that decides the ambiguous band on symbol names
+      telemetry.py    the game's own BaseGameReelStops, and *which* entry is this frame's spin
+      reelstrips.py   payline_excel.xlsx -> a symbol name per cell. No openpyxl; stdlib zip+xml
     paylines.py       the rule itself. Pure logic over a matcher, no pixels -- do not touch
     report.py         payline.json, the CSV audit trail, the annotated images
     runner.py         the two steps over a run folder
     cli.py            pays / error / no pay
     test_paylines.py  the rule against Payline.xlsx's own fixtures. Runs without pytest
+    test_reelstrips.py  the checkpoint: the mapping, the band, the abstentions, the log parser
 
 ui/                   React + Vite + Tailwind + shadcn; two audits, one shell
   src/App.tsx           which audit is showing and which run is open. Nothing else
@@ -621,6 +639,67 @@ for line — the cheapest evidence that the threshold is not doing the work. A s
 (no scikit-learn, no symbol library) is reported as **skipped**, never omitted, because a missing row
 reads as agreement. The shipped `library` method has no symbol art to work from: the POC repo
 documents `data/symbols/`, `src/calibrate.py` and `scripts/` and ships none of them.
+
+### The reel-stop checkpoint: the same symbol at a low cosine
+
+The failure the threshold cannot fix. On run `2026-08-13_153618` the inverted V is **five Arm Bands**
+and its first pair reads `COMPARE E31 & E22 cos=0.7622 NO`, so the line paid 0 where it should have
+paid 5 — and the other three pairs on that line sit at 0.7533, 0.7664 and 0.7657. The art is
+identical; the pixels are not, because the win animation draws a highlight across E22 that E31 does
+not have. **No threshold fixes this**: 0.7622 is nowhere near the 0.996-0.9998 that same-symbol pairs
+otherwise sit at here, and coming down to catch it walks into the 0.28 of a genuinely different pair
+from the other side. It is worst on the V and the inverted V because those pairs cross both a reel
+and a row, so the two cells rarely carry the same overlay.
+
+So between 0.70 and the threshold, the decision is handed to an oracle rather than to a number.
+`matcher.ReelStopMatcher` wraps whichever strategy is running and, in that band only, answers on
+**symbol names**: `telemetry.py` reads the spin's `BaseGameReelStops` out of the game's own telemetry
+log, `reelstrips.py` maps those five numbers through `server/assets/payline_excel.xlsx`, and two names
+either match or they do not. Outside the band nothing changes — a confident pixel reading is never
+overturned, which is what stops a stale telemetry file or a drifted strip from rewriting a verdict it
+has no business touching.
+
+**The mapping is `strip[reel][stop + row - 1]`, and it was measured, not assumed.** The mapping
+supplied with the request (stops `[24, 79, 153, 25, 0]`) reproduces all fifteen names exactly, and run
+`2026-08-13_153618` (`[86, 121, 127, 138, 86]`) is 15/15 against its own contact sheet. Both are
+fixtures in `test_reelstrips.py`. Position 200 is an `X` terminator in every reel, so the strips are
+200 long and that is the modulus for the wrap — a strip of 201 would hand out `X` as a symbol name.
+
+Four things are load-bearing, and each is a way to be confidently wrong:
+
+- **It only ever speaks about the spin the frame can be *proved* to be.** The stops entry lands 3-4 s
+  before the `spin_result.png` it belongs to (measured across six consecutive captures), so the entry
+  chosen is the last one at or before the frame's own mtime. When there is none, the checkpoint
+  **stands down** and reports `status: "unavailable"` rather than judging on the newest entry in the
+  file. Run `2026-08-13_114200` is why: captured at 11:42 against a telemetry file that begins at
+  12:08, where the nearest entry is a spin four hours later. `payline.reel_stops.allow_latest_fallback`
+  opts into the by-hand behaviour ("open the newest log, take the last stops"), which is right only
+  while auditing the spin you have just made — and `matched: false` still says so in the record.
+- **A mystery symbol cannot decide a pair.** `Mystery1`, `Mystery2` and `Mystery (Orb)` are 15% of
+  every strip and they reveal as other art: the supplied example has `Mystery1` at E13 where the frame
+  shows an Ace, and run `2026-08-13_155048` has it on all three cells of reel 1 where the frame shows
+  three Ox. So `reelstrips.PLACEHOLDERS` abstains and the pixel verdict stands. `WILD` is deliberately
+  *not* in that set — it has its own art (the firecrackers) and was drawn as itself on both frames
+  checked. Wild *substitution* is not modelled at all; `paylines.py` implements plain COMPARE.
+- **Every pair it reaches is reported, agreed with or not** — `reel_stops.adjudications` in
+  `payline.json`, a line under the COMPARE in the CLI and in the UI table, and
+  `pays_without_checkpoint` beside the verdict. One measured disagreement between the sheet and a
+  frame is on the record (`2026-08-13_155048` is 14/15: the sheet has `Wealth Pot` at R2 position 89
+  where the frame shows an Ox), which is exactly why this reports rather than merely applies.
+- **`cross_check` runs over the *inner* matcher, not the checkpointed one.** It answers "do the vision
+  strategies agree with each other", and the checkpoint is not a vision strategy — feeding it in would
+  report the checkpoint doing its job as a threshold to recalibrate. That is also why
+  `pays_without_checkpoint` exists: without it the cross-check table appears to contradict the verdict
+  above it.
+
+The telemetry lines are **not valid JSON and must not be parsed as such** — `"Event":FortuneOx
+[monitoring]` has a bare word where a value belongs, `ProgressiveQualified:False` is Python's
+spelling, and `"2026-08-13T15:58:0905:30"` is missing the `+` of its offset. The newest file is also
+not necessarily the one with the stops: only the `_server_` files carry the marker, and a `_client_`
+file is newer than the server file here, so the search is "the newest file that actually contains an
+entry". The spreadsheet needs no new dependency (`zipfile` + `xml.etree`), and its symbol names are
+`t="str"` **cached XLOOKUP results against an external workbook** — a reader that handles only shared
+and inline strings finds an empty sheet, which is what the first version of `reelstrips.py` did.
 
 ### Two steps in the pipeline, one button on the page
 

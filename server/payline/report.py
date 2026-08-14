@@ -143,7 +143,11 @@ def build_record(results, matcher, geometry, *, image, image_source, backend,
                 "broken_at": (r.cells[r.stopped_at + 1] if r.stopped_at >= 0 else None),
                 "steps": [
                     {"compare": [s.a, s.b], "similarity": round(s.similarity, 6),
-                     "match": s.match, "detail": s.detail}
+                     "match": s.match, "detail": s.detail,
+                     # Only the pairs the reel-stop checkpoint reached carry this, so a
+                     # reader can tell a verdict read off the pixels from one the game's own
+                     # reel stops settled. Null on every other pair.
+                     "checkpoint": s.checkpoint or None}
                     for s in r.steps
                 ],
             }
@@ -172,6 +176,20 @@ def print_results(record: dict) -> None:
     print(f"  Embedding  : {record['backend']}")
     print(f"  Matching   : {record['matcher']}")
 
+    stops = record.get("reel_stops") or {}
+    if stops.get("status") == "on":
+        print(f"  Reel stops : {stops.get('stops')}  from {stops.get('file')}"
+              f" line {stops.get('line')}")
+        print(f"               {stops.get('timestamp')}, game {stops.get('game_id')}")
+        print(f"               chosen by {stops.get('matched_by')}")
+        print(f"               band cos {stops['band'][0]:.2f}-{stops['band'][1]:.2f}, "
+              f"{len(stops.get('adjudications') or [])} pair(s) reached, "
+              f"{stops.get('overrides', 0)} overturned")
+    elif stops.get("status") == "unavailable":
+        print(f"  Reel stops : NOT AVAILABLE -- {stops.get('detail')}")
+    elif stops.get("status") == "off":
+        print("  Reel stops : off (payline.reel_stops.enabled is false)")
+
     grid = record.get("symbol_grid") or {}
     if grid:
         rows, reels = (int(n) for n in geom["grid"].split("x"))
@@ -197,6 +215,8 @@ def print_results(record: dict) -> None:
             print(f"  COMPARE {step['compare'][0]} & {step['compare'][1]}  "
                   f"cos={step['similarity']:.4f}  {verdict:<3}  "
                   f"{step['detail']:<28} {tag}")
+            if step.get("checkpoint"):
+                print(f"           checkpoint: {step['checkpoint']}")
         suffix = f"   [{', '.join(line['symbols'])}]" if line["symbols"] else ""
         note = "" if line["wins"] else "   (no match on the first pair - STOP)"
         print(f"  >> {line['message']}{suffix}{note}")
@@ -211,6 +231,27 @@ def print_results(record: dict) -> None:
     print(f"  TOTAL PAY  : {record['total_pay']}")
     print(bar)
 
+    # What the pixels alone would have paid, whenever the checkpoint changed anything. Printed
+    # because the cross-check table below reports the *vision* strategies, and without this line
+    # it looks like it contradicts the verdict above.
+    if stops.get("overrides"):
+        before = stops.get("pays_without_checkpoint")
+        print()
+        print(bar)
+        print("REEL-STOP CHECKPOINT")
+        print(bar)
+        for adj in stops.get("adjudications") or []:
+            a, b = adj["compare"]
+            names = " vs ".join(str(s) for s in adj["symbols"])
+            outcome = ("not decided" if not adj["decided"] else
+                       f"{'YES' if adj['now'] else 'NO'}"
+                       f"{'  <-- OVERTURNED' if adj['was'] != adj['now'] else ''}")
+            print(f"  COMPARE {a} & {b}  cos={adj['similarity']:.4f}  {names:<34} {outcome}")
+        if before:
+            print(f"\n  pixels alone would have paid : {before}")
+            print(f"  with the checkpoint          : {[l['pays'] for l in record['lines']]}")
+        print(bar)
+
     checks = record.get("cross_check") or {}
     ran = {m: c["pays"] for m, c in checks.items() if "pays" in c}
     if len(ran) > 1:
@@ -218,6 +259,14 @@ def print_results(record: dict) -> None:
         print(bar)
         print("CROSS-CHECK  (do the matching strategies agree?)")
         print(bar)
+        # Same label as the page carries, for the same reason: these are the pixel-only pays, so
+        # a line the checkpoint rescued reads 0 here while the summary above pays it.
+        if stops.get("status") == "on":
+            print("  the pixel readings only -- the reel-stop checkpoint is not one of these")
+            if stops.get("overrides"):
+                print(f"  it decided {stops['overrides']} ambiguous COMPARE(s), so this table "
+                      f"pays {stops.get('pays_without_checkpoint')}")
+                print(f"  where the summary above pays {[l['pays'] for l in record['lines']]}")
         methods = list(ran)
         print("  LINE  " + "".join(m.upper().ljust(14) for m in methods))
         for i in range(len(record["lines"])):
