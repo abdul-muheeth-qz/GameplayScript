@@ -35,9 +35,9 @@ import os
 from .. import frames
 from ..settings import resolve
 from . import embeddings as emb
-from . import report, tiles as tiling
+from . import reelstrips, report, telemetry, tiles as tiling
 from .geometry import PaylineError, geometry_for
-from .matcher import agreement, build_matcher, cross_check
+from .matcher import agreement, build_checkpoint, build_matcher, cross_check
 from .paylines import evaluate_all
 
 LOG = logging.getLogger("payline")
@@ -57,6 +57,22 @@ DEFAULTS = {
     "save_embeddings": True,
     "image": None,
     "symbol_library": None,
+    # The reel-stop checkpoint. `telemetry_dir` null derives the folder from target.process
+    # (FortuneOx.exe -> C:\logs\Telemetry\Data\FortuneOx); `band` null runs from 0.70 up to
+    # whatever payline.thresholds says, so the two cannot drift apart. See
+    # matcher.ReelStopMatcher.
+    "reel_stops": {
+        "enabled": True,
+        "telemetry_dir": None,
+        "strips": reelstrips.DEFAULT_STRIPS,
+        "band": None,
+        "tolerance_s": telemetry.DEFAULT_TOLERANCE_S,
+        # Off, so the checkpoint only ever speaks about the spin the frame's own timestamp
+        # proves it is. On, the last entry in the file is used when no entry matches -- which is
+        # the by-hand reading ("open the newest log, take the last stops") and is right only
+        # while auditing the spin you just made.
+        "allow_latest_fallback": False,
+    },
 }
 
 
@@ -67,6 +83,14 @@ def settings_for(cfg: dict | None) -> dict:
     for key in ("image", "symbol_library"):
         if merged.get(key):
             merged[key] = resolve(merged[key])
+    # `reel_stops` is the one nested block, so it is merged key by key rather than replaced:
+    # a config that sets only `telemetry_dir` must still get the default band and strips,
+    # and a plain `merged.update` would have left the other three keys missing.
+    stops = dict(DEFAULTS["reel_stops"])
+    stops.update(merged.get("reel_stops") or {})
+    if stops.get("strips"):
+        stops["strips"] = resolve(stops["strips"])
+    merged["reel_stops"] = stops
     return merged
 
 
@@ -202,18 +226,36 @@ def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
     vectors = emb.embed_tiles(cells, backend, settings,
                               out_dir if settings.get("save_embeddings", True) else None)
 
-    matcher = build_matcher(vectors, settings, backend)
+    inner = build_matcher(vectors, settings, backend)
+    # The checkpoint wraps whichever strategy is running, and `image_path` is what lets it pick
+    # *this frame's* spin out of the telemetry rather than the newest one in the file.
+    matcher, stops_record = build_checkpoint(inner, geometry, cfg or {}, settings, backend,
+                                             image_path)
     results = evaluate_all(geometry, matcher)
 
-    checks = (cross_check(vectors, settings, backend, geometry, matcher)
+    # Cross-check runs over the **inner** matcher, not the checkpointed one. It answers "do the
+    # vision strategies agree with each other", and the checkpoint is not a vision strategy --
+    # feeding it in would report the checkpoint doing its job as a threshold to recalibrate.
+    # The pixel-only reading it produces is kept beside the verdict for exactly that reason.
+    checks = (cross_check(vectors, settings, backend, geometry, inner)
               if settings.get("cross_check", True)
-              else {matcher.name: {"pays": [r.pays for r in results]}})
+              else {inner.name: {"pays": [r.pays for r in evaluate_all(geometry, inner)]}})
 
     record = report.build_record(
         results, matcher, geometry,
         image=info.get("image"), image_source=info.get("image_source"),
-        backend=backend, method=matcher.name, tiles_info=info,
+        backend=backend, method=inner.name, tiles_info=info,
         checks=checks, agree=agreement(checks))
+
+    adjudications = getattr(matcher, "adjudications", [])
+    stops_record["adjudications"] = adjudications
+    stops_record["overrides"] = getattr(matcher, "overrides", lambda: 0)()
+    if stops_record["status"] == "on":
+        # What the pixels alone said, line for line. Without it the cross-check table appears to
+        # contradict the verdict above it whenever the checkpoint has changed something.
+        stops_record["pays_without_checkpoint"] = [
+            r.pays for r in evaluate_all(geometry, inner)]
+    record["reel_stops"] = stops_record
 
     record["files"] = dict(info.get("files") or {})
     written = report.write_all(out_dir, record, matcher, geometry,
@@ -232,6 +274,14 @@ def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
     if record.get("agreement") is False:
         record["message"] += (" The matching strategies disagree -- recalibrate the "
                               "threshold before trusting this.")
+    if stops_record["overrides"]:
+        record["message"] += (
+            f" The reel-stop checkpoint decided {stops_record['overrides']} ambiguous "
+            f"COMPARE(s) against the pixels, on the game's own reel stops "
+            f"{stops_record.get('stops')}.")
+    elif stops_record["status"] == "unavailable":
+        record["message"] += (" The reel-stop checkpoint could not run, so an ambiguous "
+                              "COMPARE was decided on the pixels alone.")
 
     report.dump_json(os.path.join(run_dir, RESULT_FILE), record)
     return record

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Fragment, useState } from "react"
 
 import { api, type PaylineLine, type PaylineResult } from "@/lib/api"
 import {
@@ -144,31 +144,44 @@ function LineDetail({
       <table className="mt-3 w-full text-xs">
         <tbody>
           {line.steps.map((step, i) => (
-            <tr key={`${step.compare[0]}-${step.compare[1]}`} className="border-t border-rule/40">
-              <td className="tnum py-1.5 pr-3 text-muted-foreground">
-                COMPARE {step.compare[0]} &amp; {step.compare[1]}
-              </td>
-              <td
-                className={cn(
-                  "tnum py-1.5 pr-3 text-right",
-                  step.match ? "text-jade" : "text-vermilion",
-                )}
-              >
-                {step.match ? "YES" : "NO"}
-              </td>
-              <td className="tnum py-1.5 pr-3 text-right text-muted-foreground/80">
-                {step.detail}
-              </td>
-              <td className="py-1.5 text-right text-[0.6875rem] text-muted-foreground/60">
-                {!step.match
-                  ? i === 0
-                    ? "stop"
-                    : "run ends"
-                  : i === 0
-                    ? "counter = 2"
-                    : "counter +1"}
-              </td>
-            </tr>
+            <Fragment key={`${step.compare[0]}-${step.compare[1]}`}>
+              <tr className="border-t border-rule/40">
+                <td className="tnum py-1.5 pr-3 text-muted-foreground">
+                  COMPARE {step.compare[0]} &amp; {step.compare[1]}
+                </td>
+                <td
+                  className={cn(
+                    "tnum py-1.5 pr-3 text-right",
+                    step.match ? "text-jade" : "text-vermilion",
+                  )}
+                >
+                  {step.match ? "YES" : "NO"}
+                </td>
+                <td className="tnum py-1.5 pr-3 text-right text-muted-foreground/80">
+                  {step.detail}
+                </td>
+                <td className="py-1.5 text-right text-[0.6875rem] text-muted-foreground/60">
+                  {!step.match
+                    ? i === 0
+                      ? "stop"
+                      : "run ends"
+                    : i === 0
+                      ? "counter = 2"
+                      : "counter +1"}
+                </td>
+              </tr>
+              {/* A pair the cosine could not settle. It gets its own row rather than being
+                  squeezed into `detail`, because "which of these YESes came from the pixels
+                  and which from the game's own reel stops" is the first thing to ask of a
+                  line that only pays because the checkpoint fired. */}
+              {step.checkpoint && (
+                <tr>
+                  <td colSpan={4} className="pb-1.5 pl-4 text-[0.6875rem] text-amber/90">
+                    ↳ {step.checkpoint}
+                  </td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </table>

@@ -101,6 +101,9 @@ export type PaylineStep = {
   match: boolean
   /** "cos 0.9963 >= 0.9000", or "GROUP_1 vs GROUP_4" -- the rule that decided it. */
   detail: string
+  /** Set only on the pairs the reel-stop checkpoint reached: an ambiguous cosine settled (or
+   *  explicitly not settled) on the game's own reel stops. Null on every other pair. */
+  checkpoint: string | null
 }
 
 export type PaylineLine = {
@@ -141,6 +144,56 @@ export type PaylineFiles = {
   annotated?: Record<string, string>
 }
 
+/** One pair the reel-stop checkpoint looked at, whether or not it changed anything. */
+export type PaylineAdjudication = {
+  compare: [string, string]
+  similarity: number
+  /** The two symbol names the reel stops gave, either of which may be null. */
+  symbols: (string | null)[]
+  /** False when it abstained -- a mystery symbol, or no stops at all. */
+  decided: boolean
+  was: boolean
+  now: boolean
+  note: string
+}
+
+/**
+ * The checkpoint that reads the game's own `BaseGameReelStops` out of the telemetry log and
+ * maps them through the reel strips, so an ambiguous COMPARE is decided on symbol *names*
+ * rather than on pixels.
+ *
+ * `status` is "on", "off" (disabled in config) or "unavailable" (configured on, but the
+ * telemetry or the spreadsheet could not be read -- `detail` says which). Unavailable is not a
+ * failure: the audit still has a complete pixel reading. It is reported because a checkpoint
+ * that silently did nothing leaves the answer it would have corrected on screen.
+ */
+export type PaylineReelStops = {
+  status: "on" | "off" | "unavailable"
+  detail?: string
+  /** One stop per reel, left to right, straight out of the telemetry. */
+  stops?: number[]
+  timestamp?: string | null
+  game_id?: string | null
+  file?: string
+  line?: number
+  folder?: string
+  entries?: number
+  /** How this entry was chosen -- by the frame's own time, or as a reported fallback. */
+  matched_by?: string
+  frame_time?: string | null
+  /** [low, high): below the match threshold, above clearly-different. */
+  band?: [number, number]
+  strips?: string
+  strip_lengths?: Record<string, number>
+  symbol_grid?: Record<string, string>
+  adjudications?: PaylineAdjudication[]
+  /** How many COMPAREs it decided against the pixels. 0 means it agreed everywhere it looked. */
+  overrides?: number
+  /** What the pixels alone paid, line for line -- so the cross-check table below the verdict
+   *  cannot look like it contradicts it. */
+  pays_without_checkpoint?: number[]
+}
+
 export type PaylineResult = {
   verdict: "pays" | "no pay"
   image: string
@@ -157,6 +210,8 @@ export type PaylineResult = {
   lines_paying: number
   total_pay: number
   lines: PaylineLine[]
+  /** Absent on records written before the checkpoint existed. */
+  reel_stops?: PaylineReelStops
   cross_check: PaylineCrossCheck
   /** Do every strategy that ran agree, line for line? null when only one ran. */
   agreement: boolean | null
