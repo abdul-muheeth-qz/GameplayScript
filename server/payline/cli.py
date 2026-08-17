@@ -1,4 +1,4 @@
-"""Stage 4 from the command line, over a run folder or a loose image.
+"""The payline audit from the command line, over a run folder or a loose image.
 
     python -m server.payline.cli                                    the newest usable capture
     python -m server.payline.cli server/captured_files/<run>               one particular run
@@ -7,22 +7,15 @@
     python -m server.payline.cli --image <path>                     a loose image, forced
     python -m server.payline.cli --profile <path> X0 Y0 X1 Y1       measure a new game
 
-With no run folder it reads the newest capture that actually holds a `spin_result` -- the same
-default `POST /api/payline` uses, so the command line and the page agree about which spin "the
-latest one" is. `--image` is the way to force a particular file regardless of what is on disk;
-`payline.image` in config.json is only a fallback for when no capture has a frame.
+With no run folder it reads the newest capture that holds a `spin_result` -- the same default
+`POST /api/payline` uses, so the CLI and the page agree about which spin the latest one is.
+`--image` forces a particular file; `payline.image` in config.json is an override read *instead of*
+the captured frame whenever it is set.
 
-Exit codes follow the house rule that a test runner needs one distinction: `0` some line
-pays, `1` an error, `2` nothing pays. That is the same shape as `validate.cli`'s pass / error
-/ no-verdict and for the same reason -- the interesting outcome has to be distinguishable
-from the failure to reach one.
+Exit codes: `0` some line pays, `1` an error, `2` nothing pays -- the same shape as
+`validate.cli`, so the interesting outcome stays distinguishable from a failure to reach one.
 
-`--profile` is the aid for adding a game: give it a rough box around the reels and it reports
-where the reel background actually starts and stops and where the gutters are, for a person to
-turn into a `payline_geometry` block in `game_config.json` (`geometry.py` holds the rule those
-numbers have to satisfy, not the numbers). It does not guess the box -- see `tiles.profile` for the
-two auto-detection approaches that were written, measured against this cabinet's frames, and
-thrown away.
+`--profile` is the aid for adding a game, and it reports rather than detecting; see `tiles.profile`.
 """
 
 from __future__ import annotations
@@ -75,16 +68,14 @@ def main(argv=None) -> int:
         except (PaylineError, ValueError) as exc:
             print(exc, file=sys.stderr)
             return EXIT_ERROR
-        # The two density arrays are hundreds of numbers each and only useful when reading
-        # an edge by hand, so they stay out of the summary unless asked for.
+        # Hundreds of numbers each, and only useful when reading an edge by hand.
         dense = {k: result.pop(k) for k in ("row_density", "col_density")}
         print(json.dumps(result, indent=2))
         if args.verbose:
             print(json.dumps(dense, indent=2))
         return EXIT_PAYS
 
-    # A loose image is judged in a scratch folder, so the run-folder contract holds for it
-    # too and nothing has to special-case "there is no run".
+    # In a scratch folder, so the run-folder contract holds for a loose image too.
     temp = None
     if args.image:
         if not os.path.isfile(args.image):
@@ -99,7 +90,7 @@ def main(argv=None) -> int:
             print(f"no such run folder: {run_dir}", file=sys.stderr)
             return EXIT_ERROR
     else:
-        # The same default the API uses, so "the latest capture" means one thing across both.
+        # The API's default, so "the latest capture" means one thing across both.
         from .. import frames as frame_names
         from .. import runs
 

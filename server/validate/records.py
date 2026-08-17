@@ -1,20 +1,10 @@
-"""Read the OCR records the extract step wrote, as exact Decimals.
+"""Read the records extract wrote, as exact Decimals.
 
-Two sets of meters are read per spin, and which file each comes from is `runner.find_records`:
-
-    previous   cash, bet   -- pre_spin
-    current    cash, win   -- the last frame captured
-
-One rule beyond "parse the number": a **null win is taken as 0.00**. `extract` reports
-`"value": null` for a meter it could not read *and* for a meter with nothing in it, and a
-blank WIN box is the second one -- it is the correct reading of an empty meter, and it is
-what every losing spin's result frame looks like. Erroring on it would mean an ordinary
-spin could never be validated at all.
-
-Cash and bet get no such treatment: a blank cash meter is not zero credits, it is a failed
-read, and inferring a balance would turn an OCR failure into a verdict. Whatever was
-assumed comes back in `inferred`, so the UI badges it and a wrong assumption stays visible
-instead of hiding inside a Pass.
+One rule beyond parsing the number: **a null win is taken as 0.00**. `extract` reports
+`"value": null` both for a meter it could not read and for an empty one, and a blank WIN box is the
+second -- erroring on it would mean an ordinary spin could never be validated. Cash and bet get no
+such treatment: a blank cash meter is a failed read, not zero credits, and inferring a balance
+would turn an OCR failure into a verdict. What was assumed comes back in `inferred`.
 """
 
 from __future__ import annotations
@@ -23,14 +13,9 @@ import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-# What is read from each frame. The extract step's slotocr.config.FIELD_LABELS emits
-# exactly these keys.
-#
-# `win` is deliberately absent from PREVIOUS_FIELDS. `pre_spin`'s WIN meter holds the
-# *previous* spin's win -- the game leaves a paid win on display until the next spin clears
-# it -- so reading it here would double-count. A field nothing reads cannot be added into
-# the sum by mistake. The frame the win comes from instead is the one whose WIN meter means
-# this spin: the last frame there is (`runner.find_records`).
+# slotocr.config.FIELD_LABELS emits exactly these keys. `win` is deliberately absent from
+# PREVIOUS_FIELDS: `pre_spin`'s WIN meter holds the *previous* spin's win, so reading it here would
+# double-count, and a field nothing reads cannot be added into the sum by mistake.
 PREVIOUS_FIELDS = ("cash", "bet")
 CURRENT_FIELDS = ("cash", "win")
 
@@ -45,8 +30,7 @@ class RecordError(ValueError):
 def load_values(path: Path, fields: tuple[str, ...]) -> tuple[dict[str, Decimal], list[str]]:
     """The named values as Decimals, plus the names of any that were inferred."""
     try:
-        # utf-8-sig reads a BOM-prefixed file as well as a bare one, and
-        # parse_float=Decimal keeps the cash values exact.
+        # utf-8-sig reads a BOM-prefixed file too, and parse_float=Decimal keeps the money exact.
         record = json.loads(Path(path).read_text(encoding="utf-8-sig"), parse_float=Decimal)
     except (OSError, ValueError) as exc:
         raise RecordError(f"{path}: {exc}") from exc
@@ -74,8 +58,8 @@ def _value(path: Path, record: dict, field: str) -> tuple[Decimal, bool]:
             return INFERABLE[field], True
         raise RecordError(f"{path}: no {field} value in the record") from exc
 
-    # Checked here rather than downstream, where a null, a word or a NaN would blow up
-    # mid-sum. bool is rejected explicitly, being a subclass of int.
+    # Checked here rather than downstream, where a null, a word or a NaN would blow up mid-sum.
+    # bool is rejected explicitly, being a subclass of int.
     if not isinstance(raw, bool):
         try:
             value = Decimal(raw)

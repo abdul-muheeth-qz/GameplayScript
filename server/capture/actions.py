@@ -1,38 +1,22 @@
 """What the player just did, worked out from the two logs.
 
-spin.py knows what a spin is because it caused one: it marks the log, presses a button, and
-everything after the mark belongs to that press. Nothing here has that luxury. The player is at
-the cabinet pressing whatever they like, and this module's whole job is to recognise the
-beginning of an action, the end of it, and what it was -- from the log alone.
+spin.py knows what a spin is because it caused one. Nothing here has that luxury: the player presses
+whatever they like, so this recognises the beginning of an action, the end of it, and what it was
+from the log alone. Four questions, answered separately:
 
-Four questions, answered separately:
+  * **Did an action just start?** `trigger_of` -- markers that only appear because a human did
+    something. An i-Deck press is the other trigger and belongs to the caller, coming from the
+    panel service's log rather than the game's.
+  * **Is this moment worth a frame?** `MILESTONES` -- a Hold & Spin runs ~50 s over 20-odd free
+    spins, so one shot at each end would miss the whole feature.
+  * **Is it over, or is the game just waiting?** `Action.waiting_for`, and if waiting, whether for
+    the *player* (unbounded, the game having no timeout either) or for its own presentation
+    (bounded). A round is never closed and reopened.
+  * **What was it?** `Action.summary` -- a list of kinds rather than one label, because one press is
+    routinely a collect *and* a spin.
 
-  * **Did an action just start?** `trigger_of` -- a small set of markers that only ever appear
-    because a human did something. An i-Deck press is the other trigger and is handled by the
-    caller, because it comes from the panel service's log rather than the game's.
-  * **Is this moment worth a frame?** `MILESTONES` -- the points inside an action where the
-    screen changes to something worth having a picture of. A Hold & Spin runs ~50 s over 20-odd
-    free spins, so one shot at each end would miss the whole feature.
-  * **Is it over, or is the game just waiting?** `Action.waiting_for` -- and if it is waiting,
-    whether for the *player* (unbounded: the game has no timeout of its own and neither do we) or
-    for its own presentation to finish (bounded). A round is never closed and reopened; while the
-    game waits for the person, so does the round.
-  * **What was it?** `Action.summary` -- a list of kinds rather than one label, because one
-    press is routinely two things: with a win pending, Repeat Bet reads "Collect Win" and means
-    "collect, then bet again", so that press is a collect *and* a spin.
-
-Nothing in here does any I/O or touches the clock beyond stamping records, so it is the one
-part of this tool that can be reasoned about without a cabinet in front of you.
-
-Two markers are worth knowing about because they are what make manual actions legible at all:
-
-  * `[Game.BetConfigurationChanged] betChangedFlags[...] reasonForChange[Player]` says the bet or
-    the denomination changed *and* that a person did it. The cabinet cycles denominations by
-    itself in attract mode (reasonForChange[Attract], 8 occurrences in one log against 41
-    Player ones), and those must not be captured as player actions.
-  * `TouchMsg` is the only record anywhere that the screen was touched. Collect, gamble and
-    "touch to start" can all be done on the glass instead of the deck, and without this marker
-    they are invisible until their consequence lands.
+**No I/O and no clock beyond stamping records**, which is what lets this be checked by replaying
+real log history instead of needing a cabinet.
 """
 
 from __future__ import annotations
@@ -42,13 +26,10 @@ from datetime import datetime
 
 from . import gamelog
 
-# Events that mean a person did something. Reaching one of these while nothing is being followed
-# opens an action. Deliberately not "any event at all": the game logs state transitions and deck
-# relabels on its own, and a capture per attract-mode relabel would bury the real ones.
-#
-# Consequences are not in here. `win`, `feature_triggered` and the rest arrive *inside* an action
-# that is already open; if one somehow arrives on its own it is recorded as unattributed rather
-# than invented into a player action.
+# Events that mean a person did something; one of these while nothing is being followed opens an
+# action. Deliberately not "any event": the game logs transitions and relabels on its own, and a
+# capture per attract-mode relabel would bury the real ones. Consequences are not here -- one
+# arriving alone is recorded as unattributed rather than invented into a player action.
 TRIGGERS = (
     "bet_button",           # a Line/Hold/Maxbet button on the deck
     "bet_config_changed",   # denomination or bet changed -- but only reasonForChange[Player]
@@ -60,33 +41,24 @@ TRIGGERS = (
     "game_started",
 )
 
-# What ends a round *here*. Deliberately not `gamelog.TERMINAL`, which spin.py needs and which
-# also contains `win`: spin.py has to stop at the win because the press that resolves it is one
-# it will never make, while this tool is watching the person who is about to make it. So a round
-# runs to the game's own `game_over`, which lands only once the win has been collected or
-# gambled -- and everything between the two stays in one folder.
+# What ends a round *here*. Deliberately not `gamelog.TERMINAL`, which also holds `win`: spin.py
+# must stop at the win because the press resolving it is one it will never make, while this is
+# watching the person about to make it. So a round runs to `game_over`, which lands once the win has
+# been collected or gambled, and the spin and its collect stay in one folder.
 ROUND_OVER = ("game_over",)
 
-# Points where the game has announced that something is coming and then goes quiet for a long
-# time, mapped to the events that end the wait. An action sitting on one of these is not idle and
-# must not be closed on the ordinary window.
+# Points where the game announces something and then goes quiet for a long time, mapped to the events
+# that end the wait. An action sitting on one is not idle and must not be closed on the ordinary
+# window. Split by *who* is being waited for, because getting it wrong shows up as a round cut in half:
 #
-# Split by *who* the game is waiting for, because the two want different treatment and getting it
-# wrong shows up as a round cut in half:
+# PLAYER_WAITS -- the game will wait for a person for as long as it takes, with no timeout of its own,
+# and there is no bound to guess at: a respin prompt sat 51.8 s, an uncollected win 3.2 hours. Any
+# bound splits one spin into two folders, with the collect filed away from the spin that won it. So
+# the round is held open (`watch.PLAYER_WAIT_S` 0) and the player's next input moves it on.
 #
-# PLAYER_WAITS -- the game has put something up and will wait for a person for as long as it
-# takes, with no timeout of its own. There is no upper bound to guess at: one player left a
-# respin prompt 51.8 s, another left a win uncollected 3.2 hours, and one first gamble pick took
-# 36 s. Whatever bound is chosen, a longer pause exists -- and closing the round on it splits one
-# spin into two folders, with the collect filed away from the spin that won it. So the round is
-# held open instead (`watch.player_wait_s`, 0 = as long as it takes), and the *player's next
-# input* is what moves it on.
-#
-# GAME_WAITS -- the game is presenting something and will get on with it by itself, so a bound is
-# meaningful. `bonus_triggered` is the bonus intro: measured at 27.7 s and 68.4 s between the
-# announcement and the feature actually starting, with the raw log silent for 29 s of it. Without
-# this the spin that triggered the bonus -- the one worth capturing most -- is filed as finished
-# before the bonus starts.
+# GAME_WAITS -- the game is presenting and will get on with it, so a bound is meaningful. The bonus
+# intro measured 27.7 s and 68.4 s, with the log silent for 29 s of it; without this the spin that
+# triggered the bonus is filed as finished before the bonus starts.
 PLAYER_WAITS = {"hold_and_spin_prompt": ("hold_and_spin_started",),
                 "win": ("take_win", "gamble_played", "game_over"),
                 "gamble_played": ("gamble_pick", "game_over"),
@@ -216,14 +188,9 @@ def slug(kinds: list[str], limit: int = 60) -> str:
 class Action:
     """One thing the player started, and everything observed until the game finished it.
 
-    For a spin that is the whole round -- the bet, the reels, any feature, the win offer, the
-    gamble or the collect, and the game over -- not just the part before the win. The game
-    itself draws that boundary: it does not log `game_over` until the win has been answered, so
-    following it to `game_over` keeps one round in one folder.
-
-    A round can therefore run for as long as the player leaves it: the game waits forever on an
-    uncollected win, and so does this. One round is one folder with one `after` frame, however
-    long the person took to answer -- see `waiting_for`.
+    For a spin that is the whole round, not just the part before the win: the game draws the boundary
+    itself by not logging `game_over` until the win has been answered. So a round runs for as long as
+    the player leaves it, and stays one folder however long they take -- see `waiting_for`.
     """
 
     def __init__(self, index: int, trigger: str, opened: datetime, deck: dict | None = None,
@@ -232,10 +199,9 @@ class Action:
         self.trigger = trigger
         self.opened = opened
         self.deck_before = deck
-        # What the bet and denomination were before this action. The log says a bet
-        # "configuration change" happened on every deck bet-button press, including the ones
-        # that re-bet the same amount, so the only way to tell a real change from a repeat is
-        # to compare the numbers.
+        # What the bet and denomination were before this action. The log reports a "configuration
+        # change" on every deck bet-button press, re-bets of the same amount included, so comparing
+        # the numbers is the only way to tell a real change from a repeat.
         self.previous = previous or {}
         self.folder = ""
         self.buttons: list[dict] = []      # i-Deck presses attributed to this action
@@ -260,11 +226,9 @@ class Action:
     def names(self) -> set[str]:
         return {row["event"] for row in self.events}
 
-    # Everything that means the game took over and will report back in its own time: a spin, a
-    # feature, a gamble round, a collect. A gamble belongs here as much as a spin does -- the
-    # game logs its game over 2.2 s after the round ends, and an action closed before that loses
-    # the outcome of the spin it belonged to. So does a collect: the win meter counts up for
-    # 3.5-7.9 s (measured) before the game over.
+    # Everything that means the game took over and will report back in its own time. A gamble belongs
+    # here as much as a spin: its game over lands 2.2 s after the round ends, and a collect's win
+    # meter counts up for 3.5-7.9 s before one.
     IN_PLAY = {"bet_locked", "spin_started", "reels_spinning", "feature_triggered",
                "hold_and_spin_started", "gamble_played", "gamble_pick", "take_win",
                "bonus_triggered"}
@@ -276,11 +240,9 @@ class Action:
     def settles_fast(self) -> bool:
         """Whether this action is complete as soon as it stops logging.
 
-        Only a wager change qualifies. Everything else -- including a bare touch or a press the
-        game hasn't answered yet -- gets the full gameplay window, because "nothing more has
-        been logged" is not the same as "nothing more is coming": a touch that starts a free
-        spin round was followed by 13 s of silence before the reels moved, and closing it early
-        orphaned the whole round.
+        Only a wager change qualifies: "nothing more has been logged" is not "nothing more is
+        coming", and a touch that started a free spin round was followed by 13 s of silence before
+        the reels moved.
         """
         return bool(self.names & self.SELF_CONTAINED) and not (self.names & self.IN_PLAY)
 
@@ -288,23 +250,17 @@ class Action:
     def waiting_for(self) -> str | None:
         """Who the game is waiting for -- `"player"`, `"game"`, or None if it isn't waiting.
 
-        "The game has more to come" and "the game has gone quiet for good" look identical from a
-        log that has stopped moving, and they want opposite treatment: one is the middle of an
-        action, the other is the end of one. And within the first, waiting for a person is
-        unbounded while waiting for a presentation is not.
+        "More to come" and "quiet for good" look identical from a stopped log and want opposite
+        treatment. Two things here are load-bearing, and each was a bug:
 
-        Read as a state -- announcement seen, resolution not yet -- rather than as "the last event
-        was an announcement". The game logs a deck relabel and a couple of state transitions after
-        putting a prompt up, so the prompt is never the last line, and testing for that missed
-        every one of them.
+        Read as a **state** (announcement seen, resolution not yet) rather than "the last event was
+        an announcement" -- the game logs a relabel and some transitions after putting a prompt up,
+        so the prompt is never the last line.
 
-        Walked forwards, and each announcement matched only against *its own* resolutions. An
-        earlier version scanned backwards for "a resolution of anything" and so never once
-        recognised a waiting win: `win` is both an announcement and one of the events that
-        resolves a gamble result, so the win resolved itself the moment it was logged and the
-        round fell back to the ordinary window. Replayed over both of this cabinet's logs -- 525
-        rounds, 10 hours of play -- that closed 25 winning rounds mid-round, before the collect
-        they were waiting for.
+        Walked **forwards**, each announcement matched only against *its own* resolutions. Scanning
+        backwards for "a resolution of anything" never recognised a waiting win, `win` being both an
+        announcement and a resolution of a gamble result, which closed 25 winning rounds mid-round
+        over 525 replayed rounds.
         """
         if self.terminal:
             return None
@@ -324,18 +280,10 @@ class Action:
     def moved_on(self, event: gamelog.Event) -> bool:
         """Whether this event means the game has left this round behind.
 
-        A round is held open for as long as the game waits for the player, which is unbounded on
-        purpose -- but unbounded must not mean "forever, even if the answer never gets logged".
-        Two events say the answer is not coming:
-
-          * `game_started` -- the client restarted. Whatever the round was waiting for died with
-            the old process.
-          * a second `bet_locked` -- a fresh wager was staked, so this is a new game. Free spins
-            and respins do not stake, and across 538 replayed rounds none logged `bet_locked`
-            twice, so a second one is never part of the same round.
-
-        Without this, a win left standing when the cabinet restarted swallowed the next 11 hours
-        of play into one folder -- measured, replaying real logs.
+        Unbounded must not mean "forever, even if the answer never gets logged". Two events say it is
+        not coming: `game_started` (the client restarted) and a second `bet_locked` (a fresh wager, so
+        a new game -- free spins do not stake, and no round in 538 replayed logged it twice). Without
+        this, one abandoned win swallowed 11 hours of play into a single folder.
         """
         if not self.events:
             return False        # the event that opened the round is not a boundary in it
@@ -345,12 +293,10 @@ class Action:
 
     @property
     def awaiting_collect(self) -> bool:
-        """Whether this round is sitting on a win that nobody has answered yet.
+        """Whether this round is sitting on a win nobody has answered yet.
 
-        The round is genuinely unfinished: the game will not log its game over until the win is
-        collected or gambled, and it will wait forever for that. So the round stays open, and the
-        collect -- and the game over that follows it -- land in the folder of the spin they
-        belong to.
+        Genuinely unfinished: the game logs no game over until the win is collected or gambled, so the
+        round stays open and the collect lands in the folder of the spin it belongs to.
         """
         if self.terminal:
             return False
@@ -370,10 +316,8 @@ class Action:
     def kinds(self) -> list[str]:
         """Everything this round was, in the order it happened.
 
-        Not one label: a round is routinely several things at once -- a spin that triggered a
-        bonus, awarded a jackpot, offered the win and had it gambled is all of those, and
-        picking one would throw the rest away. Chronological order so the folder name reads as
-        the story of the round: `007_spin+hold-and-spin+jackpot+win+collect`.
+        Not one label -- a round is routinely several things at once, and picking one throws the rest
+        away. Chronological, so the folder name reads as the round: `007_spin+jackpot+win+collect`.
         """
         names = self.names
         bet, denom = self.bet

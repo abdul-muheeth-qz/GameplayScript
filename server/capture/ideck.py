@@ -1,55 +1,27 @@
-"""The i-Deck: the "Virtual OLED" button panel.
+"""The i-Deck: the "Virtual OLED" button panel that `OledPanelSvc.exe` draws into an SDL window.
 
-`OledPanelSvc.exe` draws a cabinet's OLED button panel into an SDL window so a developer can
-click it. Repeat Bet on that panel starts a spin.
+The button map is parsed from the service's own layout file, `virtual_oled.xml`, so it stays right
+for a different cabinet. The panel reports its geometry exactly, and every press after the fact
+(`Button Pressed ID=<hex>`), which is what makes a click verifiable -- but **not the label text**,
+checked three ways: it logs no text at all, `BetButtonPanelLayout` is compiled into the Unity
+assemblies, and the labels are rendered from strings with a bitmap font rather than picked from
+images. So "Repeat Bet" vs "Collect Win" comes from the game's state, not the panel.
 
-The button map is not hardcoded. It is parsed from the same layout file the service itself
-reads, `virtual_oled.xml`, found through the CABINET_MODULE environment variable -- so it
-stays right for a different cabinet, and the report always shows what is really there.
+**Four things make a click land, and all four are load-bearing.** The first three now live in
+`winfocus`, shared with `gameclick`, and the fourth is a property of the whole process:
 
-What the panel will and won't tell you:
+1. **The real cursor is parked on the target button** -- SDL re-reads GetCursorPos while a button is
+   held, which overrides the position a posted message carried.
+2. **The click is posted, never injected with SendInput.** The game window overlaps the panel and
+   would eat an injected click. (`gameclick` may inject, which is not a contradiction: when the game
+   *is* the target, topmost is what you want.)
+3. **wParam carries MK_LBUTTON on the down message** and 0 on the up, or SDL decides no button is
+   down and drops the click silently.
+4. **This process stays DPI-unaware.** Windows divides coordinates in messages posted from a
+   DPI-aware process to a DPI-unaware window -- by 1.25 here, a whole column left.
 
-  * **Its geometry, exactly** -- 14 buttons, their rectangles, and the physical position each
-    one is logged under. From the layout file.
-  * **Every press, after the fact** -- `C:\\logs\\OledPanelSvc.log` records
-    "Button Pressed ID=<hex>" whatever caused it, which is what makes a click verifiable.
-  * **Its current mode, indirectly** -- the game logs `BetButtonPanelLayout.ButtonPanelStateChanged`
-    on every relabel and logs the state machines that decide the labels, so the mode is
-    inferable (see gamelog.current_state).
-  * **Not the label text.** Checked three ways: `OledPanelSvc.log` logs no text at all
-    (`HandleDisplayText` never fires; only a ~60 s `HandleInvertDisplayPixels` for OLED
-    burn-in); no OLED or button-panel config exists in the game tree, because
-    `BetButtonPanelLayout` is compiled into the Unity assemblies; and the labels are *rendered
-    from strings* with a bitmap font (`arial_15_oled.fnt` plus a PNG atlas) rather than picked
-    from a set of images, so there is no asset id to read back. So "Repeat Bet" vs "Collect
-    Win" is known from the game's state, not from the panel.
-
-Getting a click to land took some finding out, and all four of these are load-bearing. The
-first three now live in `winfocus` (`cursor_parked`, `post_message`), shared with `gameclick`,
-and the fourth is a property of the whole process -- but they were all found here, so they are
-recorded here:
-
-1. **The real cursor is parked on the target button.** SDL re-reads GetCursorPos while a
-   mouse button is held, which overrides the position a posted message carried. Leave the
-   cursor elsewhere and the press lands wherever it happens to be -- reliably the wrong
-   button, or none at all.
-2. **The click is posted as window messages, not injected with SendInput.** The game window
-   overlaps the panel, and an injected click goes to whichever window is topmost at that
-   point, so it hits the game and the panel sees nothing. A posted message reaches the
-   panel's HWND whatever the z-order, and doesn't disturb the focus. (`gameclick` may inject,
-   and that is not a contradiction: when the game *is* the target, being topmost is what you
-   want. It is still wrong for the panel.)
-3. **wParam carries MK_LBUTTON on the down message** and nothing on the up. SDL works out
-   which buttons are held from that mask; post WM_LBUTTONDOWN with wParam=0 and it decides
-   no button is down and drops the click silently.
-4. **This process stays DPI-unaware.** Windows DPI-converts coordinates in messages posted
-   from a DPI-aware process to a DPI-unaware window -- here dividing them by 1.25, which
-   lands the click a whole column to the left. Staying unaware keeps the layout file, posted
-   messages and SetCursorPos all in one coordinate space, with no DPI arithmetic anywhere.
-
-Every press is confirmed against the service log. That closes the gap that makes injected input
-so awkward to debug: without it, a click that landed nowhere is indistinguishable from one that
-worked.
+Every press is confirmed against the service log, without which a click that landed nowhere is
+indistinguishable from one that worked.
 """
 
 from __future__ import annotations
@@ -68,10 +40,9 @@ DEFAULT_PROCESS = "OledPanelSvc.exe"
 DEFAULT_WINDOW_CLASS = "SDL_app"
 DEFAULT_LOG = r"C:\logs\OledPanelSvc.log"
 
-# How long the button is held down, and how long to wait for OledPanelSvc.log to confirm the
-# press. Both are mechanics of this panel rather than anybody's preference, so they live here
-# instead of in config.json -- and the confirmation is what makes a silent miss impossible,
-# so a person shortening it from a config file is not a change worth inviting.
+# The hold, and how long to wait for OledPanelSvc.log to confirm the press. Mechanics of this panel
+# rather than preferences, so not config -- and the confirmation is what makes a silent miss
+# impossible, so shortening it is not a change worth inviting from a file.
 CLICK_HOLD_MS = 80
 CONFIRM_TIMEOUT_S = 2.0
 
@@ -96,16 +67,13 @@ class IdeckError(RuntimeError):
 class Button:
     """One button on the panel: a name, a rectangle, and a position.
 
-    `position` is the panel's *physical* position -- numbered down each column, left to
-    right -- and it is what the service log reports for a press. Deliberately not the layout
-    file's `button_id`, which is a different number for the same button: the file says
-    "button_id has to match the position in btnIdToLegacyId", and that translation table
-    lives inside the service binary. So position is derived from the geometry here and
-    checked against the log on every press.
+    `position` is the *physical* position -- numbered down each column, left to right -- and what the
+    service log reports for a press. Deliberately **not** the layout file's `button_id`, which is a
+    different number translated by a table inside the service binary, so it is derived from the
+    geometry here and checked against the log on every press.
 
-    The name is fixed by the cabinet. What the button *does* changes with game state -- the
-    bottom row is currently credit multipliers, and Rebet reads "Collect Win" while a win is
-    pending -- which is why the mode is reported from the game's state alongside this map.
+    The name is the cabinet's fixed one; what the button *does* changes with game state, which is why
+    the mode is reported from the game's state alongside this map.
     """
 
     __slots__ = ("name", "position", "x", "y", "width", "height")

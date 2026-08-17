@@ -108,9 +108,8 @@ class ObsSession:
     ) -> bool:
         """Start OBS if it isn't already up. Returns whether we launched it.
 
-        Nothing to do if the port already answers. If OBS is running but the port is
-        closed, the server simply isn't enabled -- connect() says so, and starting a
-        second instance would only raise OBS's modal "already running" dialog.
+        If OBS is running with the port closed, the websocket server is not enabled -- connect()
+        says so, and a second instance would only raise OBS's modal "already running" dialog.
         """
         if self.port_open():
             return False
@@ -296,10 +295,8 @@ class ObsSession:
     def video_settings(self) -> dict | None:
         """OBS's canvas and output resolution, or None if it wouldn't say.
 
-        Screenshots are rendered straight from the source and are unaffected by any of this. The
-        *recording* is the program output, so `output` is the resolution the video is written at
-        -- which is why it is worth reporting: a 1920x1080 game recorded through a canvas scaled
-        to 1280x720 comes out soft, and nothing else in the run would mention it.
+        Only the *recording* cares -- it is the program output. Worth reporting because a 1920x1080
+        game recorded through a canvas scaled to 1280x720 comes out soft and nothing else would say.
         """
         try:
             resp = self._cl.get_video_settings()
@@ -320,10 +317,8 @@ class ObsSession:
     def framing(self, scene: str, source: str) -> dict | None:
         """How big the source is drawn in the scene, against the canvas it is drawn on.
 
-        Only the recording cares. A screenshot is rendered from the source itself, so it is right
-        whatever the scene does -- but the video is the canvas, and a portrait game stretched to
-        1080x1920 bounds on a 1920x1080 canvas records with its top and bottom cut off while
-        every screenshot looks perfect. That is worth one warning.
+        Only the recording cares. A portrait game stretched to 1080x1920 bounds on a 1920x1080 canvas
+        records with its top and bottom cut off while every screenshot looks perfect.
         """
         video = self.video_settings()
         if not video:
@@ -371,11 +366,9 @@ class ObsSession:
     def set_record_directory(self, path: str, attempts: int = 3, delay: float = 0.5) -> bool:
         """Point OBS's recording folder somewhere else. False if it wouldn't.
 
-        Retried, because OBS answers this with a 500 for a second or two after a recording stops
-        -- it is still finalising the file (measured here: one refusal immediately after a stop,
-        three successes half a second later). Not fatal when it fails for good:
-        SetRecordDirectory arrived in obs-websocket 5.3, and either way the video still gets made,
-        it just lands in OBS's own folder, which the caller says out loud.
+        Retried, because OBS answers with a 500 for a second or so after a recording stops while it
+        finalises the file. Not fatal when it fails for good -- SetRecordDirectory needs
+        obs-websocket 5.3, and the video is still made in OBS's own folder.
         """
         for attempt in range(1, attempts + 1):
             try:
@@ -404,24 +397,18 @@ class ObsSession:
 class Recording:
     """OBS's own video of a run, left in the run folder next to the frames.
 
-    Two things are deliberately left alone rather than forced:
+    Two things are left alone rather than forced: an OBS already recording (someone else's, not ours
+    to stop) and a record folder OBS will not change (the video is still made, in OBS's folder, and
+    the path reported). **Nothing here may end a run** -- the frames are the point, so every failure
+    is a warning and `active` goes False.
 
-      * **OBS already recording.** That is someone else's recording and stopping it is not ours
-        to do, so the run says so and records nothing itself.
-      * **A record folder OBS won't change.** The video is still made; it lands in OBS's own
-        folder and the path is reported instead.
-
-    Nothing in here may end a run. The frames are the point and the video is a bonus, so every
-    failure is a warning and `active` goes False.
-
-    Both ends are asynchronous, and both are waited out rather than assumed: StartRecord answers
-    about two seconds before any frame is written (`_rolling`), and StopRecord answers before the
-    file is closed, with muxing still to finish (`_settled`).
+    Both ends are asynchronous and both are waited out rather than assumed: StartRecord answers ~2 s
+    before any frame is written (`_rolling`), and StopRecord answers before the file is closed
+    (`_settled`).
     """
 
-    # "spin", not "recording": the run folder contract names spin.mp4 (server/frames.py's
-    # neighbours in CLAUDE.md), and this default is now the only place that name is set --
-    # it used to be config.json's `record.name`, which restated it.
+    # "spin", not "recording": the run folder contract names spin.mp4, and this default is the only
+    # place that name is set.
     def __init__(self, obs: ObsSession, folder: str, name: str = "spin",
                  stop_wait_s: float = 20.0, start_wait_s: float = 10.0):
         self.obs = obs
@@ -430,7 +417,6 @@ class Recording:
         self.stop_wait_s = float(stop_wait_s)
         self.start_wait_s = float(start_wait_s)
         self.active = False
-        self.foreign = False              # OBS was already recording; not ours to stop
         self.started_at = ""
         self.framing: dict | None = None
         self.restore_dir: str | None = None
@@ -443,7 +429,6 @@ class Recording:
         not the same question a screenshot answers.
         """
         if self.obs.recording():
-            self.foreign = True
             LOG.warning("WARNING: OBS is already recording, so this run leaves that recording "
                         "running rather than stopping someone else's -- there will be no video "
                         "in the run folder")

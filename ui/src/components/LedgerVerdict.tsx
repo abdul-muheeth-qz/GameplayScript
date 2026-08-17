@@ -3,9 +3,8 @@ import { Heading } from "@/components/FramePanel"
 import { cn } from "@/lib/utils"
 
 /**
- * The whole product answers one arithmetic question, so the arithmetic is the hero:
- * the three meters worked down a column, ruled off, and compared against what the
- * cabinet actually showed afterwards -- the shape of the audit slip this replaces.
+ * The arithmetic is the hero: three meters worked down a column, ruled off, and compared against
+ * what the cabinet showed -- the shape of the audit slip this replaces.
  */
 
 const STAMP = {

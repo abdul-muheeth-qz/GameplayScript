@@ -1,55 +1,33 @@
 #!/usr/bin/env python
-"""Watch someone play, and capture a folder per round.
+"""Watch someone play, and capture a folder per round. **This presses nothing.**
 
-    python -m capture.watch              # watch until Ctrl-C
-    python -m capture.watch --dry-run    # check everything, shoot one frame, press nothing, exit
-    python -m capture.watch --duration 900 --max-rounds 40
+    python -m server.capture.watch              # watch until Ctrl-C
+    python -m server.capture.watch --dry-run    # check everything, shoot one frame, exit
+    python -m server.capture.watch --duration 900 --max-rounds 40
 
-This presses nothing. A person plays the cabinet by hand -- spins, changes the denomination,
-collects, gambles, starts a Hold & Spin, sits through a bonus -- and this notices each of those
-from the logs, screenshots the screen while it happens, and writes down what the game said. It
-is the passive half of spin.py: same OBS, same windows, same two logs, no click.
+The passive half of spin.py -- same OBS, same windows, same two logs, no click. A person plays by
+hand and this recognises each action from the logs, screenshots it, and writes down what the game
+said.
 
-**One folder is one whole round**, from the bet to the game over: the spin, the reels, any
-feature, the win offer, and the gamble or collect that answers it. The game itself draws that
-boundary -- it does not log `GameOverMsg` until a win has been collected or gambled -- so
-following it to `game_over` keeps a round together instead of filing the collect separately.
-(`gamelog.TERMINAL` stops at the win because spin.py has to: the press that resolves it is one
-spin.py will never make. This tool is watching the person who is about to make it.) Things that
-are not part of a round -- a denomination change, a bet change -- get a folder of their own.
+**One folder is one whole round**, bet to game over: the spin, the reels, any feature, the win offer,
+and the collect or gamble that answers it. The game draws that boundary itself by not logging
+`GameOverMsg` until a win is answered, which is why this has its own `actions.ROUND_OVER` rather
+than `gamelog.TERMINAL` -- spin.py must stop at the win, this is watching the person about to
+resolve it. A bet or denomination change gets a folder of its own.
 
-    captures/watch_2026-08-06_170314/
-      run.log
-      session.json                    rewritten after every round, so an interruption costs nothing
-      rounds/
-        003_spin+win+collect/
-          before.png                  the standing frame from just before the press
-          trigger.png                 taken the moment the round was noticed
-          m01_reels_stopped.png       one per milestone -- a Hold & Spin has twenty-odd
-          m03_take_win.png
-          after.png                   once the game says it is finished
-          round.json
+    captured_files/watch_<stamp>/
+      session.json                 rewritten after every round, so an interruption costs nothing
+      rounds/003_spin+win+collect/
+        before.png  trigger.png  m01_reels_stopped.png ...  after.png  round.json
 
-Recognising a round is the whole problem here. spin.py knows what a spin is because it caused
-one; this has to read it off the log (see actions.py). Two sources, because neither is enough
-alone: the panel service's log says *which button* was pressed but not what it did, and the
-game's log says what happened but not what was touched -- and a collect made on the touchscreen
-never reaches the panel log at all.
+Recognising a round is the whole problem (see actions.py), and it needs both logs: the panel service
+says *which button* was pressed but not what it did, the game says what happened but not what was
+touched -- and a collect on the glass never reaches the panel log at all.
 
-Knowing when a round is *over* is the same problem spin.py has, solved the same way: the game
-log is asked, never a fixed delay. An ordinary spin is ~3.3 s and a Hold & Spin ran 53 s. Three
-differences, all measured by replaying real logs (see the settings in Watch.__init__):
-
-  * A bet or denomination change produces no game over and is complete the moment it is logged,
-    so it closes on a two-second window rather than the gameplay one. Nothing else qualifies --
-    an unanswered touch had 13 s of silence before the reels moved.
-  * The gameplay window itself is much longer than spin.py's, because a watcher has no press to
-    anchor to and the silences inside a feature run to 29 s.
-  * When the game is waiting for the *person* -- a win on the collect/gamble offer, a Hold & Spin
-    respin prompt, a gamble waiting for a card -- it will wait forever, and so does the round.
-    One sat 3.2 hours. There is no bound to guess at and no clock running: the round stays open,
-    in one folder with one `after` frame, until the player answers it (`watch.player_wait_s`,
-    0 by default, meaning as long as it takes).
+Knowing when a round is over is spin.py's problem solved the same way, by asking the log. Three
+differences, all measured by replaying real logs: a wager change closes on a 2 s window since it has
+no outcome to wait for; the gameplay window is much longer than spin.py's, a watcher having no press
+to anchor to; and when the game waits for the *person* it waits forever, so the round does too.
 """
 
 from __future__ import annotations
@@ -97,25 +75,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # -- the waits -------------------------------------------------------------
-# `watch.py` has spin.py's rule -- no fixed delay anywhere -- and four windows instead of one,
-# because here the log going quiet means different things. All four were tuned by replaying 11
-# hours of real play (485 rounds) through `actions.py`, so they are measurements and live beside
-# the loop rather than in config.json; re-run that replay after changing any of them.
+# spin.py's rule -- no fixed delay anywhere -- with four windows instead of one, because here the log
+# going quiet means different things. All four were tuned by replaying 11 hours of real play through
+# `actions.py`; re-run that replay after changing any of them.
 
-# The gameplay wait. It restarts on every event, so a feature is followed for as long as it keeps
-# talking. 35 s is not a typo and is nearly free: 93% of actions close on the game's own terminal
-# event, so this is a fallback, and the silences inside a feature run to 29 s. At spin.py's 8 s,
-# 49 spin outcomes fell outside every action; at 35 s, two did.
+# The gameplay wait, restarting on every event. 35 s is not a typo and is nearly free: 93% of actions
+# close on the game's own terminal event, so this is a fallback, and the silences inside a feature run
+# to 29 s. At spin.py's 8 s, 49 spin outcomes fell outside every action; at 35 s, two did.
 IDLE_TIMEOUT_S = 35.0
 # For an action that is complete as soon as it stops logging -- a wager change, and nothing else.
 QUIET_S = 2.0
 # How long the game may be quiet after announcing something it will get on with by itself: a
 # bonus intro playing, measured at 68.4 s.
 LONG_WAIT_S = 90.0
-# How long it may wait for the *person*: a win on the offer, a Hold & Spin respin prompt, a gamble
-# waiting for a card. 0 means "as long as it takes", which is what the game itself does -- it has
-# no timeout there, so any bound is a guess, and a wrong guess splits one spin across two folders.
-# `Action.moved_on` and `Watch.ceiling_from` are what stop unbounded becoming stuck.
+# How long it may wait for the *person*. 0 means "as long as it takes", which is what the game does --
+# any bound is a guess, and a wrong one splits a spin across two folders. `Action.moved_on` and
+# `Watch.ceiling_from` are what stop unbounded becoming stuck.
 PLAYER_WAIT_S = 0.0
 # The settle before an after shot. Scheduled, never slept -- the press after a game over was
 # measured at 0.44 s, inside this.
@@ -136,11 +111,10 @@ MILESTONE_MIN_GAP_MS = 400
 class Watch:
     """The session: two logs polled in one loop, and the frames that come out of it.
 
-    Everything is time-sliced rather than waited on. The obvious shape -- notice a press, sleep
-    for the settle delay, shoot -- would go deaf for the length of the sleep, and a player does
-    not wait for us: the collect and the re-bet after a win can be half a second apart. So the
-    after shot is *scheduled* and the loop keeps polling. Nothing is lost by that; both logs are
-    read by byte offset, so events that arrive while we are busy are still there next tick.
+    Everything is time-sliced rather than waited on. Sleeping for the settle delay would go deaf for
+    its length, and a player does not wait for us -- the collect and the re-bet after a win can be
+    half a second apart. So the after shot is *scheduled* and the loop keeps polling; both logs are
+    read by byte offset, so events arriving while we are busy are still there next tick.
     """
 
     def __init__(self, obs, cfg: dict, run_dir: str, game, panel, watcher, press_log,
@@ -218,9 +192,8 @@ class Watch:
     def shoot(self, path: str, kind: str) -> dict | None:
         """One frame, or None if OBS refused it.
 
-        A refusal must not end the session. The game window can go away mid-watch -- a
-        denomination change reloads the scene -- and the right answer is to note the gap, find
-        the window again and carry on, not to lose the next twenty minutes of play.
+        A refusal must not end the session: the game window can go away mid-watch, and the right
+        answer is to note the gap and carry on rather than lose the next twenty minutes of play.
         """
         try:
             entry = spin.shot(self.obs, self.source, path, self.size, self.format, self.quality)
@@ -235,10 +208,8 @@ class Watch:
     def preroll(self, now: float) -> None:
         """Keep a recent frame of the idle screen, so an action has a genuine 'before'.
 
-        An action is only noticed once it has started, so the first frame it can take is already
-        a fraction of a second late -- long enough for the reels to be moving. This keeps one
-        standing frame while nothing is happening; when an action opens, that frame becomes its
-        before shot, with its age recorded rather than glossed over.
+        An action is only noticed once it has started, by which point the reels may be moving. So one
+        standing frame is kept while nothing happens, and its age is recorded rather than glossed over.
         """
         if self.preroll_s <= 0 or self.action is not None or now < self._next_preroll:
             return
@@ -291,10 +262,9 @@ class Watch:
     def open(self, trigger: str, deck: dict | None = None) -> actions.Action:
         """Start a round.
 
-        One round is one folder, from the trigger to the game over -- including a wait for the
-        player in the middle of it, however long. Nothing is ever closed and reopened: while the
-        game is parked on the collect/gamble offer it will take no other input, so the next thing
-        the player does is by definition the thing that answers it, and it belongs to this round.
+        One round is one folder, trigger to game over, including however long it waits for the player.
+        **Nothing is ever closed and reopened**: parked on the offer the game takes no other input, so
+        the next thing the player does is by definition what answers it.
         """
         index = len(self.done) + 1
         action = actions.Action(index, trigger, datetime.now(), deck, dict(self.wager))
@@ -350,11 +320,8 @@ class Watch:
     def cut_short(self, why: str) -> None:
         """Finish the open action now, because the player has started another one.
 
-        Measured here: after the game logs its game over, the next press came 0.44 s later --
-        sooner than the 0.8 s the after shot waits for the screen to settle. Without this, that
-        press and everything it caused would be filed under the previous spin, and the spin
-        before it would never get an after shot at all. So the moment the game has declared an
-        action finished, the next thing the player does starts a new one, settle delay or not.
+        Measured: the press after a game over came 0.44 s later, inside the 0.8 s settle. Without
+        this it would be filed under the previous spin, which would never get an after shot at all.
         """
         if self.action is None:
             return
@@ -472,12 +439,11 @@ class Watch:
                  else self.long_wait_s if waiting == "game"
                  else self.quiet_s if action.settles_fast else self.idle_timeout)
         if quiet <= 0:
-            # The game is waiting for the person and has no timeout of its own, so neither does
-            # the round: it stays open until they answer it. The ceiling is pushed along with it,
-            # because it asks whether the round has been *running* too long and a round parked on
-            # an offer is not running -- otherwise a round held for an hour is over the ceiling
-            # the moment the player answers, and closes before the game logs the game over.
-            # Said out loud now and then, because a held round otherwise looks like a hung tool.
+            # The game has no timeout here and neither does the round. The ceiling is pushed along
+            # with it, because it asks whether the round has been *running* too long and a round
+            # parked on an offer is not running -- otherwise a round held for an hour closes the
+            # instant it is answered, before the game logs the game over. Said out loud now and
+            # then, because a held round otherwise looks like a hung tool.
             self.ceiling_from = now
             self.held(now, action)
             return
@@ -514,10 +480,9 @@ class Watch:
         deadline = time.monotonic() + duration if duration else None
         while True:
             self.tick()
-            # Both limits wait for the open action to finish rather than cutting it in half --
-            # except when it is only open because the game is waiting for the player and that wait
-            # is unbounded, which would mean never reaching the limit at all. finish() closes the
-            # round on the way out, exactly as Ctrl-C does.
+            # Both limits wait for the open action to finish rather than cutting it in half, except
+            # when it is only open on an unbounded player wait -- which would never reach the limit.
+            # finish() closes the round on the way out, exactly as Ctrl-C does.
             held = self.player_wait_s <= 0 and self.action is not None \
                 and self.action.waiting_for == "player"
             if self.action is None or held:

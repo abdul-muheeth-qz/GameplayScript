@@ -3,16 +3,9 @@ import { api, FRAME_BLURBS, FRAME_LABELS, FRAME_STAGES, type RunState } from "@/
 /**
  * Every frame the run captured, side by side, at its own size.
  *
- * Two of them on a losing spin and three when it won -- the third being the meter after the
- * win was collected on the glass -- so the count comes from the run rather than from a
- * hardcoded pair. A losing spin showing two frames and a winning one showing three is the
- * point, not an inconsistency.
- *
- * The game runs in a portrait window a few hundred pixels wide, so these PNGs already
- * hold every pixel there is. Scaling them up would only invent detail and make a bad
- * OCR read look like a bad screenshot, so they are shown at natural width and allowed
- * to scroll. The size is read off the run rather than written here -- it changes with
- * the game window, and a caption that lies about it is worse than no caption.
+ * The count comes from the run, never a hardcoded pair: two on a losing spin, three when it won.
+ * The game window is only a few hundred pixels wide, so these PNGs already hold every pixel there
+ * is -- scaling them up would invent detail and make a bad OCR read look like a bad screenshot.
  */
 export function FramePanel({ run }: { run: RunState }) {
   const frames = FRAME_STAGES.filter((k) => run.frames[k])

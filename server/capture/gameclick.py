@@ -5,93 +5,37 @@
     python -m server.capture.gameclick --calibrate           # click TAKE WIN by hand; get the point
     python -m server.capture.gameclick take_win              # a named target from config.json
 
-Why this exists: on the i-Deck there is no separate TAKE WIN. Rebet relabels to "Collect Win"
-while a win is pending and means *collect **and** bet again*, so one press moves the money twice
-and `before.png`/`after.png` no longer bracket a single spin -- the pair is checked against
-`cash + win - bet`, and a conflated press puts a collect inside that subtraction. On the glass
-the two actions are separate, so clicking the game is the only way to get a clean pair.
+**Why it exists:** the i-Deck has no separate TAKE WIN. Rebet relabels to "Collect Win" and means
+*collect **and** bet again*, so one press moves the money twice and the frames no longer bracket a
+single spin. Counted over both logs, the only standalone collect is a touch on the glass -- every
+deck route also spins, and the panel's `Collect` is the cabinet's cashout.
 
-**There is no non-click way to do it.** Every exit from the gamble offer in this cabinet's two
-log files (33 MB) was one of:
+The game logs a click twice over in the same millisecond (`touch` and `take_win` in
+`gamelog.EVENTS`), which gives every click a graded verdict rather than a silent maybe: `touch` says
+it reached the game, `take_win` that it hit the intended widget, and no `bet_locked` that it did not
+also start a spin. `touch` is the glass specifically -- an i-Deck press logs `SpinButtonMsg` with no
+`TouchMsg` at all.
 
-    GDK.Common.ServerAPI.SpinButtonMsg     57   the deck's Rebet -- collects *and* spins
-    double_up_offer_decline                26   TAKE WIN on the glass -- collect only
-    GDK.Common.ServerAPI.BetValueButtonMsg 24   a bet-level button -- collects *and* spins
-    double_up_offer_accept                  7   GAMBLE on the glass
-    BetsPerUnitSelectButtonMsg / MaxBetButtonMsg  6 / 1   the deck again
-    FORCE_TOUCH_EVENT                       1   *not an input* -- the client auto-declining a
-                                                recovered win while restarting
+**The one trap:** all 87 touches in the log hit a live widget, so nothing says what a touch on dead
+space does, and silence after a click is genuinely ambiguous. `verdict()` reports both readings
+rather than picking one. The way out is to probe at a point *known* to be live, which is what
+`--calibrate` produces.
 
-so the only standalone collect is a touch, and the panel's `Collect` button is the cabinet's
-cashout rather than a take-win.
+Two things invert the i-Deck's rules, and both were measured:
 
-What makes that safe to automate is that the game logs the click twice over, in the same
-millisecond:
+  * **Targets are normalized fractions, keyed by game.** There is no `virtual_oled.xml` for Unity's
+    UI and the client area moves (612x961, 638x1048, 1080x1849 all observed), so a fraction survives
+    a resize -- but not a different game, hence per-executable and never a fallback.
+  * **`sendinput`, not `post`.** Probed at one point against a real pending win: `post` unfocused →
+    nothing, `post` foregrounded → nothing, `sendinput` foregrounded → `touch` + `take_win`. The
+    injection landing is what makes the two silences conclusive. `post` stays selectable and
+    documented as not working here, with no fallback between them.
 
-    00:12:45.798 [GameSession.MsgToServer] ... msg[GDK.Common.ServerAPI.TouchMsg]
-    00:12:45.798 StateMachine[GambleOfferStateMachine] ... on event [double_up_offer_decline]
-
-Both are already in `gamelog.EVENTS` as `touch` and `take_win`, which gives every click a
-graded verdict instead of a silent maybe -- see `verdict()`. `touch` says the click reached the
-game, `take_win` says it hit the intended widget, and the absence of `bet_locked` says it did
-not also start a spin. That is the same discipline as `ideck.PressWatcher`: nothing here
-believes a click worked because the API call returned success.
-
-`touch` is specifically the *glass*, and that was checked rather than assumed. Counted over
-this cabinet's current log: 87 `TouchMsg`, and the line after each is a widget reacting -- 17
-`double_up_offer_decline`, 17 `SpinButtonMsg`, 12 `BetValueButtonMsg`, 6 `double_up_offer_accept`,
-23 Hold & Spin starts and so on -- always in the same millisecond. An i-Deck press, by contrast,
-produces the same `SpinButtonMsg` with **no** `TouchMsg` at all (verified against a press this
-tool made itself at 16:53:51). So the game has its own on-screen SPIN and bet buttons, and
-`TouchMsg` is what separates a touch of those from the physical deck.
-
-**The gap that leaves, and it is the one trap in this module:** all 87 of those touches hit a
-live widget, so there is no evidence in the log about what a touch on *dead space* does. It may
-log a bare `TouchMsg`, or it may log nothing whatever. So silence after a click is ambiguous --
-undelivered, or delivered onto nothing -- and `verdict()` must not claim otherwise. The way out
-is not a cleverer reading of the log: it is to probe at a point that is *known* to be live,
-which is what `--calibrate` produces. Silence at a calibrated point means the delivery method is
-wrong, and nothing else.
-
-Two things differ from the i-Deck, and both are the reason this is a separate module:
-
-  * **The target has no layout file.** `virtual_oled.xml` gives the panel's buttons exactly;
-    Unity's UI gives us nothing, so the point is a *normalized* fraction of the client area
-    (`config.json` -> `game.games[<exe>]`, or `game.targets` in a one-game checkout -- see
-    `targets_for`), obtained with `--calibrate` from a real human click that the log confirms hit
-    TAKE WIN. Normalized rather than pixels because the client area does change: it measured
-    612x961 when the extract ROI boxes were tuned, 638x1048 the same day, and 1080x1849 on
-    FortuneOx. Normalizing survives a resize, not a different game, which is why the points are
-    keyed by executable.
-  * **A posted message is not enough, and that is measured.** SDL reads its message queue, which
-    is why the panel works; Unity reads Raw Input, which `PostMessage` cannot forge. Both
-    methods were probed at the *same* point, against a real pending win, on 2026-08-11:
-
-        post,      game unfocused   -> nothing logged
-        post,      game foreground  -> nothing logged
-        sendinput, game foreground  -> touch, take_win, and no bet_locked
-
-    The third line is what makes the first two conclusive rather than ambiguous: `sendinput`
-    landing at that point proves the point is live, so the silence was the method and not the
-    coordinate. Focus was ruled out separately, in the second line. Our click produced exactly
-    the sequence a human touch does -- `TouchMsg`, `double_up_offer_decline`, `DontPlayMsg`,
-    `dontplaystate`, `GameOverMsg`, back to `stateIdleWithCredits`.
-
-    So `post` is kept, selectable and **known not to work here**, because a method that silently
-    does nothing is worth being able to name; `sendinput` is what ships. There is **no fallback
-    between them** -- the rule `extract`'s ROI crop follows, for the same reason: with a
-    fallback, "what actually delivered this click?" stops being answerable after the fact.
-
-    `sendinput` is not a contradiction of the i-Deck's ban on it. That ban exists because the
-    game window overlaps the panel and swallows injected clicks; here the game *is* the target.
-    But it carries the i-Deck's problem in reverse, and this is the cost of the whole approach:
-    injected input goes wherever the cursor is, not to an HWND, so **the game has to be
-    topmost**. `click` refuses rather than firing blind when it isn't -- caught on the first
-    real attempt here, where a File Explorer window was covering the game and would have
-    received the click. Hence `winfocus.bring_to_front` and `game.foreground`, and hence the
-    single documented exception to "nothing takes the foreground": collecting a win raises the
-    game window. Nothing else in the pipeline minds -- OBS's Window Capture is z-order
-    independent, and the i-Deck press is posted and therefore z-order independent too.
+    Injected input follows the cursor rather than an HWND, so **the game must be topmost** --
+    `click` refuses rather than firing blind when another window is over the point, which caught a
+    File Explorer window on the first real attempt. Hence `winfocus.bring_to_front`, the single
+    exception to "nothing takes the foreground"; nothing else in the pipeline minds, OBS's Window
+    Capture and the posted i-Deck click both being z-order independent.
 """
 
 from __future__ import annotations
@@ -151,26 +95,15 @@ def find_window(process: str, window_class: str) -> winfocus.Window:
 def targets_for(game_cfg: dict) -> dict:
     """The click targets out of the active game's block (`cfg["game"]`).
 
-    Normalizing a target to the client area makes it survive a *resized* window; it does not make
-    it survive a *different game*, and nothing in the geometry says which it is looking at. So the
-    points are keyed by the executable they were measured on. Measured on this cabinet, the two
-    games do not even agree on which corner the button is in:
+    Normalizing survives a *resized* window and not a *different game*, so the points are keyed by
+    the executable they were measured on -- the two games here do not even agree which corner TAKE
+    WIN is in, and 0.917 of FortuneOx's 1849 px is the empty row beside its DEMO label, 100 px above
+    its button. One real run is that mistake: the click was delivered, landed on nothing, and the
+    capture died with the win still on the offer.
 
-        HuffNPuffLink.exe   take_win [0.124,  0.917 ]   client 612x961
-        FortuneOx.exe       take_win [0.0713, 0.9724]   client 1080x1849
-
-    and 0.917 of FortuneOx's 1849 px is y=1696, which is the empty row beside its DEMO label --
-    30 px above the GAMBLE button and 100 above TAKE WIN. That was a real run
-    (`2026-08-12_131459`): the click was delivered, landed on nothing, and the collect failed
-    with a win still standing on the offer.
-
-    **There is no fallback to another game's points, and that is the whole rule.** Which game's
-    block this is was decided by `game_config.json`'s `active`, and `settings.active_game` already
-    raised if there was no block for it -- so by the time this is called the only thing that can
-    be missing is `targets` itself, which is an *error* rather than a quiet reach for somebody
-    else's coordinates. That is `extract`'s no-fallback ROI rule for the same reason: a wrong
-    coordinate is a click into dead space that costs a whole run to find, and silently
-    substituting one leaves "what was this click aimed at?" unanswerable afterwards.
+    **There is no fallback to another game's points.** A missing `targets` is an error rather than a
+    quiet reach for somebody else's coordinates, which would leave "what was this click aimed at?"
+    unanswerable afterwards.
     """
     targets = game_cfg.get("targets")
     if not targets:
@@ -184,11 +117,8 @@ def targets_for(game_cfg: dict) -> dict:
 
 
 def resolve(window: winfocus.Window, point) -> tuple[tuple[int, int], tuple[int, int]]:
-    """A normalized (x, y) as client and screen coordinates.
-
-    Both are needed and neither substitutes for the other: the posted message carries *client*
-    coordinates in its lParam, while the cursor has to be parked at the *screen* point.
-    """
+    """A normalized (x, y) as client and screen coordinates. Both are needed: the posted message
+    carries *client* coordinates, while the cursor is parked at the *screen* point."""
     try:
         fx, fy = float(point[0]), float(point[1])
     except (TypeError, ValueError, IndexError) as exc:
@@ -291,14 +221,10 @@ def confirm(watcher: gamelog.GameLogWatcher, timeout: float = 2.0,
             interval: float = 0.05) -> list[str]:
     """Event names the game logged after the click, in order.
 
-    Uses `poll` rather than `drain` on purpose. One read of the log yields a whole *batch* while
-    the byte offset advances past all of it, and `touch` and `take_win` land in the same
-    millisecond -- comfortably inside one interval -- so anything that stops part-way through a
-    batch can drop exactly the event this is looking for. `poll` hands back the whole batch.
-
-    Returns as soon as something decisive arrives, so a landed click is not charged the full
-    timeout; a click that only produced a `touch` waits it out, because that is the case where
-    the interesting information is what *didn't* happen.
+    `poll` rather than `drain`, deliberately: `touch` and `take_win` land in the same millisecond, so
+    anything stopping part-way through a batch can drop the event being looked for. Returns as soon
+    as something decisive arrives; a click that only produced a `touch` waits the timeout out,
+    because there the interesting information is what *didn't* happen.
     """
     seen: list[str] = []
     deadline = time.monotonic() + timeout
@@ -315,13 +241,10 @@ def confirm(watcher: gamelog.GameLogWatcher, timeout: float = 2.0,
 def verdict(seen: list[str], expect: str | None = "take_win") -> tuple[bool, str]:
     """Whether the click did what was asked, and a sentence saying what happened.
 
-    Deliberately not symmetrical, because the evidence isn't. A logged action is proof the click
-    landed; a logged `touch` alone is proof it was delivered and hit nothing. **Silence is not
-    proof of anything** -- an undelivered click and a click onto dead space are indistinguishable
-    from here, because no touch of dead space appears anywhere in the log's history to say which
-    it would look like (see the module docstring). So the silent case reports both readings and
-    names the experiment that separates them, rather than picking the likelier one and sounding
-    certain about it.
+    Deliberately asymmetrical, because the evidence is. A logged action proves the click landed and a
+    lone `touch` proves it was delivered and hit nothing, but **silence proves nothing** -- no touch
+    of dead space appears anywhere in the log's history. So the silent case reports both readings and
+    names the experiment that separates them rather than sounding certain.
     """
     did = [name for name in seen if name in ACTIONS]
     if not seen:
@@ -428,10 +351,9 @@ def probe(window, point, method, hold_ms, log_path, confirm_timeout, expect, all
 def calibrate(window, log_path, expect: str, timeout: float) -> tuple[float, float] | None:
     """Wait for a real human click and report the normalized point, if the log agrees it hit.
 
-    Self-verifying, which is what makes it better than reading coordinates off a screenshot: it
-    records where the cursor was *and* checks that the game reacted the way it should have. A
-    point no `take_win` followed is not printed at all, because a coordinate that is wrong in
-    config.json is worse than no coordinate.
+    Self-verifying, which beats reading coordinates off a screenshot: it records where the cursor was
+    *and* checks the game reacted. A point no `take_win` followed is not printed at all, a wrong
+    coordinate in config being worse than none.
     """
     LOG.info("game window: %s", window)
     LOG.info("client area: %dx%d at %s", *winfocus.client_size(window),

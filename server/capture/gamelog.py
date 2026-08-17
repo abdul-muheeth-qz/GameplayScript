@@ -1,30 +1,17 @@
-"""Game events, read live out of the game's own log.
+"""Game events, read live out of the game's own log -- the oracle for what the game is doing.
 
-`HuffNPuffLink.exe` logs both its server and client threads to
-`C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log` at INFO, which makes it an oracle
-for what the game is actually doing -- including the one thing capturing a spin most needs: the
-moment the spin is genuinely over.
+That is why there is no fixed delay anywhere in this stage: an ordinary spin runs 3.3 s from press
+to game over while a Hold & Spin ran 53 s over 23 free spins, so no single number is right for both.
 
-That is why there is no fixed delay anywhere in this tool. Measured on this machine, an ordinary
-spin runs 3.3 s from press to game over, while a Hold & Spin ran 53 s across 23 free spins. No
-single number is right for both, so the game is asked instead of guessed.
+Two traps, both of which cost an afternoon. **The directory timestamp lies** -- the game holds the
+handle open, so `LastWriteTime` read 11:04 while the file was being appended to at 14:31; judge
+liveness by reading the tail. And **it rotates** at ~20 MB, which `logtail` handles; a reader holding
+a byte offset would seek past the end and go quietly silent.
 
-Two traps in this file, both of which cost an afternoon to find:
-
-  * **Its directory timestamp lies.** The game holds the handle open, so `LastWriteTime` read
-    11:04 while the file was being appended to at 14:31. Judge liveness by reading the tail,
-    never by `os.path.getmtime`.
-  * **It rotates** at ~20 MB into `HuffNPuffLink_Theme-YYYYMMDD-HHMMSS.log`. `logtail` handles
-    that; a reader holding a byte offset would seek past the end and go quietly silent.
-
-The markers below are copied from real lines, not guessed. The log is verbose -- ~500 lines
-during a spin, most of it progressive broadcasts -- so matching is deliberately narrow.
-
-Some of these markers describe what the game *did*; a few describe what the player *asked for*
-(`bet_button`, `bet_config_changed`, `denom_changed`, `touch`, and the `via` field on the state
-transitions). Those exist for watch.py, which has no press of its own to time from and has to
-recognise a manual action from the log alone. They are also the only place the cabinet records
-that a human touched the screen rather than the button deck.
+The markers are copied from real lines, not guessed, and matching is deliberately narrow -- the log
+runs ~500 lines during a spin. A few describe what the *player* asked for (`bet_button`,
+`bet_config_changed`, `denom_changed`, `touch`, and `via`); those are for watch.py, which has no
+press of its own to time from, and they are the only record that a human touched the glass.
 """
 
 from __future__ import annotations
@@ -38,74 +25,44 @@ from . import logtail
 
 DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
 
-# How long the log may go quiet before a spin is called over. It **restarts on every
-# event**, which is what lets a 53 s Hold & Spin be followed to its end, so this is a
-# "stopped talking" bound and not a total. A flat total was tried and cut a feature off
-# mid-way. It lives here rather than in config.json because it is a measurement against
-# real log history -- see CLAUDE.md's "Timing invariants".
+# How long the log may go quiet before a spin is called over. It **restarts on every event**, which
+# is what lets a 53 s Hold & Spin be followed to its end -- a flat total was tried and cut a feature
+# off mid-way. A measurement, so it lives here rather than in config.json.
 IDLE_TIMEOUT_S = 8.0
 
-# What ends a spin: the outcome is on screen and the game is waiting for input again.
-#
-# `win` has to be in here. A win leaves the game parked on the collect/gamble offer and it does
-# not emit `game_over` until that is resolved -- and the thing that resolves it is the *next*
-# press, because Repeat Bet reads "Collect Win" in that state and means "collect, then bet
-# again". So waiting for `game_over` on a winning spin would mean waiting for a press this script
-# is never going to make.
+# What ends a spin. `win` has to be in here: a win parks the game on the collect/gamble offer and it
+# does not log `game_over` until the next press resolves that -- a press this script never makes.
 TERMINAL = ("game_over", "win")
 
-# What says the meters have stopped moving, once a terminal event has been reached.
-#
-# `win` is logged at the *start* of the win meter's count-up, not the end of it, so it is the one
-# terminal event that fires while the screen is still changing. Measured over 520 rounds in the two
-# logs on this machine, `win` -> `results_done` is 0.33 s median but 6.3 s at p90 and 44.8 s at
-# worst -- so 28% of winning spins were shot before the meter had finished, and one real run
-# recorded a win of **1.49** on a spin that paid **12.00** (run 2026-08-10_163826: `win` at
-# 16:38:32.987, after shot at 16:38:33.826, meters settled at 16:38:39.300).
-#
-# Ordered most specific first, and both are here because they answer different halves:
-#   win_bang_done -- the count-up itself finishing. 115/115 winning rounds, 6/405 losing ones.
-#   results_done  -- the whole results presentation finishing. 519/520 rounds, win or lose, and
-#       never earlier than win_bang_done (0-18 ms after it). That makes it the marker that
-#       answers "are the meters settled" for a losing spin too, which is what `win_bang_done`
-#       alone cannot do.
-#
-# `game_over` needs none of this: on a loss it already lands *after* `results_done` (0.17 s
-# median, 404/404 losing rounds), so a spin that ends the ordinary way is settled by definition.
+# What says the meters have stopped moving, once a terminal event has been reached. Both are here
+# because they answer different halves: `win_bang_done` is the count-up finishing (115/115 winning
+# rounds, 6/405 losing), `results_done` the whole presentation (519/520 either way, and never
+# earlier than win_bang_done), which is what answers for a losing spin too. Most specific first.
 SETTLED = ("win_bang_done", "results_done")
 
-# "08/05/26 12:06:37.163 19 HuffNPuffLink:19540 INF: ..." -- the game's own clock, which is what
-# event times should be reported in rather than when we happened to read the line.
+# The game's own clock, which is what event times are reported in rather than when the line was read.
 _STAMP_RE = re.compile(r"^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d\d\d)\s")
 _STAMP_FORMAT = "%m/%d/%y %H:%M:%S.%f"
 
 # Ordered: the first pattern that matches a line wins, so the specific ones come first.
 EVENTS: list[tuple[str, re.Pattern]] = [
-    # -- what the player asked for. These are the log's only record of a human doing something,
-    #    and each is a line shape no other rule here matches, so their order doesn't matter.
-    #
-    #    `bet_config_changed` is the good one: it names what changed *and* who changed it.
-    #    reasonForChange[Attract] is the cabinet cycling denominations to itself while nobody is
-    #    playing (8 of them in one log against 41 Player ones), so the reason has to be read
-    #    before treating this as an action.
+    # -- what the player asked for. The log's only record of a human doing something, and each is a
+    #    line shape no other rule matches, so their order does not matter. `bet_config_changed`
+    #    names what changed *and* who changed it -- reasonForChange[Attract] is the cabinet cycling
+    #    denominations to itself while nobody plays, so the reason must be read before acting on it.
     ("bet_config_changed", re.compile(
         r"\[Game\.BetConfigurationChanged\] betChangedFlags\[(?P<flags>[^\]]*)\] "
         r"reasonForChange\[(?P<reason>\w+)\]")),
     ("bet_button", re.compile(r"\[BetManager\.HandleBetButtonPressed\]")),
-    #    The touchscreen. Nothing else in either log knows a touch happened, so without this a
-    #    collect or a Hold & Spin start made by hand is invisible until its consequence lands --
-    #    and `gameclick.verdict` loses the only thing that separates "delivered onto dead space"
-    #    from "never delivered at all", which is the difference between a wrong coordinate and a
-    #    wrong click method.
+    #    The touchscreen, and nothing else in either log knows a touch happened -- without it a
+    #    collect made by hand is invisible, and `gameclick.verdict` loses the only thing separating
+    #    "delivered onto dead space" from "never delivered at all".
     #
-    #    Two line shapes for the one GDK message, because different games on this platform log it
-    #    differently and there is no way to tell from the outside which a game writes. Counted
-    #    over FortuneOx_Client.log: **0** of the first shape and 36 of the second, so with only
-    #    the first this event never fires for that game and every failed click reads as silence.
-    #    Both spell `GDK.Common.ServerAPI.TouchMsg` out in full, which is what keeps them off the
-    #    80 `CreditMeterTouchMsg` lines in the same file -- a touch of the credit meter is not a
-    #    touch of a widget. Verified against that log: 36 matches, none of them a CreditMeter
-    #    line, and no other rule in this list matches any of the 36.
+    #    **Two line shapes for the one GDK message**, both load-bearing: different games log it
+    #    differently, and FortuneOx writes 0 of the first against 36 of the second, so with only the
+    #    first this event never fired for that game and every failed click read as silence. Both
+    #    spell the message out in full, which keeps them off that file's 80 `CreditMeterTouchMsg`
+    #    lines.
     ("touch", re.compile(r"\[GameSession\.MsgToServer\].*msg\[GDK\.Common\.ServerAPI\.TouchMsg\]"
                          r"|ServerProxy\.ClientToServerRequest: "
                          r"GDK\.Common\.ServerAPI\.TouchMsg")),
@@ -126,15 +83,11 @@ EVENTS: list[tuple[str, re.Pattern]] = [
         r"StateMachine\[MysterySymbolStateMachine\w*\].*to \[statePerformMysterySymbolReveal\]")),
     ("cash_symbol", re.compile(r"msg\[CashOnReels\.Common\.SymbolValueMsg\]")),
 
-    # -- features. `feature` names which one: CoinOnReelFS is the Hold & Spin free spins,
-    #    FreeSpinBonus the ordinary ones, SuperFreeSpinBonus the upgraded round.
-    #    The bonus is announced the instant the reels stop, and then a long intro presentation
-    #    plays before `feature_triggered`: measured at 27.7 s and 68.4 s on this machine, with
-    #    the log genuinely silent for 29 s of it. Nothing else says a feature is coming, so
-    #    without this a watcher has no way to tell that silence from a finished spin.
-    #    Verified 1:1 against `feature_triggered` in both logs here (8 and 8, 1 and 1). Note the
-    #    negative case `NoBonusTriggerMsg` is logged on every ordinary spin (855 of them) -- the
-    #    `ServerAPI\.` prefix is what keeps this from matching it.
+    # -- features. `feature` names which one. The bonus is announced the instant the reels stop and
+    #    then a long intro plays before `feature_triggered` -- 27.7 s and 68.4 s here, with the log
+    #    silent for 29 s of it -- and nothing else says a feature is coming, so without this a
+    #    watcher cannot tell that silence from a finished spin. The `ServerAPI\.` prefix is what
+    #    keeps it off `NoBonusTriggerMsg`, logged on all 855 ordinary spins.
     ("bonus_triggered", re.compile(r"msg\[GDK\.Common\.ServerAPI\.BonusTriggerMsg\]")),
     ("feature_triggered", re.compile(
         r"StateMachine\[FreeSpinStateMachine(?P<feature>\w+)\] transitioned from \[stateIdle\] "
@@ -158,24 +111,20 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("jackpot_awarded", re.compile(r"\[ProgressiveFeature\.AwardLevels\]")),
     ("jackpot_celebration", re.compile(r"\[ProgressiveFeature\.CreateCelebrationWinInfoAndPay\]")),
 
-    # -- the win. A win puts the gamble/collect offer up, which is also the moment the i-Deck
-    #    relabels Repeat Bet to Collect Win. Verified both ways: it fires 0.58 s after the reels
-    #    stop on the spin that paid 300.00, and not at all on spins that paid nothing.
+    # -- the win. A win puts the gamble/collect offer up, which is also when the i-Deck relabels
+    #    Repeat Bet to Collect Win. Verified both ways, and validated 5/5 against platform telemetry.
     #
-    #    Two markers that look like wins and are not, both ruled out by measurement:
-    #      [GameStateMachine.PayWin]  -- an unconditional state-machine step, logged exactly once
-    #          per spin win or lose (163 of them against 163 GameOverMsg).
-    #      SyncWinAmountMessage       -- redraws the WIN meter, so it also fires while idle when
-    #          the denomination changes; seen twice between two spins, belonging to neither.
+    #    Two markers that look like wins and are not: `[GameStateMachine.PayWin]` is an
+    #    unconditional step logged once per spin win or lose, and `SyncWinAmountMessage` redraws the
+    #    WIN meter and so fires while idle.
     ("win", re.compile(
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[\w+\] to \[offerState\]")),
     ("progressive_level", re.compile(
         r"\[ProgressiveFeature\.EvaluateCurrentResults\] win level\[(?P<level>\d+)\]")),
 
-    # -- inside the gamble. GambleStateMachine is the double-up round itself and is a different
-    #    machine from GambleOfferStateMachine below, which only offers it; nothing here collides
-    #    with the `gamble_state` rule. The pick is the player's -- the game names the card they
-    #    chose -- and is the only thing in the round a person does.
+    # -- inside the gamble. GambleStateMachine is the double-up round itself, a different machine
+    #    from the GambleOfferStateMachine below that only offers it, so nothing here collides with
+    #    the `gamble_state` rule. The pick is the player's and the only thing a person does here.
     ("gamble_pick", re.compile(
         r"StateMachine\[GambleStateMachine\] transitioned from \[waitForPickState\] to \[\w+\] "
         r"on event \[RED_BLACK_(?P<pick>\w+)_CARD\]")),
@@ -205,14 +154,10 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     ("bet_changed", re.compile(
         r"\[BetManager\.UpdateCurrentBet\]\[CurrentBet .*?TotalBetValue:(?P<total_bet>[\d.]+)")),
 
-    # -- the meters catching up. See SETTLED above for why the after shot waits for this and what
-    #    it read when it didn't. `stateResultsWithInterrupt` is the presentation being allowed to
-    #    be cut short by a press; the transition out of it is the game saying the results display
-    #    is finished, whether it ran to the end or was interrupted.
-    #
-    #    Anchored to `GameStateMachine` on purpose. `stateResultsDone` also appears twice per
-    #    free-spin round on the FreeSpinStateMachines, which is a different thing entirely -- the
-    #    feature finishing its own results, mid-spin.
+    # -- the meters catching up; see SETTLED above. `stateResultsWithInterrupt` is the presentation
+    #    allowed to be cut short by a press, and the transition out of it is the game saying the
+    #    results display is finished either way. Anchored to `GameStateMachine` on purpose:
+    #    `stateResultsDone` also appears twice per free-spin round, which is a different thing.
     ("results_done", re.compile(
         r"StateMachine\[GameStateMachine\] transitioned from \[stateResultsWithInterrupt\] "
         r"to \[stateResultsDone\]")),
@@ -226,12 +171,10 @@ EVENTS: list[tuple[str, re.Pattern]] = [
     # -- the i-Deck. The panel's labels are never logged anywhere, but the game logs every
     #    relabel and the state machines that decide them, which is what makes current_state work.
     ("deck_changed", re.compile(r"BetButtonPanelLayout\.ButtonPanelStateChanged")),
-    #    `via` is the message that caused the transition, and it is how a state change is traced
-    #    back to the input that caused it -- SpinButtonMsg, BetValueButtonMsg and
-    #    MaxBetButtonMsg are the deck; double_up_offer_decline/accept is the touchscreen
-    #    answering the collect/gamble offer. It is captured as an optional field rather than as
-    #    a rule of its own on purpose: a separate rule would match these same lines first and
-    #    current_state() would stop seeing the transitions it reads the deck's mode from.
+    #    `via` is the message that caused the transition, which is how a state change is traced back
+    #    to its input. An optional field rather than a rule of its own, deliberately: a separate rule
+    #    would match these lines first and current_state() would stop seeing the transitions it reads
+    #    the deck's mode from.
     ("idle_state", re.compile(
         r"StateMachine\[IdleStateMachine\] transitioned from \[(?P<from_state>\w+)\] "
         r"to \[(?P<state>\w+)\](?: on event \[(?P<via>[\w.]+)\])?")),
@@ -239,18 +182,13 @@ EVENTS: list[tuple[str, re.Pattern]] = [
         r"StateMachine\[GambleOfferStateMachine\] transitioned from \[(?P<from_state>\w+)\] "
         r"to \[(?P<state>\w+)\](?: on event \[(?P<via>[\w.]+)\])?")),
 
-    #    The win meter's count-up finishing. Below `idle_state` deliberately, and this is the one
-    #    rule in this list whose position costs something. Of the 126 lines in the two logs here
-    #    that match it, 125 are `IdleStateMachine [Non-queued] [WinBangDone] not handled by state
-    #    [statePlaying]` and collide with nothing -- but one was `IdleStateMachine transitioned
-    #    from [stateBangup] to [stateDisabled] on event [WinBangDone]`, and matching that first
-    #    would hide an idle transition from current_state(), which is the one thing this list must
-    #    never do. So that line is read as `idle_state` and this event is missed on it. Nothing
-    #    breaks: `results_done` above is what the after shot waits for, and it fires either way.
-    #
-    #    `\[WinBangDone\]` and not `WinBangDone`: the leading bracket is what keeps it off the 181
-    #    `[FreeSpinWinBangDone_<feature>]` lines, which are one count-up per *free spin* inside a
-    #    feature rather than the spin's own.
+    #    The win meter's count-up finishing. **Below `idle_state` deliberately** -- the one rule here
+    #    placed for its position rather than its specificity. 125 of the 126 matching lines collide
+    #    with nothing, but one is an idle transition, and matching that first would hide it from
+    #    current_state(), which is the thing this list must never do. That line reads as `idle_state`
+    #    and this event is missed on it; nothing breaks, because `results_done` is what the wait
+    #    stops on. `\[WinBangDone\]` and not `WinBangDone`, to stay off the 181
+    #    `[FreeSpinWinBangDone_*]` lines -- one count-up per free spin inside a feature.
     ("win_bang_done", re.compile(r"\[WinBangDone\]")),
 
     # -- the process itself. A denomination change reloads the game's scene, and occasionally the
@@ -398,13 +336,11 @@ class GameLogWatcher:
     def _fill(self) -> None:
         """Read the log and queue whatever it has added.
 
-        The queue is what makes it safe for a caller to `break` out of `drain` and then start a
-        second one -- which is exactly what waiting for SETTLED past a terminal event does. One
-        read of the log yields a *batch* of events while the byte offset advances past all of
-        them, so a caller that stopped part-way through a batch used to lose the remainder for
-        good. `win` and `results_done` are 43 ms apart at their closest, well inside one 50 ms
-        poll, which makes the event the second drain is waiting for the one most likely to have
-        been in the discarded remainder.
+        **The queue must not be inlined back into `poll`.** It is what makes it safe to `break` out
+        of `drain` and start a second one, which is what waiting for SETTLED does: one read parses a
+        *batch* while the byte offset advances past all of it, so a caller stopping part-way used to
+        lose the remainder -- and `win` and `results_done` are 43 ms apart at their closest, well
+        inside one poll.
         """
         self._pending.extend(_parse(self._tail.read_new()))
 
@@ -417,19 +353,14 @@ class GameLogWatcher:
     def drain(self, idle_timeout: float, ceiling: float, interval: float = 0.05):
         """Yield events as they appear, until the game goes quiet or the ceiling is hit.
 
-        Stopping is the caller's decision -- it `break`s when it has what it wants. Deciding
-        here instead looks tidier and is wrong: the caller sometimes needs to *ignore* an event
-        it would otherwise stop on, and a generator that has already returned cannot be resumed.
+        Stopping is the caller's decision. Deciding here looks tidier and is wrong: the caller
+        sometimes needs to *ignore* an event it would otherwise stop on, and a returned generator
+        cannot be resumed. Events come off `_pending` one at a time, so breaking part-way leaves the
+        rest queued -- see `_fill`.
 
-        Events are taken off `_pending` one at a time rather than out of a local batch, so a
-        caller that breaks part-way through leaves the rest queued for the next drain instead of
-        dropping them -- see `_fill`.
-
-        Two limits, because one number cannot serve both cases. `idle_timeout` is the real one:
-        it restarts on every event, so a feature that keeps emitting events is followed for as
-        long as it runs, while a game that has genuinely gone quiet is not waited on. `ceiling`
-        is only a backstop against a game that emits forever. A flat total timeout was tried
-        first and cut a Hold & Spin off mid-feature after 8 free spins.
+        `idle_timeout` is the real limit and **restarts on every event**, so a feature that keeps
+        talking is followed for as long as it runs; `ceiling` is only a backstop. A flat total was
+        tried first and cut a Hold & Spin off mid-feature after 8 free spins.
         """
         started = time.monotonic()
         quiet_until = started + idle_timeout
@@ -445,11 +376,8 @@ class GameLogWatcher:
 
 
 def current_state(path: str = DEFAULT_LOG, limit: int = 512 * 1024) -> dict:
-    """What the game is doing now, from the state transitions already in the log.
-
-    Reads history rather than waiting for the next change, so it answers immediately even if the
-    game has been sitting idle for hours.
-    """
+    """What the game is doing now, from the state transitions already in the log -- history rather
+    than the next change, so it answers immediately after hours of idling."""
     if not os.path.isfile(path):
         raise GameLogError(f"the game log {path} does not exist. Set \"gamelog.path\".")
     state = {"idle": None, "gamble": None, "feature": None, "last_stops": None, "at": None,

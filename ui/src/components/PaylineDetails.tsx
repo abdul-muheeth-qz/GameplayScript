@@ -12,21 +12,14 @@ import { PaylineLines } from "@/components/PaylineLines"
 import { cn } from "@/lib/utils"
 
 /**
- * Everything behind the verdict, folded into one disclosure below it: the reel window this
- * geometry cropped to, the contact sheet of every cell, and the line picker with each line's
- * COMPARE trail and annotated image.
+ * Everything behind the verdict, in one disclosure below it: the reel window, the contact sheet of
+ * every cell, and each line's COMPARE trail and annotated image.
  *
- * They are together because they answer one question in sequence -- did the crop land, and
- * then what did the lines do with it -- and the verdict above is the answer a reader wants
- * first. Folding them keeps the page short enough that the verdict is not below the fold.
- *
- * **The cost is that the contact sheet is now one click away rather than in front of you**, and
- * that sheet is the only thing that shows a crop half a cell out -- the check every similarity
- * number on the page depends on. It is also the only place that check now lives: the page used
- * to reach it by making "cut the reels" a button of its own, and that button is gone, so this
- * disclosure carries the whole weight of it. Hence the trigger naming what is inside rather
- * than saying "Details", and staying a single click from the verdict. If a wrong crop is ever
- * believed because nobody opened this, defaulting it open is the fix.
+ * **The cost is that the contact sheet is one click away rather than in front of you**, and it is
+ * the only thing that shows a crop half a cell out -- the check every similarity number depends on.
+ * With the second button gone this disclosure carries the whole weight of that, hence a trigger
+ * naming what is inside rather than saying "Details". If a wrong crop is ever believed because
+ * nobody opened this, default it open.
  */
 
 export function PaylineDetails({

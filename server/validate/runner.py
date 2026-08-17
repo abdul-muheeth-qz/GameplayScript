@@ -1,40 +1,17 @@
-"""Step 3 over a run folder: the two OCR records in, a verdict out.
+"""Stage 3 over a run folder: the two OCR records in, a verdict out.
 
-Which frame each number is read from is the correctness question in this module, and it is
-one rule for both cases:
+Which frame each number comes from is the correctness question here, and it is one rule for both
+cases -- cash and bet from `pre_spin`, cash and win from the **last** frame there is
+(`win_collected` on a win, `spin_result` on a loss). So the win is always the second record's.
+`pre_spin`'s WIN meter is not read at all: it holds the previous spin's win, and reading it
+double-counts.
 
-    previous   cash, bet   pre_spin        the balance it started from, and the wager
-    current    cash, win   the last frame  what it ended at, and what it paid
+The cost, and it is real: on a win that means a third OCR pass over a meter `spin_result` already
+read, and it does fail on one run on disk -- both `win` and `bet` null, so the win is taken as 0.00
+and the verdict is a Fail off by exactly the win. That is an `extract` bug to fix there, not a
+reason to move where this reads the win; the ROI crop for that frame is clean and legible.
 
-The last frame is `win_collected` when the spin won and `spin_result` when it did not. So
-the *win is always read from the second record*. `pre_spin`'s WIN meter is neither read nor
-sent: it holds the previous spin's win, which the game leaves on display after paying it,
-and reading it there double-counts (see `server.frames` and `records.PREVIOUS_FIELDS`).
-
-    a loss:  pre_spin.cash - bet + 0.00              == spin_result.cash
-    a win:   pre_spin.cash - bet + win_collected.win == win_collected.cash
-
-Verified on run 2026-08-11_212236: `2909.60 - 1.00 + 18.10 = 2926.70`. A winning spin's
-WIN meter reads the same on `spin_result` and `win_collected` -- the game holds it there
-until the next spin clears it -- which is what lets one rule cover both.
-
-**The cost of reading the win from the last frame**, and it is a real one: on a win that
-means a third OCR pass over a meter `spin_result` had already read, and on run
-2026-08-11_204202 that pass fails. `extract/win_collected.json` there has `win` and `bet`
-both null, so the win is taken as 0.00 and the run reports Fail with a difference of exactly
--24.00. That is an `extract` bug and should be fixed there rather than by moving where this
-reads the win: the ROI crop for that frame is clean and legible, and the box reads only cash,
-at confidence 0.0. That the pixels are legible was measured while extract's since-removed band
-crop was still in the tree -- over the same frame it read win 24.00 at 95 and bet 1.00 at 93.
-
-The verdict, and every number under it, comes from `ledger.judge` -- exact `Decimal`
-arithmetic in Python. The result is written to `validate.json` beside the frames it judged,
-with money as strings so it stays exact across the JSON boundary:
-
-    { "verdict": "pass" | "fail" | "error", "expected_cash": "2926.70",
-      "computed_cash": "2926.70", "difference": "0.00", "tolerance": "0.005",
-      "record": "2909.60,18.10,1.00", "formula": "...",
-      "inferred": ["win"], "message": "...", "sources": {...}, "stages": [...] }
+The result goes to `validate.json` with money as strings, so it stays exact across JSON.
 """
 
 from __future__ import annotations
@@ -77,9 +54,8 @@ def find_records(folder: str | os.PathLike) -> Sources:
             f"{EXTRACT_SUBDIR}/{frames.SPIN_RESULT}.json -- run the extract step over "
             f"this folder first")
 
-    # A win parks the money on the collect offer, so the cash meter is only settled on the
-    # third frame. Its absence means the spin did not win, and is information rather than
-    # a failure -- `spin_result` is then the final frame.
+    # A win parks the money on the collect offer, so the cash meter is only settled on the third
+    # frame. Its absence means the spin did not win, and `spin_result` is then the final frame.
     if collected.is_file():
         return Sources(previous, collected,
                        (frames.PRE_SPIN, frames.WIN_COLLECTED))
@@ -87,11 +63,7 @@ def find_records(folder: str | os.PathLike) -> Sources:
 
 
 def validate_records(sources: Sources, tolerance: Decimal = TOLERANCE) -> dict:
-    """Judge one spin from its two records. Never raises: errors are a verdict.
-
-    `tolerance` is `ledger.TOLERANCE` -- half a cent -- and is an argument rather than a
-    config key, because it lives beside the comparison it governs. See `ledger`.
-    """
+    """Judge one spin from its two records. Never raises: an error is a verdict."""
     result = {"verdict": "error", "expected_cash": None, "computed_cash": None,
               "difference": None, "tolerance": str(tolerance), "record": None,
               "formula": FORMULA, "inferred": [],
@@ -101,17 +73,14 @@ def validate_records(sources: Sources, tolerance: Decimal = TOLERANCE) -> dict:
                           "final": sources.current.name}}
 
     try:
-        # `previous` returns no inferences by construction: it is read for cash and bet,
-        # and neither of those is in `records.INFERABLE` -- a blank one is a failed read,
-        # not a zero.
+        # `previous` returns no inferences by construction: neither cash nor bet is in
+        # `records.INFERABLE`, a blank one being a failed read rather than a zero.
         previous, _ = load_values(sources.previous, PREVIOUS_FIELDS)
         current, current_inferred = load_values(sources.current, CURRENT_FIELDS)
 
-        # The ledger the UI draws, in the order it draws it: the cash before, the win this
-        # spin paid, the bet that was placed -- `win` being the *current* frame's, see the
-        # module docstring. Padded, so validate.json holds digit-for-digit what was read
-        # off the frames: `str(Decimal)` alone renders a JSON 2926.7 as "2926.7", which
-        # reads as a different number from the 2926.70 on the meter.
+        # The ledger in the order the UI draws it, and padded so validate.json holds
+        # digit-for-digit what was read off the meters -- `str(Decimal)` renders a JSON 2926.7 as
+        # "2926.7", which reads as a different number from the 2926.70 on the glass.
         result["inferred"] = sorted(set(current_inferred))
         result["record"] = ",".join(pad(v) for v in
                                     (previous["cash"], current["win"], previous["bet"]))
@@ -122,9 +91,8 @@ def validate_records(sources: Sources, tolerance: Decimal = TOLERANCE) -> dict:
         result["message"] = str(exc)
         return result
 
-    # Formatted to two places on the way out, so the ledger reads as money rather than as
-    # whatever the meters happened to carry: a cash meter OCR'd as "2926.7" would otherwise
-    # put a one-place number in the ledger beside two-place ones.
+    # Two places on the way out, so a cash meter OCR'd as "2926.7" does not sit in the ledger as a
+    # one-place number beside two-place ones.
     result["verdict"] = verdict.verdict
     result["computed_cash"] = f"{verdict.computed_cash:.2f}"
     result["difference"] = f"{verdict.difference:.2f}"

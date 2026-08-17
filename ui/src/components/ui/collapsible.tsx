@@ -4,11 +4,9 @@ import { Collapsible as CollapsiblePrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 
 /**
- * shadcn's Collapsible over radix-ui's primitive.
- *
- * A radix disclosure rather than a native `<details>`: `<details>` cannot be animated and its
- * marker is drawn by the platform, which on this dark palette reads as a stray light triangle.
- * The trigger keeps its own chevron so both audits' chrome stays hand-drawn.
+ * shadcn's Collapsible over radix-ui's primitive. A radix disclosure rather than a native
+ * `<details>`, which cannot be animated and whose platform-drawn marker reads as a stray light
+ * triangle on this dark palette.
  */
 
 function Collapsible({ ...props }: React.ComponentProps<typeof CollapsiblePrimitive.Root>) {

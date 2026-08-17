@@ -4,13 +4,9 @@ r"""Read the slot meters off one or more screenshots.
     python -m server.extract.cli server/extract/Images/after.png    # one image
     python -m server.extract.cli some/folder/ --out results/        # a folder of images
 
-Given a **capture run folder** -- one holding pre_spin and spin_result, and win_collected
-too if the spin won -- this does the real step 2: it writes one record per frame into
-extract/ inside that folder, which is exactly what `python -m server.validate.cli <run
-folder>` then reads. Given loose images it falls back to the older behaviour of printing a
-JSON list to stdout, which is how the sample images in Images/ are still checked.
-
-Requires the Tesseract OCR engine. See extract/tesseract.py for how it is found.
+Given a run folder this writes one record per frame into `extract/`, which is what
+`server.validate.cli` reads. Given loose images it prints a JSON list to stdout, which is how the
+fixtures in Images/ are checked. Requires the Tesseract engine -- see extract/tesseract.py.
 """
 
 from __future__ import annotations
@@ -46,9 +42,8 @@ EXIT_OK, EXIT_ERROR = 0, 1
 def is_run_folder(path: str) -> bool:
     """True for a folder the capture step wrote.
 
-    Keyed on spin.json rather than on which frames are in it: the sample images in
-    Images/ include a before.png and an after.png too, and treating that folder as a run
-    would quietly write records into it instead of printing them.
+    Keyed on spin.json rather than on which frames are in it: Images/ holds a before.png and an
+    after.png too, and treating it as a run would write records into it instead of printing them.
     """
     return (os.path.isdir(path)
             and os.path.isfile(os.path.join(path, "spin.json"))
@@ -56,11 +51,10 @@ def is_run_folder(path: str) -> bool:
 
 
 def gather_image_paths(args):
-    """Expand arguments (files and/or directories) into a de-duplicated, ordered list.
+    """Files and folders expanded into a de-duplicated, ordered list.
 
-    Extension matching is case-insensitive (a `.PNG` screenshot is still a screenshot),
-    and directory names are glob-escaped so a folder containing glob metacharacters --
-    `[`, `]`, `?`, `*` -- is not silently expanded into nothing.
+    Extensions match case-insensitively, and directory names are glob-escaped so a folder holding
+    `[`, `]`, `?` or `*` is not silently expanded into nothing.
     """
     paths = []
     seen = set()
@@ -104,14 +98,14 @@ def main(argv=None) -> int:
     try:
         cfg = load_config(args.config)
     except (OSError, ValueError) as exc:
-        # Not fatal: the OCR half only reads config for the tesseract path, which has
-        # an environment variable and a default behind it.
+        # Not fatal: config is only read here for the tesseract path, which has an environment
+        # variable and a default behind it. ROI location then fails by name.
         LOG.warning("could not read config (%s); carrying on with defaults", exc)
         cfg = {}
 
     paths = args.paths or [DEFAULT_IMAGE_PATH]
 
-    # A run folder is the real step-2 path: write the records where validate looks.
+    # A run folder is the real stage-2 path: write the records where validate looks.
     run_folders = [p for p in paths if is_run_folder(p)]
     if run_folders:
         if len(run_folders) != len(paths):
@@ -129,7 +123,7 @@ def main(argv=None) -> int:
             print(json.dumps(records, indent=2))
         return EXIT_ERROR if failed else EXIT_OK
 
-    # Otherwise: loose images, printed as a list the way this tool always has.
+    # Otherwise loose images, printed as a list.
     tesseract.configure(cfg)
     LOG.info("tesseract_cmd = %s", tesseract.pytesseract.pytesseract.tesseract_cmd)
 

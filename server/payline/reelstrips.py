@@ -1,46 +1,26 @@
-"""THE CHECKPOINT, part 1 -- the reel strips, read out of the spreadsheet.
+"""The reel strips, read out of `server/assets/payline_excel.xlsx`.
 
-`server/assets/payline_excel.xlsx` is one sheet: a `Position` column and one column per reel
-(`R1`..`R5`), 200 positions of symbol names each. A spin's `reelsStops` from the game's own
-log is one stop per reel, and the three cells that reel shows are the strip entries
-at **stop, stop+1, stop+2** -- so cell `E{row}{reel}` is `strip[reel][stop[reel] + row - 1]`,
-row 1 at the top.
+One sheet: a `Position` column and one column per reel, 200 positions of symbol names each. A
+reel showing stop `s` shows positions s, s+1, s+2, so cell `E{row}{reel}` is
+`strip[reel][stop + row - 1]` with row 1 at the top.
 
-**That rule was measured, not assumed.** Two spins, 30 cells:
+**That rule was measured over two spins and 30 cells**, both 15/15 against their own contact sheets.
+Two things about the data are load-bearing:
 
-  * The mapping supplied with the request -- stops `[24, 79, 153, 25, 0]` -- reproduces all
-    fifteen names exactly (Pisces/King/Mystery1/Ox/Arm Band across the top row, down to
-    Arm Band/Arm Band/Pisces/Wealth Pot/Orb (Splittable) across the bottom).
-  * Run `2026-08-13_153618`, stops `[86, 121, 127, 138, 86]`, is **15/15** against its own
-    `payline/tiles/contact_sheet.png` -- five Arm Bands across the middle row, Free Games at
-    E32, Q at E33, A at E34.
+  * **Position 200 is `X` in every reel: a terminator, not a symbol.** The strips are 200 long and
+    that is the modulus for the wrap -- a strip of 201 would hand out `X` as a symbol name.
+  * **The mystery symbols do not say what is on the screen.** They are 15% of every strip and reveal
+    as other art, so a pair involving one can never be decided by name (`PLACEHOLDERS`). `WILD` is
+    deliberately *not* in that set -- it has its own art and was drawn as itself on both frames.
 
-Two things about the data itself, both load-bearing:
+One measured disagreement is on the record, and is why the checkpoint reports every adjudication
+rather than just applying it: on one frame the sheet has `Wealth Pot` where the pixels show an Ox,
+1 cell in 30. It is also why nothing here may overturn a *confident* pixel reading.
 
-  * **Position 200 is `X` in every reel and is a terminator, not a symbol.** The strips are
-    therefore 200 long (0..199) and that is the modulus for the wrap, which only matters for
-    a stop of 198 or 199 -- exactly the case where getting it wrong is invisible, because a
-    strip of 201 would hand out `X` as a symbol name and `X` matches nothing.
-  * **`Mystery1`, `Mystery2` and `Mystery (Orb)` do not say what is on the screen.** They are
-    15% of every strip, and they reveal as another symbol: the supplied example has `Mystery1`
-    at E13 where the frame shows an Ace, and run `2026-08-13_155048` has `Mystery1` on all
-    three cells of reel 1 where the frame shows three Ox. So a mystery name can never be
-    compared against another name -- see `PLACEHOLDERS` and `matcher.ReelStopMatcher`, which
-    abstains rather than guessing. `WILD` is *not* in that set: it has its own art (the
-    firecrackers) and was drawn as itself on both frames checked.
-
-One measured disagreement is on the record and is the reason the checkpoint reports every
-adjudication instead of just applying it. Run `2026-08-13_155048`, stops
-`[135, 89, 15, 144, 75]`, is 14/15: the sheet has `Wealth Pot` at R2 position 89 and the frame
-shows an Ox at E12. Every other cell on that frame agrees, including the three revealed
-mysteries beside it, so this is either strip drift between the sheet and the build or a reveal
-that reached further than reel 1. It is 1 cell in 30 measured, and it is why nothing here is
-allowed to overturn a *confident* pixel reading -- only the ambiguous band.
-
-Parsed with `zipfile` and `xml.etree`, not openpyxl: an .xlsx is a zip of XML, this sheet is
-plain shared strings, and the alternative is a dependency in `requirements.txt` for one file
-of one sheet. The parser handles the three cell encodings Excel actually writes here --
-shared-string, inline string and bare value -- and raises with the file named on anything else.
+Parsed with `zipfile` and `xml.etree` rather than openpyxl -- an .xlsx is a zip of XML, and the
+alternative is a dependency for one file of one sheet. Note the symbol names are cached XLOOKUP
+results against an external workbook, so a reader handling only shared and inline strings finds an
+empty sheet, which is what the first version of this did.
 """
 
 from __future__ import annotations
@@ -57,21 +37,18 @@ LOG = logging.getLogger("payline")
 
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
-# Relative to `server/`, which is what `settings.resolve` anchors on -- so this is
-# `server/assets/`, and it stays right whether the CLI was run from the repository root or
-# the server was started from somewhere else entirely.
+# Relative to `server/`, which `settings.resolve` anchors on, so this stays right wherever the CLI or
+# the server was started from.
 DEFAULT_STRIPS = "assets/payline_excel.xlsx"
 
-# The row the strips start on (row 1 is the "Reel Layout - 1" title, row 2 the R1..R5 header)
-# and the column the first reel is in. Position 0 is therefore B3.
+# Row 1 is the title and row 2 the R1..R5 header, so position 0 is B3.
 FIRST_DATA_ROW = 3
 REEL_COLUMNS = ("B", "C", "D", "E", "F")
 
-# The end-of-strip marker in the sheet, not a symbol. See the module docstring.
+# The end-of-strip marker, not a symbol.
 TERMINATOR = "X"
 
-# Names that do not describe what is drawn on the screen, because the symbol reveals as
-# something else. A pair involving one of these cannot be decided by name.
+# Names that do not describe what is drawn, the symbol revealing as something else.
 PLACEHOLDERS = frozenset({"MYSTERY1", "MYSTERY2", "MYSTERY (ORB)"})
 
 
@@ -97,8 +74,7 @@ class ReelStrips:
     def symbol(self, reel: int, stop: int, row: int) -> str:
         """The symbol reel `reel` shows in `row` when it stopped at `stop`.
 
-        Rows are 1-based from the top, which is `cell_name`'s convention, and the strip
-        wraps -- a stop of 199 shows positions 199, 0, 1.
+        Rows are 1-based from the top, and the strip wraps -- a stop of 199 shows 199, 0, 1.
         """
         strip = self.strips.get(reel)
         if not strip:
@@ -136,16 +112,11 @@ def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
 def _cell_text(cell, shared: list[str]) -> str | None:
     """One cell as text, in any of the encodings this sheet uses.
 
-    **The symbol names are `t="str"` -- cached *formula results*, not shared strings.** Every
-    one of them is an `XLOOKUP` against an external workbook (`xl/externalLinks/`), so the
-    sheet's shared string table holds only seven entries -- the title, `Position` and `R1`..`R5`
-    -- and the 1000 names live in each cell's own `<v>`. A reader that handles only shared and
-    inline strings finds an empty sheet, which is what the first version of this did.
-
-    The practical consequence is that these are the values Excel last calculated. They are
-    correct as shipped and verified against two spins, but re-saving the sheet somewhere that
-    cannot reach the external workbook is a way to get blanks, and `load_strips` raising on an
-    empty column is the thing that would catch it.
+    The symbol names are `t="str"` -- cached XLOOKUP results against an external workbook -- so the
+    shared string table holds only the headers and the names live in each cell's own `<v>`. The
+    consequence is that these are the values Excel last calculated: re-saving the sheet somewhere
+    that cannot reach that workbook yields blanks, which `load_strips` catches by raising on an
+    empty column.
     """
     kind = cell.get("t")
     if kind == "s":                                    # shared string
@@ -205,13 +176,11 @@ def _sheet_cells(path: str) -> dict[tuple[int, str], str]:
 def load_strips(path: str | None = None) -> ReelStrips:
     """Read the reel layout out of the spreadsheet.
 
-    Reads down each reel's column from `FIRST_DATA_ROW` until the column runs out or hits
-    the `X` terminator, so the strips are exactly as long as the sheet says and nothing
-    invents a symbol past the end.
+    Down each reel's column from `FIRST_DATA_ROW` until it runs out or hits the `X` terminator, so
+    the strips are exactly as long as the sheet says and nothing invents a symbol past the end.
     """
-    # Anchored on `server/`, never on the CWD: a server started from somewhere else
-    # has to find the same spreadsheet the CLI does. `settings_for` resolves the configured
-    # path the same way, so this only matters for the default and for a direct call.
+    # Anchored on `server/`, never the CWD: a server started elsewhere must find the same sheet the
+    # CLI does.
     target = resolve(path or DEFAULT_STRIPS)
     if not os.path.isfile(target):
         raise PaylineError(
@@ -241,8 +210,8 @@ def load_strips(path: str | None = None) -> ReelStrips:
 
     lengths = {reel: len(s) for reel, s in strips.items()}
     if len(set(lengths.values())) > 1:
-        # Not fatal -- each reel wraps on its own length -- but it is worth saying out loud,
-        # because a column that stops early reads as a shorter reel rather than as an error.
+        # Not fatal -- each reel wraps on its own length -- but worth saying, because a column that
+        # stops early reads as a shorter reel rather than as an error.
         LOG.warning("reel strips are not all the same length: %s", lengths)
     LOG.info("read %d reel strips from %s (%s positions each)",
              len(strips), target, sorted(set(lengths.values())))

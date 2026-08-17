@@ -1,11 +1,6 @@
 import type { ReactNode } from "react"
 
-/**
- * A captioned crop: what it is, why it is worth looking at, and the pixels.
- *
- * Shared by the panel that shows the frame being read and the one that holds the crops, so a
- * caption cannot end up styled two ways in two places on the same page.
- */
+/** A captioned crop, shared by both panels so a caption cannot be styled two ways on one page. */
 
 export function Figure({
   caption,

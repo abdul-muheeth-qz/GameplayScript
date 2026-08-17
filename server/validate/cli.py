@@ -1,13 +1,9 @@
-"""Validate one slot spin.
+"""Validate one slot spin. Prints Pass or Fail, with the working behind it on stderr.
 
     python -m server.validate.cli server/captured_files/2026-08-11_212236
     python -m server.validate.cli server/captured_files/2026-08-11_212236 --json
 
-The argument is a capture run folder that the extract step has already been run over, so
-that it holds `extract/pre_spin.json`, `extract/spin_result.json` and -- if the spin won --
-`extract/win_collected.json`.
-
-Prints Pass or Fail, and the working behind it on stderr.
+The argument is a run folder the extract step has already been run over.
 """
 
 import argparse
@@ -17,8 +13,8 @@ from pathlib import Path
 
 from .runner import RESULT_FILE, find_records, validate_records, validate_run
 
-# A Fail is a verdict about the spin. An error means no verdict was reached at all --
-# keeping the two apart is what lets a test runner tell them apart.
+# A Fail is a verdict about the spin; an error means no verdict was reached at all. Keeping them
+# apart is the one distinction a test runner needs.
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_ERROR = 2
@@ -46,8 +42,8 @@ def main(argv=None) -> int:
         print(f"Folder not found: {args.folder}", file=sys.stderr)
         return EXIT_ERROR
 
-    # No config is read here at all: the tolerance lives in `ledger.TOLERANCE`, beside the
-    # comparison it governs, so this stage runs against a checkout with no config.json.
+    # No config at all: the tolerance is `ledger.TOLERANCE`, so this runs against a checkout with
+    # no config.json.
     if args.write:
         result = validate_run(str(args.folder))
     else:

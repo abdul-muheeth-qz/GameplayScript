@@ -1,14 +1,8 @@
-"""Step 2 -- read the meters off a captured frame.
+"""Stage 2 -- read the meters off a captured frame.
 
-Crops a captured frame to the CASH / WIN / BET meter bar and OCRs only that strip with
-Tesseract. No fixed pixel coordinates: the crop is a normalized box, the active game's
-`games.<exe>.meter_roi` in `game_config.json`, and nothing rescues one that misses.
-
-    python -m server.extract.cli server/captured_files/<run_id>   # a whole run folder
-    python -m server.extract.cli some/screenshot.png       # one image, JSON to stdout
-
-`extract_frames(run_dir, cfg)` is what the server calls; the record it writes per frame
-is what `validate` reads, keyed cash / win / bet.
+Crops to the CASH / WIN / BET strip by the active game's normalized `meter_roi` and OCRs only that,
+with nothing behind a box that misses. `extract_frames(run_dir, cfg)` is what the server calls, and
+the per-frame record it writes is what `validate` reads, keyed cash / win / bet.
 """
 
 from .runner import extract_frames, read_frames

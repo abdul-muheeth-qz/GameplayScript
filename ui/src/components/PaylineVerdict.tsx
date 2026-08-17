@@ -3,15 +3,12 @@ import { Heading } from "@/components/FramePanel"
 import { cn } from "@/lib/utils"
 
 /**
- * What the lines paid, stamped the way the meter audit stamps Pass/Fail -- so the two
- * verdicts read as the same kind of statement about the same spin.
+ * What the lines paid, stamped the way the meter audit stamps Pass/Fail, so the two verdicts read as
+ * the same kind of statement about the same spin.
  *
- * The cross-check table is not decoration. Every number here rests on a similarity
- * threshold, and a threshold is the one thing in this stage that was chosen rather than
- * measured off the frame. Two independent strategies agreeing line for line is the cheapest
- * evidence that the threshold is not doing the work; disagreement means recalibrate before
- * believing the pays. A strategy that could not run says so, because a missing row would
- * read as agreement.
+ * The cross-check table is not decoration: the similarity threshold is the one thing in this stage
+ * chosen rather than measured, and two strategies agreeing line for line is the cheapest evidence it
+ * is not doing the work. A strategy that could not run says so -- a missing row reads as agreement.
  */
 
 export function PaylineVerdict({ result }: { result: PaylineResult }) {
@@ -20,12 +17,10 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
   const ran = methods.filter(([, check]) => check.pays)
   const skipped = methods.filter(([, check]) => check.skipped)
 
-  // These columns are the *pixel-only* readings: `cross_check` runs over the inner matcher, so a
-  // line the reel-stop checkpoint rescued reads 0 here while the verdict above pays it. That is
-  // the correct reading of the table -- it compares vision strategies, and the checkpoint is not
-  // one -- but it is not a self-evident one, so the columns say so and the note below states what
-  // moved. Reported rather than fixed by folding the checkpoint in: doing that would make every
-  // checkpoint hit print "strategies disagree, recalibrate the threshold", which is wrong advice.
+  // The *pixel-only* readings: `cross_check` runs over the inner matcher, so a line the checkpoint
+  // rescued reads 0 here while the verdict above pays it. Correct but not self-evident, so the
+  // columns say so. Folding the checkpoint in instead would make every hit print "strategies
+  // disagree, recalibrate the threshold", which is wrong advice.
   const stops = result.reel_stops
   const pixelsOnly = stops?.status === "on"
   const overrides = (pixelsOnly && stops?.overrides) || 0
@@ -161,16 +156,13 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
 }
 
 /**
- * The reel-stop checkpoint: what the game's own telemetry said, and what it changed.
+ * The reel-stop checkpoint: what the game's own reel stops said, and what they changed.
  *
- * Shown whenever the record has it, in all three states, because each one changes how the
- * numbers above should be read. **On and having overturned something** means some YES on this
- * page came from symbol names rather than from pixels, and the pixel-only pays are printed
- * beside it so the reader can see exactly what moved -- also the reason the cross-check table
- * below can disagree with the verdict above without either being wrong: that table compares the
- * *vision* strategies and the checkpoint is not one. **Unavailable** is the state worth being
- * loudest about: nothing failed, but an ambiguous COMPARE was settled on the pixels alone, which
- * is the reading this exists to correct. **Off** is stated once and quietly.
+ * Shown in all three states, because each changes how the numbers above should be read. **On and
+ * having overturned something** means a YES came from symbol names rather than pixels, so the
+ * pixel-only pays are printed beside it. **Unavailable** is worth being loudest about: nothing
+ * failed, but an ambiguous COMPARE was settled on the pixels alone, which is what this exists to
+ * correct. **Off** is stated once and quietly.
  */
 function ReelStops({ result }: { result: PaylineResult }) {
   const stops = result.reel_stops

@@ -7,18 +7,11 @@ import { HealthStrip } from "@/components/HealthStrip"
 import { cn } from "@/lib/utils"
 
 /**
- * The chrome both audits share: the header, the mode switch, the health strip and the step
- * rail down the left.
+ * The chrome both audits share: the header, the mode switch, the health strip and the step rail.
  *
- * It exists so the two pages cannot drift apart visually. They are two readings of one
- * spin, not two products, and the moment each owned its own header they would have started
- * disagreeing about spacing, about what a running step looks like, and about what the header
- * says at all. Everything specific to an audit is in `rail` and `children`.
- *
- * The run id was in that header and is not any more, at request. It is still the thing the
- * whole app is keyed on -- `?run=` in the URL, the folder every artefact is served out of --
- * so nothing about which spin is open has changed; it is simply not printed. If it needs to
- * be visible again it belongs here rather than in either page, for the reason above.
+ * It exists so the two pages cannot drift apart -- they are two readings of one spin, not two
+ * products. Everything audit-specific is in `rail` and `children`. The run id is deliberately not
+ * printed any more; if it needs to be visible again it belongs here, not in either page.
  */
 
 export type Mode = "meter" | "payline"

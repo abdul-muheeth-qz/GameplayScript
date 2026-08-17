@@ -19,27 +19,16 @@ import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
 /**
  * The meter audit: capture a spin, read the meters off the frames, check the money.
  *
- * Lifted out of App.tsx unchanged when the payline audit was added -- same three steps, same
- * gating, same endpoints. The header and the step rail come from PageShell, so the two audits
- * cannot drift apart.
+ * **One step, at request.** The three stages were never independent choices here -- extract was
+ * locked until capture finished and validate until extract did -- so `PHASES` chains them on one
+ * press, each answer landing on screen as it arrives rather than all three at the end.
  *
- * **One step, at request** -- the same collapse the payline tab already had. The three stages
- * were never independent choices on this page: extract was locked until capture finished and
- * validate until extract did, so the rail's gating was describing an order the user had no say
- * in. `PHASES` runs them back to back against the same three endpoints, and each stage's answer
- * is put on screen as it arrives rather than at the end, so the frames still appear while the
- * meters are still being read.
+ * **The collapse is in the page, not the server**: all three endpoints and CLIs are untouched and
+ * still runnable on their own. Only the clicks collapsed.
  *
- * **The pipeline is still three stages**, and that is the point of doing this in the page rather
- * than by adding a fourth endpoint: `POST /api/capture`, `/api/extract` and `/api/validate` are
- * untouched, each still runnable on its own, and `python -m server.extract.cli` /
- * `server.validate.cli` still stop where they always did. Only the clicks collapsed.
- *
- * **It resumes rather than re-spinning.** A run that already holds its frames continues from the
- * first stage that has not run, because extract fails on real frames (the `win_collected` OCR
- * nulls in CLAUDE.md are one), and making that retry cost another spin of a live cabinet would
- * be paying money to re-read a picture already on disk. The button says which of the two it is
- * about to do; "New run" in the header clears the run and puts it back to spinning.
+ * **It resumes rather than re-spinning**, starting at the first stage that has not run: extract does
+ * fail on real frames, and making that retry cost another spin of a live cabinet would be paying
+ * money to re-read a picture already on disk. `resuming` is what keeps the two from being silent.
  */
 
 type Stage = "capture" | "extract" | "validate"
@@ -84,13 +73,10 @@ export function MeterValidation({
   }
 
   /**
-   * The whole audit from `from` onwards, one press.
-   *
-   * The run is handed up after every stage rather than once at the end, so the frames land on
-   * the page while the meters are still being read -- an ordinary spin answers in ~3 s and the
-   * extract that follows it takes a couple more. A stage that fails stops the ones after it and
-   * keeps whatever the earlier ones returned; the frames of a spin whose OCR failed are still
-   * on disk and still worth looking at.
+   * The whole audit from `from` onwards, one press. The run is handed up after every stage rather
+   * than at the end, so the frames land while the meters are still being read. A failed stage stops
+   * the ones after it and keeps what the earlier ones returned -- the frames of a spin whose OCR
+   * failed are still worth looking at.
    */
   async function audit(from: Stage) {
     setFailed(null)
@@ -146,9 +132,8 @@ export function MeterValidation({
         PHASES.find((p) => p.stage === busy)?.label ??
         (resuming ? "Read and validate" : "Run audit"),
       status: status(),
-      // Every stage's own line, in the order they ran. With no rail to hang them off, this is
-      // the only place the run says which button was pressed, which crop each meter was read
-      // from and how far out the ledger was -- and each appears as its stage answers.
+      // Every stage's own line, in the order they ran. With no rail to hang them off, this is the
+      // only place the run says which button was pressed and how far out the ledger was.
       detail: (run?.spin || run?.extraction || run?.validation) && (
         <dl className="space-y-1">
           {run.spin && (

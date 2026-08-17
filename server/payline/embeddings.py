@@ -1,27 +1,14 @@
-"""STEP 1b - turn each cell into an embedding vector.
+"""Turn each cell into an embedding vector. Both backends return unit-norm float32.
 
-Two backends, both returning unit-norm float32 vectors so everything downstream is
-identical:
+  pixel  32x32 RGB, mean-centred, L2-normalised. The default, and not as a fallback: on this
+         cabinet same-symbol pairs sit at 0.988-0.990 against a nearest different-symbol pair of
+         0.807, so the 0.90 threshold has a wide margin either side. No torch, no download.
+  clip   OpenCLIP ViT-B-32 / laion2b_s34b_b79k, the client-specified path. **Its threshold is not
+         calibrated here** -- CLIP puts all slot symbols in a much narrower band than raw pixels,
+         so switching backend without re-measuring is how you get a confident wrong grid. torch is
+         imported lazily, so the pixel path needs none of it.
 
-  pixel  32x32 RGB, mean-centred, L2-normalised. No torch, no download. **This is the
-         default**, and not because it is a fallback: measured on this cabinet's own
-         frames, same-symbol pairs sit at 0.988-0.990 and the nearest different-symbol
-         pair at 0.807, so a 0.90 threshold has a fourfold margin either side of it. It
-         read the correct verdict on every frame checked, at every screen size from 0.6x
-         to 3.0x.
-
-  clip   OpenCLIP ViT-B-32 / laion2b_s34b_b79k. The client-specified approach;
-         `load_clip` / `create_embedding` / `cosine_similarity` keep the names and
-         behaviour of the supplied reference script. **Its threshold is not calibrated
-         here** -- the POC's 0.93 is a guess from a machine that never ran it, and CLIP
-         puts all slot symbols in a much narrower similarity band than raw pixels do, so
-         switching backend without re-measuring the threshold is how you get a confident
-         wrong grid. torch is imported lazily, so the pixel path needs none of it
-         installed.
-
-Vectors are saved to `payline/embeddings/` so a reading can be re-judged (a different
-threshold, a different matcher) without re-embedding -- which for CLIP is the whole cost of
-the stage.
+Vectors are saved to `payline/embeddings/` so a reading can be re-judged without re-embedding.
 """
 
 from __future__ import annotations
@@ -41,17 +28,13 @@ ALL_FILE = "all.npz"
 
 
 def cosine_similarity(a, b) -> float:
-    """Cosine similarity between two vectors (reference implementation)."""
+    """Cosine similarity between two vectors."""
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-# ---------------------------------------------------------------------------
-# CLIP backend
-# ---------------------------------------------------------------------------
-
 def load_clip(model_name="ViT-B-32", pretrained="laion2b_s34b_b79k"):
     """Load OpenCLIP in eval mode. Returns (model, preprocess)."""
-    import open_clip  # imported lazily so the pixel backend needs no torch
+    import open_clip  # lazy, so the pixel backend needs no torch
 
     model, _, preprocess = open_clip.create_model_and_transforms(model_name,
                                                                  pretrained=pretrained)
@@ -91,10 +74,6 @@ class ClipEmbedder:
         return create_embedding(self.model, self.preprocess, image)
 
 
-# ---------------------------------------------------------------------------
-# pixel backend
-# ---------------------------------------------------------------------------
-
 class PixelEmbedder:
     name = "pixel"
 
@@ -114,10 +93,6 @@ class PixelEmbedder:
             vec /= norm
         return vec
 
-
-# ---------------------------------------------------------------------------
-# factory + driver
-# ---------------------------------------------------------------------------
 
 BACKENDS = ("pixel", "clip")
 
@@ -150,12 +125,3 @@ def embed_tiles(tiles: dict, backend: str, settings: dict | None = None,
     LOG.info("embedded %d tiles with the %s backend (%d dimensions)",
              len(embeddings), embedder.name, len(next(iter(embeddings.values()))))
     return embeddings
-
-
-def load_embeddings(out_dir: str) -> dict | None:
-    """Embeddings a previous run saved, or None."""
-    path = os.path.join(out_dir, EMBEDDINGS_SUBDIR, ALL_FILE)
-    if not os.path.isfile(path):
-        return None
-    data = np.load(path)
-    return {k: data[k] for k in data.files}

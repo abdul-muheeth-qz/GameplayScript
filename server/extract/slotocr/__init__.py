@@ -1,12 +1,7 @@
-"""
-slotocr — dynamically extracts Balance/Cash/Credit, Win, and Bet meter
-values from slot-game screenshots using OpenCV + Tesseract OCR.
+"""Cash / win / bet meter values off a screenshot, with OpenCV and Tesseract.
 
-No fixed coordinates are assumed: the meter strip is cropped out by a
-normalized box -- the active game's `games.<exe>.meter_roi` in
-game_config.json, one box and nothing behind it -- and the crop is then OCR'd.
-See slotocr.pipeline.process_image for the full per-image flow and slotocr.roi
-for where the box comes from.
+No fixed coordinates: the strip is cropped by the active game's `meter_roi`, one box with nothing
+behind it, and the crop is OCR'd. `pipeline.process_image` is the per-image flow.
 """
 from .pipeline import process_image
 

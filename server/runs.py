@@ -1,25 +1,8 @@
 """The run folder as the server sees it: name it, fill it, read it back.
 
-One folder per run holds every stage's output, and the run id is its name. That is the
-whole state model -- the server keeps nothing in memory between requests, so a reload,
-a restart or a second browser tab all see the same thing, and a run from last week
-replays exactly like one from a minute ago.
-
-    server/captured_files/<run_id>/
-        pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
-        win_collected.png                                             capture, wins only
-        extract/pre_spin.json  extract/spin_result.json  *_roi.png    extract
-        validate.json                                                 validate
-        payline/reels.png  tiles/  tiles.json  annotated_*.png        payline
-        payline.json                                                  payline
-
-A winning spin has three frames, because a win is not in the cash meter until it is
-collected -- see `server.frames`, which owns those names.
-
-The two audits are independent tenants of the same folder: the meter one reads all the
-frames and adds the money up, the payline one reads `spin_result`'s pixels and walks the
-lines. Either can be run without the other, in either order, and
-`state` returns both so one page can show them side by side.
+One folder per run holds every stage's output and the run id is its name -- that is the whole
+state model, so a reload, a restart or a second tab all see the same thing. The two audits are
+independent tenants of the folder, and `state` returns both.
 """
 
 from __future__ import annotations
@@ -59,9 +42,8 @@ class RunError(Exception):
 
 
 def new_run_id() -> str:
-    """A fresh run id. Second-granularity like spin.py's own, plus a counter for the
-    case that two runs start inside the same second -- which the folder name alone
-    cannot distinguish, and which would silently merge two runs into one."""
+    """A fresh run id: spin.py's second-granularity stamp, plus a counter so two runs starting
+    inside the same second do not merge into one folder."""
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     base = captures_dir({})
     candidate, n = stamp, 1
@@ -89,9 +71,8 @@ def require_run(cfg: dict, run_id: str) -> str:
 def artifact(cfg: dict, run_id: str, name: str) -> str:
     """An absolute path to one file inside a run folder, or raise.
 
-    The name is resolved and then checked to be inside the folder, rather than merely
-    scanned for "..", because that is the check that holds for symlinks and for the
-    several spellings Windows accepts for the same path.
+    Resolved and then checked to be inside the folder rather than scanned for "..", because that
+    is the check that holds for symlinks and for Windows' several spellings of a path.
     """
     folder = require_run(cfg, run_id)
     path = os.path.realpath(os.path.join(folder, name))
@@ -109,12 +90,9 @@ async def capture(cfg: dict, run_id: str, *, dry_run=False, no_record=False,
                   config_path: str | None = None) -> dict:
     """Run one spin as a subprocess and return what spin.json says about it.
 
-    A subprocess, not an import, for three separate reasons and any one would be enough:
-    `spin.setup_logging` takes over the root logger and leaves a FileHandler open on the
-    run folder, which on Windows then cannot be deleted; the i-Deck click only lands from
-    a **DPI-unaware** process, and a server host that has made itself DPI-aware would
-    silently send every click a column to the left; and a spin can take three minutes,
-    which has no business happening inside the event loop.
+    A subprocess, not an import, for three independent reasons: spin.py's logging holds a
+    FileHandler open on the run folder, the i-Deck click only lands from a DPI-unaware process,
+    and a spin can take three minutes.
     """
     folder = run_dir(cfg, run_id)
     os.makedirs(folder, exist_ok=True)
@@ -129,13 +107,9 @@ async def capture(cfg: dict, run_id: str, *, dry_run=False, no_record=False,
 
     LOG.info("capture: %s", " ".join(argv))
     proc = await asyncio.create_subprocess_exec(
-        # ROOT (the repository root), not server/: `-m server.capture.spin` resolves
-        # against the CWD, so it has to run from the folder that *contains* the package.
-        # Where it writes is not the CWD's business -- --run-dir is absolute, and
-        # settings.resolve anchors everything else on server/.
+        # ROOT, not server/: `-m server.capture.spin` resolves against the CWD, so it has to run
+        # from the folder that *contains* the package.
         *argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        # spin.py never reads stdin, and a console handle it does not need is one more
-        # thing that can differ between running it by hand and running it from here.
         stdin=subprocess.DEVNULL,
     )
     stdout, _ = await proc.communicate()
@@ -173,11 +147,8 @@ def read_spin(cfg: dict, run_id: str) -> dict | None:
 
 
 def frames(cfg: dict, run_id: str) -> dict:
-    """{"pre_spin": "pre_spin.png", ...} for whichever frames this run captured.
-
-    Two on a losing spin and three on a winning one, so the UI must render whatever is here
-    rather than expecting a fixed pair.
-    """
+    """{"pre_spin": "pre_spin.png", ...} for whichever frames this run captured -- two on a
+    losing spin and three on a winning one, never a fixed pair."""
     folder = run_dir(cfg, run_id)
     found = {}
     for name in frame_names.ORDER:
@@ -214,8 +185,7 @@ def summarise(spin: dict | None) -> dict | None:
         "button": (spin.get("button") or {}).get("name"),
         "capture_size": spin.get("capture_size"),
         "collected_a_pending_win": spin.get("collected_a_pending_win"),
-        # Whether the win at the end of this spin was taken on the glass, which is what makes
-        # the third frame exist and the spin's cash meter final.
+        # Taken on the glass, which is what makes the third frame exist and the cash meter final.
         "win_collected": bool(spin.get("win_collect")),
         "final_stops": spin.get("final_stops"),
         "video": (spin.get("video") or {}).get("file"),
@@ -224,11 +194,8 @@ def summarise(spin: dict | None) -> dict | None:
 
 
 def state(cfg: dict, run_id: str) -> dict:
-    """Everything known about a run, so a page refresh can rebuild itself.
-
-    Both audits are in here, and neither depends on the other: a run may hold a meter
-    verdict, a payline verdict, both or neither, and the two pages read the same object.
-    """
+    """Everything known about a run, so a page refresh can rebuild itself. Both audits are in
+    here and neither depends on the other."""
     require_run(cfg, run_id)
     spin = read_spin(cfg, run_id)
     folder = run_dir(cfg, run_id)
@@ -262,11 +229,8 @@ def recent(cfg: dict, limit: int = 20) -> list[str]:
 def latest(cfg: dict, frame: str | None = None) -> str | None:
     """The newest run id, or the newest one that actually captured `frame`.
 
-    The `frame` filter is what makes this useful to a stage rather than to a listing: the
-    newest folder is not necessarily the newest *usable* one. A capture that failed early
-    leaves a folder holding a run.log and nothing else -- four of the folders on this machine
-    have no spin.json at all -- so a stage that took the top of the list would offer a run and
-    then fail on it. Asking for the newest run holding a `spin_result` skips those instead.
+    The filter matters because the newest folder is not necessarily the newest *usable* one: a
+    capture that failed early leaves a folder with a run.log and nothing else.
     """
     for run_id in all_runs(cfg):
         if frame is None or frame_names.find(run_dir(cfg, run_id), frame):

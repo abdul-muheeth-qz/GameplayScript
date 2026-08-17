@@ -1,27 +1,13 @@
 """The arithmetic that judges one spin. Pure Python, exact `Decimal`.
 
-The sum is three terms long and the inputs are already exact `Decimal`s by the time they
-reach this module:
-
     computed_cash = (previous.cash + current.win) - previous.bet
     difference    = computed_cash - current.cash
     verdict       = pass if -tolerance <= difference <= tolerance else fail
 
-Two things about its shape, because the rest of the stage is written against them:
-
-- **`Verdict` has `working`, `computed_cash`, `difference` and `verdict` in that order**,
-  which is what `runner.validate_records`, `validate.json` and the UI's ledger read.
-  `working` is the sum written out -- what the CLI prints, and what the UI falls back to
-  when the meters could not be read as numbers.
-- **Money stays `Decimal` end to end.** The comparison *is* the verdict, so the terms, the
-  sum, the difference and the tolerance are all `Decimal` and the boundary sits exactly on
-  half a cent instead of wherever binary float lands. Nothing here may become a float.
-
-The tolerance lives here, beside the comparison it governs, rather than in a config file.
-It is not a knob anybody turns: money is two decimal places and `TOLERANCE` is half a
-cent, so the boundary is unreachable in practice and a config that restated it was one
-more thing to keep in step with the code. `judge` still takes it as an argument so a
-caller can pass another value deliberately.
+Two things the rest of the stage is written against. **`Verdict`'s field order** is read by
+`runner`, `validate.json`, the CLI and the UI ledger. And **money stays `Decimal` end to end** --
+the comparison *is* the verdict, so nothing here may become a float. The tolerance lives beside the
+comparison it governs rather than in config, but `judge` takes it as an argument.
 """
 
 from __future__ import annotations
@@ -32,9 +18,8 @@ from typing import Literal, NamedTuple
 # What is checked, and what the UI prints under the ledger heading.
 FORMULA = "current cash = previous cash - bet + win"
 
-# Cash values are decimal currency; treat a difference under half a cent as rounding noise
-# rather than a real mismatch. A Decimal, not a float, so the boundary sits exactly on half
-# a cent instead of wherever binary float lands.
+# Half a cent, i.e. rounding noise rather than a real mismatch. A Decimal, not a float, so the
+# boundary sits exactly there instead of wherever binary float lands.
 TOLERANCE = Decimal("0.005")
 
 
@@ -59,9 +44,8 @@ def judge(previous: dict[str, Decimal], current: dict[str, Decimal],
           tolerance: Decimal = TOLERANCE) -> Verdict:
     """Work the spin's ledger out and say whether the cash meter follows from it.
 
-    `previous` supplies cash and bet, `current` supplies cash and win -- which frame each
-    of those is read from is `runner.find_records`, and it is the correctness question in
-    this stage, not the arithmetic.
+    `previous` supplies cash and bet, `current` cash and win. Which frame each comes from is
+    `runner.find_records`, and that is the correctness question in this stage, not the arithmetic.
     """
     computed_cash = (previous["cash"] - previous["bet"]) + current["win"]
     difference = computed_cash - current["cash"]
@@ -70,9 +54,8 @@ def judge(previous: dict[str, Decimal], current: dict[str, Decimal],
                f"= {pad(computed_cash)}, and the meter read {pad(current['cash'])} "
                f"-- a difference of {pad(difference)}")
 
-    # abs() rather than the two comparisons, and <= so a difference sitting exactly on the
-    # tolerance passes. With money at two places and a tolerance of half a cent that
-    # boundary is unreachable, but a caller may pass a wider one.
+    # <= so a difference sitting exactly on the tolerance passes. Unreachable at half a cent, but a
+    # caller may pass a wider one.
     verdict = "pass" if abs(difference) <= tolerance else "fail"
 
     return Verdict(working, computed_cash, difference, verdict)
