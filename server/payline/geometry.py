@@ -30,15 +30,12 @@ class PaylineError(Exception):
 
 
 # The Payline.xlsx rule set: five lines over a 3x5 grid, cells E{row}{reel} with row 1 at the top
-# and reel 1 at the left. A game whose paytable differs sets its own `paylines`; this is the default
-# because it is the spec paylines.py was written and tested against.
-DEFAULT_PAYLINES = [
-    {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
-    {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
-    {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
-    {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
-    {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]},
-]
+# and reel 1 at the left. A game whose paytable differs sets its own `paylines`, and **the shipped
+# block now does state these explicitly** -- they are the spec's lines and not FortuneOx's real
+# paytable, so a config that leans on a code literal for them reads as though the paytable had been
+# checked. This stays as the default for a block that omits the key, because it is the rule set
+# `paylines.py` and `test_paylines.py` were written and verified against.
+
 
 
 # The key a game's block carries its reel geometry under, in game_config.json.
@@ -80,7 +77,7 @@ class Geometry:
                 f"row_bounds={block.get('row_bounds')!r}, inner_margin_frac="
                 f"{block.get('inner_margin_frac')!r}") from None
 
-        self.paylines = block.get("paylines") or DEFAULT_PAYLINES
+        self.paylines = block.get("paylines") 
         self._validate()
 
     @property

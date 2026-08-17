@@ -144,11 +144,27 @@ returns them merged:
   `spin._ScrubSecrets` keeps it out of `run.log`. (It is **currently tracked in git**, password and
   all — the README used to say otherwise. Worth deciding deliberately rather than by accident.)
 - `server/game_config.json` — the games: `active` names the running executable and `games` holds a
-  block per game (`window_class`, `log`, `targets`, `meter_roi`, `payline_geometry`). No secret, so it
+  block per game (`window_class`, `log`, `targets`, `meter_roi`, `reel_strips`, `payline_geometry`).
+  No secret, so it
   is committable. **Every per-game number is in this one block**, so adding a game is one file: the
   payline reel fractions were a `GAMES` dict in `payline/geometry.py` until they moved here, which
   meant a new game took a code edit and a config edit that had to agree — the same split
   `settings.active_game` exists to close. `geometry.py` keeps the rule, not the numbers.
+
+  **A per-game value may not have a code-level default, and four did.** Each was invisible while
+  both shipped games happened to agree, and each would have gone wrong quietly rather than loudly:
+
+  | was | now |
+  |---|---|
+  | `gamelog.DEFAULT_LOG`, HuffNPuffLink's log path, reached by `game_cfg.get("log") or …` in `spin`, `watch` and `gameclick` | `gamelog.path_for(game_cfg)`, which raises. That file *exists* on this cabinet, so the fallback opened it and the stage read another game's terminal events, deck mode and pending-win carry while reporting success |
+  | `game_cfg.get("window_class", "UnityWndClass")` at four sites | `winfocus.find_game_window(game_cfg)`, one reader for process + class together |
+  | `reelstrips.DEFAULT_STRIPS` + a cabinet-level `payline.reel_stops.strips` | `games.<exe>.reel_strips`, so `active` moves the sheet with everything else — see the Payline section for the measured cross-game grid this produced |
+  | `reelstrips.PLACEHOLDERS`, the mystery-symbol names | `reel_strips.placeholders`, beside the sheet whose names they are |
+
+  The one deliberate exception is `tiles.DEFAULT_REEL_BACKGROUND`, and only because `--profile` is
+  what you run *before* a game has a block: requiring one would mean needing the config to measure
+  the config. It is safe there precisely because that function reports and never decides, and it
+  names which mask it used in `background_source`.
 
 **Both of them, and `captured_files/`, live inside `server/`** — beside the code that reads them,
 because nothing outside that package reads either. The repository root holds the two shared
@@ -157,7 +173,8 @@ picking the wrong one is a silent bug:
 
 - `SERVER_DIR` — this package. Both config files, and `settings.resolve`, so a relative path in a
   config (`output.dir: "captured_files"`) or on the command line (`--out`, `--run-dir`) means
-  `server/…`. `payline.reelstrips.DEFAULT_STRIPS` is relative for the same reason.
+  `server/…`. `games.<exe>.reel_strips.path` is resolved the same way, which is what lets the
+  shipped block say `assets/payline_excel.xlsx` and still be found by a server started elsewhere.
 - `ROOT` — the repository root, one level up. Exactly two readers, and neither is config:
   `api.UI_DIST` (`ui/dist`, genuinely outside the package) and `runs.capture`'s subprocess `cwd`,
   because `python -m server.capture.spin` resolves the module against the CWD and so has to run
@@ -556,7 +573,7 @@ that file's 80 `CreditMeterTouchMsg` lines. Any new game needs this checked, not
 `idle_state`, `gamble_state`, `spin_started` and `deck_changed` all fire, so the collect path
 works — but `bet_locked`, `reels_stopped` and `final_grid` come back **0**, because FortuneOx
 splits its logging into `FortuneOx_Client.log` and `FortuneOx_Server.log` and those three are in
-the *server* file, which `gamelog.path` does not point at. Consequences, neither of them fixed:
+the *server* file, which `games.<exe>.log` does not point at. Consequences, neither of them fixed:
 `classify()` reports `reel_stops`/`final_stops` as empty for this game, and `gameclick.verdict`'s
 closing ", and did not start a spin" rests on `bet_locked`, which for FortuneOx can never appear.
 That clause is only wrong if a click lands on a bet button and *also* collects — FortuneOx's
@@ -762,11 +779,26 @@ and a row, so the two cells rarely carry the same overlay.
 So between 0.70 and the threshold, the decision is handed to an oracle rather than to a number.
 `matcher.ReelStopMatcher` wraps whichever strategy is running and, in that band only, answers on
 **symbol names**: `telemetry.py` reads the spin's `reelsStops` out of the game's own log — the same
-`games.<exe>.log` capture watches — `reelstrips.py` maps those five numbers through
-`server/assets/payline_excel.xlsx`, and two names
+`games.<exe>.log` capture watches — `reelstrips.py` maps those five numbers through that game's own
+spreadsheet, `games.<exe>.reel_strips.path`, and two names
 either match or they do not. Outside the band nothing changes — a confident pixel reading is never
 overturned, which is what stops a stale log or a drifted strip from rewriting a verdict it
 has no business touching.
+
+**Both halves of that sentence are keyed by the same `active`, and the strips half was not.** The
+sheet was `reelstrips.DEFAULT_STRIPS`, a module constant, overridable only by a cabinet-level
+`payline.reel_stops.strips` — so `active` switched the reel geometry, the meter box, the click points
+and the log, and left the reel layout behind. It is the worst place in the app for that, because a
+reel strip is a table of *this game's* symbol names and a wrong one does not fail: it names symbols
+confidently. Measured on this machine before the change, with a `payline_geometry` block added for
+HuffNPuffLink — whose log is the one that actually carries `reelsStops` here — the checkpoint read its
+real stops `[68, 18, 43, 51, 1]`, mapped them through **FortuneOx's** sheet, and reported
+`status: "on"` with a grid of Ace / Mystery1 / King. Now `strips_for(cfg)` reads
+`games.<exe>.reel_strips` and a game without one stands the checkpoint down (`status: "unavailable"`,
+naming the key), so the pixels decide; `reel_stops.strips_game` and `reel_stops.placeholders` in
+`payline.json` say whose sheet a grid came from, "whose reel strips were these?" now being a question
+with an answer. `payline.reel_stops.strips` is retired and **logs a warning if it is still set**,
+because a cabinet-level path that silently stopped being read is the same class of trap.
 
 **The mapping is `strip[reel][stop + row - 1]`, and it was measured, not assumed.** The mapping
 supplied with the request (stops `[24, 79, 153, 25, 0]`) reproduces all fifteen names exactly, and run
@@ -787,9 +819,14 @@ Four things are load-bearing, and each is a way to be confidently wrong:
 - **A mystery symbol cannot decide a pair.** `Mystery1`, `Mystery2` and `Mystery (Orb)` are 15% of
   every strip and they reveal as other art: the supplied example has `Mystery1` at E13 where the frame
   shows an Ace, and run `2026-08-13_155048` has it on all three cells of reel 1 where the frame shows
-  three Ox. So `reelstrips.PLACEHOLDERS` abstains and the pixel verdict stands. `WILD` is deliberately
+  three Ox. So those names abstain and the pixel verdict stands. `WILD` is deliberately
   *not* in that set — it has its own art (the firecrackers) and was drawn as itself on both frames
   checked. Wild *substitution* is not modelled at all; `paylines.py` implements plain COMPARE.
+  The names live in `reel_strips.placeholders` beside the sheet they describe, not in a module
+  constant, and the key is **required rather than defaulted** — the failure is asymmetric, since a
+  set that is too large only makes the checkpoint abstain and the pixels decide, while one that is
+  too small settles a COMPARE on a name the screen is not showing. `[]` is a statement that this
+  game has none and is taken at its word; an absent key is only an omission, and is refused.
 - **Every pair it reaches is reported, agreed with or not** — `reel_stops.adjudications` in
   `payline.json`, a line under the COMPARE in the CLI and in the UI table, and
   `pays_without_checkpoint` beside the verdict. One measured disagreement between the sheet and a
@@ -931,7 +968,7 @@ the numbers were only trustworthy *because* the sheet showed the crop had landed
 Also worth knowing before trusting the pays as a paytable check: the five lines are Payline.xlsx's
 spec, not FortuneOx's real paytable, and `classify()` cannot help — CLAUDE.md's note that
 `reels_stopped` and `final_grid` come back **0** for FortuneOx (they are in `FortuneOx_Server.log`,
-which `gamelog.path` does not point at) means there is no log oracle for the symbol grid on this game.
+which `games.<exe>.log` does not point at) means there is no log oracle for the symbol grid on this game.
 
 ## Extract
 

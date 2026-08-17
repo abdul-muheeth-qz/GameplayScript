@@ -18,10 +18,12 @@ nothing to read. It reads `server/assets/payline_excel.xlsx`; that file is the f
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 
+from ..settings import DEFAULT_GAME_CONFIG
 from . import reelstrips, telemetry
 from .geometry import PaylineError, geometry_for_game
 from .matcher import Decision, ReelStopMatcher
@@ -45,13 +47,30 @@ RUN_153618_GRID = {
 }
 
 
+GAME = "FortuneOx.exe"
+
+
+def game_block(**overrides) -> dict:
+    """FortuneOx's shipped block, by name -- `active` may be pointing at another game.
+
+    Read off game_config.json rather than restated here, so the fixtures below are checked against
+    the strips the cabinet would actually read, and a block that stops validating fails these tests
+    rather than only failing at the cabinet.
+    """
+    with open(DEFAULT_GAME_CONFIG, encoding="utf-8") as fh:
+        block = dict((json.load(fh)["games"] or {})[GAME])
+    block["process"] = GAME
+    block.update(overrides)
+    return block
+
+
 def strips():
-    return reelstrips.load_strips()
+    """The active game's strips, the way the checkpoint reads them."""
+    return reelstrips.strips_for({"game": game_block()})
 
 
 def geometry():
-    """FortuneOx's shipped block, by name -- `active` may be pointing at another game."""
-    return geometry_for_game("FortuneOx.exe")
+    return geometry_for_game(GAME)
 
 
 class FixedMatcher:
@@ -134,18 +153,63 @@ def test_missing_spreadsheet_names_the_setting():
     try:
         reelstrips.load_strips(os.path.join(tempfile.gettempdir(), "no_such_sheet.xlsx"))
     except PaylineError as exc:
-        assert "payline.reel_stops.strips" in str(exc)
+        assert "reel_strips" in str(exc) and "path" in str(exc)
     else:
         raise AssertionError("a missing spreadsheet was accepted")
 
 
 def test_placeholders_are_the_mystery_symbols():
     """Mystery symbols reveal as other art; WILD is drawn as itself and must stay comparable."""
-    assert reelstrips.is_placeholder("Mystery1")
-    assert reelstrips.is_placeholder("mystery (orb)")
-    assert not reelstrips.is_placeholder("WILD")
-    assert not reelstrips.is_placeholder("Arm Band")
-    assert not reelstrips.is_placeholder(None)
+    s = strips()
+    assert s.is_placeholder("Mystery1")
+    assert s.is_placeholder("mystery (orb)")
+    assert not s.is_placeholder("WILD")
+    assert not s.is_placeholder("Arm Band")
+    assert not s.is_placeholder(None)
+
+
+# -- the strips belong to one game, and are read off its own block ----------
+
+def test_strips_come_from_the_active_games_block():
+    """The path is `games.<exe>.reel_strips`, so `active` moves the sheet with everything else."""
+    s = strips()
+    assert s.source.endswith("payline_excel.xlsx")
+    assert s.placeholders == {"MYSTERY1", "MYSTERY2", "MYSTERY (ORB)"}
+
+
+def test_a_game_with_no_strips_is_refused_rather_than_given_anothers():
+    """The bug this key exists for, in miniature.
+
+    Before the strips were per-game they were a module default with a cabinet-level override, so a
+    game with reel geometry but no sheet of its own was handed whichever sheet was shipped. Measured
+    on this machine: HuffNPuffLink's real stops [68, 18, 43, 51, 1] mapped through FortuneOx's sheet,
+    reported `status: "on"` with a confident Ace/Mystery1/King grid, and nothing said the names and
+    the spin came from different games.
+    """
+    block = game_block()
+    del block["reel_strips"]
+    try:
+        reelstrips.strips_for({"game": block})
+    except PaylineError as exc:
+        assert "reel_strips" in str(exc) and GAME in str(exc)
+        assert "another game" in str(exc)
+    else:
+        raise AssertionError("a game with no reel strips was given another game's")
+
+
+def test_absent_placeholders_are_refused_but_an_empty_list_is_honoured():
+    """A too-small placeholder set decides a COMPARE on a name the screen is not showing, so the
+    key is required; [] is a statement that this game has none, and is taken at its word."""
+    block = game_block(reel_strips={"path": "assets/payline_excel.xlsx"})
+    try:
+        reelstrips.strips_for({"game": block})
+    except PaylineError as exc:
+        assert "placeholders" in str(exc)
+    else:
+        raise AssertionError("a sheet with no stated placeholders was accepted")
+
+    block = game_block(reel_strips={"path": "assets/payline_excel.xlsx", "placeholders": []})
+    assert reelstrips.strips_for({"game": block}).placeholders == frozenset()
 
 
 # -- the checkpoint --------------------------------------------------------
@@ -180,9 +244,15 @@ def test_confident_readings_are_never_touched():
 
 
 def test_mystery_abstains_and_says_so():
-    """A mystery name cannot decide a pair -- the frame may be showing anything."""
-    grid = strips().grid(SUPPLIED_STOPS, 3, 5)                 # E13 is Mystery1
-    matcher = ReelStopMatcher(FixedMatcher(0.80), grid, (0.70, 0.90))
+    """A mystery name cannot decide a pair -- the frame may be showing anything.
+
+    The placeholder names travel with the sheet they came from, so the matcher is given the strips'
+    own set rather than reading a module constant that a change of game would not have moved.
+    """
+    s = strips()
+    grid = s.grid(SUPPLIED_STOPS, 3, 5)                        # E13 is Mystery1
+    matcher = ReelStopMatcher(FixedMatcher(0.80), grid, (0.70, 0.90),
+                              placeholders=s.placeholders)
     decision = matcher.compare("E13", "E23")
     assert decision.match is False                             # the inner verdict, unchanged
     assert matcher.overrides() == 0
@@ -352,7 +422,9 @@ def test_checkpoint_stands_down_for_another_spin():
     os.utime(frame, (old, old))
 
     inner = FixedMatcher(0.80)
-    cfg = {"game": {"log": log}}
+    # The whole game block, log swapped for the fixture: the checkpoint now reads this game's reel
+    # strips out of it as well as its log, so a bare {"log": ...} has no sheet to map stops through.
+    cfg = {"game": game_block(log=log)}
     settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
     matcher, record = build_checkpoint(inner, geometry(), cfg, settings, "pixel", frame)
     assert matcher is inner, "the checkpoint judged a frame it could not identify"
@@ -384,11 +456,46 @@ def test_checkpoint_runs_for_a_frame_it_can_identify():
 
     settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
     matcher, record = build_checkpoint(FixedMatcher(0.80), geometry(),
-                                       {"game": {"log": log}}, settings, "pixel", frame)
+                                       {"game": game_block(log=log)}, settings, "pixel", frame)
     assert record["status"] == "on" and record["matched"] is True
     assert record["stops"] == [135, 89, 15, 144, 75]
     assert record["band"] == [0.70, 0.90]                        # high tracks the threshold
     assert matcher.labels()["E11"]                               # names come from the stops
+    # Whose sheet these names came from, in the record rather than left to be assumed.
+    assert record["strips_game"] == GAME
+    assert record["placeholders"] == ["MYSTERY (ORB)", "MYSTERY1", "MYSTERY2"]
+
+
+def test_checkpoint_stands_down_for_a_game_with_no_strips_of_its_own():
+    """End to end: reel geometry and a log full of stops, but no sheet -- pixels decide.
+
+    The failure direction that matters. Standing down costs the audit an ambiguous COMPARE it might
+    have settled; mapping the stops through a stranger's sheet costs it the verdict, and looks
+    exactly like a working checkpoint while doing so.
+    """
+    import datetime as dt
+
+    from .matcher import build_checkpoint
+
+    folder = tempfile.mkdtemp()
+    log = os.path.join(folder, LOG_NAME)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write(SAMPLE_LOG)
+    frame = os.path.join(folder, "spin_result.png")
+    with open(frame, "wb") as fh:
+        fh.write(b"")
+    shot = dt.datetime(2026, 8, 13, 15, 51, 7).timestamp()
+    os.utime(frame, (shot, shot))
+
+    block = game_block(log=log)
+    del block["reel_strips"]
+    inner = FixedMatcher(0.80)
+    settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
+    matcher, record = build_checkpoint(inner, geometry(), {"game": block}, settings,
+                                       "pixel", frame)
+    assert matcher is inner, "the checkpoint used another game's reel strips"
+    assert record["status"] == "unavailable"
+    assert "reel_strips" in record["detail"]
 
 
 def test_a_missing_log_names_the_setting():

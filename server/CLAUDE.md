@@ -30,8 +30,8 @@ against the folders on disk, `payline` against its two test modules **plus the c
 `settings.py` owns both, and nothing is relative to the CWD.
 
 - **`SERVER_DIR`** — this package. Both config files, and what `settings.resolve` hangs a relative
-  path off: `output.dir`, `--out`, `--run-dir`, `payline.image`, `reelstrips.DEFAULT_STRIPS`. Reach
-  for `resolve()` rather than composing a path yourself.
+  path off: `output.dir`, `--out`, `--run-dir`, `payline.image`, `games.<exe>.reel_strips.path`.
+  Reach for `resolve()` rather than composing a path yourself.
 - **`ROOT`** — the repository root. **Exactly two readers, and neither is config:** `api.UI_DIST`
   (`ui/dist`, genuinely outside this package) and `runs.capture`'s subprocess `cwd`, because
   `python -m server.capture.spin` resolves the module against the CWD and must run from the folder
@@ -87,9 +87,17 @@ Two files, both in this folder, and `settings.load_config` returns them merged �
   `games.<exe>.payline_geometry`; `geometry.py` keeps the rule and validates a block, and there is no
   Python literal left for a person to have to edit in step with the config.
 - **An `active` with no block raises in the loader.** So does a game with no `targets` when a click
-  is needed, and a game with no `payline_geometry`. **Never add a fallback to another game's numbers**
-  — normalized coordinates survive a change of *scale* and not a change of *game*, and a fallback is
-  indistinguishable from correct behaviour until the money is wrong.
+  is needed, a game with no `payline_geometry`, a game with no `log`, a game with no `window_class`,
+  and a game with no `reel_strips` when the checkpoint wants one. **Never add a fallback to another
+  game's numbers** — normalized coordinates survive a change of *scale* and not a change of *game*,
+  and a fallback is indistinguishable from correct behaviour until the money is wrong.
+- **One reader per per-game key, and it raises naming the key.** `gamelog.path_for`,
+  `winfocus.find_game_window`, `gameclick.targets_for`, `roi.locate_meter_roi`,
+  `payline.geometry_for`, `reelstrips.strips_for`, `telemetry.game_logs`. Four of these were
+  `.get(key, <literal>)` at the call site until the literals were removed — the root
+  [CLAUDE.md](../CLAUDE.md) table says what each did when it fired, and the log one is the reason to
+  distrust the pattern generally: it read a *different game's* live log and reported success. If you
+  add a per-game key, add its reader here rather than a default at the call site.
 - **Nothing that is a measurement is configurable**, and don't move one back into `config.json` to
   make it tunable. `spin.TIMEOUT_S` and its neighbours, `watch.IDLE_TIMEOUT_S`,
   `gamelog.IDLE_TIMEOUT_S`, `ideck.CLICK_HOLD_MS`, `gameclick.CLICK_METHOD`,
@@ -201,6 +209,14 @@ is `("cash", "bet")` for that reason, and don't add `win` back "for completeness
   it stands down (`status: "unavailable"`) rather than judging on the newest entry in the log. A
   mystery symbol abstains and the pixel verdict stands. Every pair it reaches is reported whether it
   agreed or not, and `cross_check` runs over the **inner** matcher, not the checkpointed one.
+- **Both of its inputs are the active game's, and stand down together.** The stops come from
+  `games.<exe>.log` and the strips from `games.<exe>.reel_strips` — `reelstrips.strips_for(cfg)`,
+  never a module default and never a cabinet-level path, because a reel strip is a table of *one
+  game's* symbol names and a wrong one does not fail, it names symbols confidently. The root
+  [CLAUDE.md](../CLAUDE.md) has the measured grid that came out of the old arrangement. `placeholders`
+  travels with the sheet and is **required** rather than defaulted: too large only abstains, too small
+  decides a COMPARE on a name the screen is not showing, so `[]` is a statement and an absent key is
+  refused. `reel_stops.strips_game` and `reel_stops.placeholders` put the provenance in the record.
 - **Do not collapse the two steps in `runner`.** `_tiles_are_current` depends on that boundary, and
   it was bought with two bugs — saved tiles are reused only when the recorded image path *and* the
   geometry still match, and the source is resolved unconditionally before the cache is consulted.

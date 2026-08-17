@@ -24,7 +24,7 @@ import os
 from .. import frames
 from ..settings import resolve
 from . import embeddings as emb
-from . import reelstrips, report, telemetry, tiles as tiling
+from . import report, telemetry, tiles as tiling
 from .geometry import PaylineError, geometry_for
 from .matcher import agreement, build_checkpoint, build_matcher, cross_check
 from .paylines import evaluate_all
@@ -46,12 +46,12 @@ DEFAULTS = {
     "save_embeddings": True,
     "image": None,
     "symbol_library": None,
-    # The reel-stop checkpoint. No path to set: the stops come from the active game's own log, the
-    # same file capture reads. `band` null runs from 0.70 up to whatever `thresholds` says, so the
-    # two cannot drift apart.
+    # The reel-stop checkpoint. **No paths to set here at all**: the stops come from the active
+    # game's own log and the strips from its own `reel_strips` block, both in game_config.json, so
+    # one `active` line moves them together. `band` null runs from 0.70 up to whatever `thresholds`
+    # says, so the two cannot drift apart.
     "reel_stops": {
         "enabled": True,
-        "strips": reelstrips.DEFAULT_STRIPS,
         "band": None,
         "tolerance_s": telemetry.DEFAULT_TOLERANCE_S,
         # Off, so the checkpoint only speaks about the spin the frame's own timestamp proves it is.
@@ -70,11 +70,9 @@ def settings_for(cfg: dict | None) -> dict:
         if merged.get(key):
             merged[key] = resolve(merged[key])
     # The one nested block, merged key by key rather than replaced: a config setting only
-    # `tolerance_s` must still get the default band and strips.
+    # `tolerance_s` must still get the default band.
     stops = dict(DEFAULTS["reel_stops"])
     stops.update(merged.get("reel_stops") or {})
-    if stops.get("strips"):
-        stops["strips"] = resolve(stops["strips"])
     merged["reel_stops"] = stops
     return merged
 

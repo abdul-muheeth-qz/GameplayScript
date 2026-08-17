@@ -184,15 +184,19 @@ class ReelStopMatcher(BaseMatcher):
     It abstains rather than guessing, and reports it, in three cases: no stops or strips, a mystery
     symbol (which reveals as other art), and a cell the grid cannot name. Abstaining leaves the inner
     decision untouched. Every pair it reaches is recorded in `adjudications` either way.
+
+    `placeholders` comes from the strips this grid was built from (`games.<exe>.reel_strips`), not
+    from a module constant: which names are mystery symbols is a fact about one game's sheet.
     """
     name = "reel-stops"
 
-    def __init__(self, inner, grid: dict, band, source: str = ""):
+    def __init__(self, inner, grid: dict, band, source: str = "", placeholders=()):
         super().__init__(inner.embeddings)
         self.inner = inner
         self.grid = dict(grid or {})
         self.low, self.high = (float(band[0]), float(band[1]))
         self.source = source
+        self.placeholders = reelstrips.normalize_placeholders(placeholders)
         self.adjudications: list[dict] = []
         # The inner matcher's name, so `cross_check`'s keys and `payline.json`'s `method` still say
         # which vision strategy ran. The checkpoint is not one of METHODS.
@@ -211,6 +215,9 @@ class ReelStopMatcher(BaseMatcher):
     def _names(self, a, b):
         return self.grid.get(a), self.grid.get(b)
 
+    def _is_placeholder(self, symbol: str | None) -> bool:
+        return bool(symbol) and symbol.strip().upper() in self.placeholders
+
     def compare(self, a, b):
         decision = self.inner.compare(a, b)
         sim = decision.similarity
@@ -225,7 +232,7 @@ class ReelStopMatcher(BaseMatcher):
         elif name_a is None or name_b is None:
             missing = a if name_a is None else b
             note = f"the reel stops name no symbol for {missing}"
-        elif reelstrips.is_placeholder(name_a) or reelstrips.is_placeholder(name_b):
+        elif self._is_placeholder(name_a) or self._is_placeholder(name_b):
             note = (f"{name_a} / {name_b} -- a mystery symbol reveals as other art, so the "
                     f"strip cannot say what is on the screen")
 
@@ -357,9 +364,18 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
     if not stops_cfg.get("enabled", True):
         return inner, {"status": "off", "detail": "payline.reel_stops.enabled is false"}
 
+    if stops_cfg.get("strips"):
+        # Retired, and loud rather than silently ignored: one cabinet-level path could not follow
+        # `active` from one game to the next, which is the whole reason the key moved.
+        LOG.warning("payline.reel_stops.strips (%s) is no longer read -- the reel strips are a "
+                    "per-game asset now, named by games.<exe>.reel_strips in game_config.json",
+                    stops_cfg["strips"])
+
     try:
         band = _band(settings, inner, backend)
-        strips = reelstrips.load_strips(stops_cfg.get("strips"))
+        # The active game's own sheet. A game with no block raises here, which is caught below and
+        # reported as unavailable, so the pixels decide rather than another game's symbol names.
+        strips = reelstrips.strips_for(cfg)
         found = telemetry.latest_stops(cfg, image_path,
                                        float(stops_cfg.get("tolerance_s")
                                              or telemetry.DEFAULT_TOLERANCE_S))
@@ -383,12 +399,17 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
             **found,
         }
 
-    wrapper = ReelStopMatcher(inner, grid, band, source=strips.source)
+    wrapper = ReelStopMatcher(inner, grid, band, source=strips.source,
+                              placeholders=strips.placeholders)
     record = {
         "status": "on",
         "band": [round(band[0], 4), round(band[1], 4)],
         "strips": strips.source,
         "strip_lengths": strips.lengths(),
+        # Which game's sheet this grid came from, and which of its names cannot decide a pair.
+        # In the record because "whose reel strips were these?" is now a question with an answer.
+        "strips_game": (cfg.get("game") or {}).get("process"),
+        "placeholders": sorted(strips.placeholders),
         "symbol_grid": grid,
         **found,
     }

@@ -18,6 +18,10 @@
         "gamble": [0.0694, 0.9383]
       },
       "meter_roi": [0.229264, 0.844468, 0.762349, 0.884554],
+      "reel_strips": {
+        "path": "assets/payline_excel.xlsx",
+        "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+      },
       "payline_geometry": {
         "label": "fortuneox_portrait",
         "reels_roi": [0.045370, 0.563548, 0.956481, 0.826933],
@@ -33,7 +37,21 @@
           [0.333333, 0.666667],
           [0.666667, 1.000000]
         ],
-        "inner_margin_frac": 0.0407
+        "inner_margin_frac": 0.0407,
+        "reel_background": {
+          "blue_min": 55,
+          "green_max": 75,
+          "red_max": 150,
+          "blue_over_green": 35,
+          "red_over_green": 5
+        },
+        "paylines": [
+          {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
+          {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
+          {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
+          {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
+          {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]}
+        ]
       }
     }
   }

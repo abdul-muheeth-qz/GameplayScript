@@ -3,7 +3,7 @@
 
     python -m server.capture.gameclick --probe 0.5 0.86      # click there, report what happened
     python -m server.capture.gameclick --calibrate           # click TAKE WIN by hand; get the point
-    python -m server.capture.gameclick take_win              # a named target from config.json
+    python -m server.capture.gameclick take_win              # a named target from game_config.json
 
 **Why it exists:** the i-Deck has no separate TAKE WIN. Rebet relabels to "Collect Win" and means
 *collect **and** bet again*, so one press moves the money twice and the frames no longer bracket a
@@ -80,15 +80,6 @@ class GameClickError(RuntimeError):
     pass
 
 
-def find_window(process: str, window_class: str) -> winfocus.Window:
-    try:
-        return winfocus.find_window(process=process, window_class=window_class)
-    except winfocus.WindowNotFound as exc:
-        raise GameClickError(f"{exc} Check \"active\" in game_config.json, and that game's "
-                             "\"window_class\", if the executable or window class differ.") \
-            from exc
-
-
 # -- where to click --------------------------------------------------------
 
 
@@ -127,7 +118,7 @@ def resolve(window: winfocus.Window, point) -> tuple[tuple[int, int], tuple[int,
                              "--calibrate to measure one.") from exc
     if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
         raise GameClickError(f"the target {fx}, {fy} is outside the window. Targets in "
-                             "\"game.targets\" are normalized: 0.0 to 1.0 on each axis, not "
+                             "games.<exe>.targets are normalized: 0.0 to 1.0 on each axis, not "
                              "pixels.")
 
     width, height = winfocus.client_size(window)
@@ -386,13 +377,18 @@ def calibrate(window, log_path, expect: str, timeout: float) -> tuple[float, flo
     LOG.info("the game log said: %s", ", ".join(seen) if seen else "(nothing)")
     if expect not in seen:
         LOG.error("error: the game did not log %s, so that click did not hit it. Nothing is "
-                  "reported -- a wrong coordinate in config.json is worse than none. Try "
+                  "reported -- a wrong coordinate in game_config.json is worse than none. Try "
                   "again on the %s widget.", expect, expect.replace("_", " ").upper())
         return None
 
     LOG.info("")
-    LOG.info("confirmed by the game's own log. Put this in config.json:")
-    LOG.info('    "game": { "targets": { "%s": [%s, %s] } }', expect, *normalized)
+    # Named against the game that was actually clicked, and into game_config.json where every other
+    # per-game number lives -- this used to print a `"game": { "targets": ... }` block for
+    # config.json, which is neither the right file nor the right shape, and it is the instruction a
+    # person follows while adding a game.
+    LOG.info("confirmed by the game's own log. Put this in game_config.json:")
+    LOG.info('    "games": { "%s": { "targets": { "%s": [%s, %s] } } }',
+             window.process, expect, *normalized)
     return normalized
 
 
@@ -405,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__.split("\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", nargs="?",
-                        help="a named target for this game in config.json, e.g. take_win")
+                        help="a named target for this game in game_config.json, e.g. take_win")
     parser.add_argument("--probe", nargs=2, type=float, metavar=("X", "Y"),
                         help="click this normalized point instead of a named target")
     parser.add_argument("--calibrate", action="store_true",
@@ -442,7 +438,6 @@ def run(args) -> int:
     # already agreed with each other.
     game_cfg = cfg["game"]
     click_cfg = cfg.get("game_click", {})
-    log_path = game_cfg.get("log") or gamelog.DEFAULT_LOG
     method = args.method or click_cfg.get("click_method", CLICK_METHOD)
     hold_ms = CLICK_HOLD_MS
     confirm_timeout = CONFIRM_TIMEOUT_S
@@ -453,7 +448,10 @@ def run(args) -> int:
     process = game_cfg["process"]
 
     try:
-        window = find_window(process, game_cfg.get("window_class", "UnityWndClass"))
+        # Inside the try: both of these refuse a game block that does not name its own log or
+        # window class, and that refusal is a message to read rather than a traceback.
+        log_path = gamelog.path_for(game_cfg)
+        window = winfocus.find_game_window(game_cfg)
         winfocus.ensure_restored(window)
 
         if args.calibrate:

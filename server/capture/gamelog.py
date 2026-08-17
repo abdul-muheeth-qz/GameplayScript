@@ -23,8 +23,6 @@ from datetime import datetime
 
 from . import logtail
 
-DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
-
 # How long the log may go quiet before a spin is called over. It **restarts on every event**, which
 # is what lets a 53 s Hold & Spin be followed to its end -- a flat total was tried and cut a feature
 # off mid-way. A measurement, so it lives here rather than in config.json.
@@ -245,6 +243,32 @@ class GameLogError(RuntimeError):
     pass
 
 
+def path_for(game_cfg: dict) -> str:
+    """The active game's log, out of its own block (`cfg["game"]`).
+
+    **There is no default here, and there must not be one.** This was a module constant holding
+    HuffNPuffLink's path, reached whenever a game block had no `log` -- and because that file
+    exists on this cabinet, `GameLogWatcher` opened it happily and the whole stage then read its
+    terminal events, its deck mode and its pending-win carry off *another game's* spins while
+    reporting success. Every other per-game value refuses to guess for the same reason
+    (`gameclick.targets_for`, `payline.geometry_for`, `roi.locate_meter_roi`); the log was the last
+    one that did not.
+
+    `payline.telemetry.game_logs` asks the same question of the same key and additionally globs the
+    rotated siblings, so it stays separate: this one raises `GameLogError`, which is what
+    `spin.run` catches.
+    """
+    path = (game_cfg or {}).get("log")
+    if not path:
+        process = (game_cfg or {}).get("process") or "the active game"
+        raise GameLogError(
+            f"the \"{process}\" block in game_config.json has no \"log\", so there is no way to "
+            f"tell when a spin has finished -- and no other game's log is safe to read instead, "
+            f"since it would report that game's spins as this one's. Set "
+            f"games[\"{process}\"].log to the file this game writes.")
+    return path
+
+
 class Event:
     __slots__ = ("name", "at", "fields")
 
@@ -318,12 +342,13 @@ def _parse(text: str) -> list[Event]:
 class GameLogWatcher:
     """Turns the game's log into events, from a mark forward."""
 
-    def __init__(self, path: str = DEFAULT_LOG):
+    def __init__(self, path: str):
         self.path = path
         if not os.path.isfile(path):
             raise GameLogError(
                 f"the game log {path} does not exist, so there is no way to tell when a spin "
-                "has finished. Set \"gamelog.path\" in config.json.")
+                "has finished. Check games.<exe>.log in game_config.json against the file the "
+                "running game actually writes.")
         self._tail = logtail.LogTail(path)
         self._pending: list[Event] = []
         self.mark()
@@ -375,11 +400,12 @@ class GameLogWatcher:
             time.sleep(interval)
 
 
-def current_state(path: str = DEFAULT_LOG, limit: int = 512 * 1024) -> dict:
+def current_state(path: str, limit: int = 512 * 1024) -> dict:
     """What the game is doing now, from the state transitions already in the log -- history rather
     than the next change, so it answers immediately after hours of idling."""
     if not os.path.isfile(path):
-        raise GameLogError(f"the game log {path} does not exist. Set \"gamelog.path\".")
+        raise GameLogError(f"the game log {path} does not exist. Check games.<exe>.log in "
+                           f"game_config.json.")
     state = {"idle": None, "gamble": None, "feature": None, "last_stops": None, "at": None,
              "bet": None, "denom": None}
     for event in _parse(logtail.LogTail(path).tail(limit)):

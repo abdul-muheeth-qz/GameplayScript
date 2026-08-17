@@ -58,7 +58,7 @@ server/
   game_config.json    the games: `active`, and a block per executable
   captured_files/     one folder per run. Not committed
   requirements.txt    the one dependency list
-  assets/             payline_excel.xlsx -- the reel strips the checkpoint maps stops through
+  assets/             payline_excel.xlsx -- FortuneOx's reel strips, named by its own block
 
   settings.py         the one loader for BOTH config files, and the two anchors below
   frames.py           the three frame names, and which part of the ledger each supplies
@@ -86,7 +86,7 @@ to the current working directory.
 
 | | |
 |---|---|
-| `SERVER_DIR` | this package. Both config files, and what `settings.resolve` hangs a relative path off — so `output.dir: "captured_files"` means `server/captured_files/`, and so does a relative `--out` or `--run-dir`. `payline.reelstrips.DEFAULT_STRIPS` is relative for the same reason |
+| `SERVER_DIR` | this package. Both config files, and what `settings.resolve` hangs a relative path off — so `output.dir: "captured_files"` means `server/captured_files/`, and so does a relative `--out` or `--run-dir`. `games.<exe>.reel_strips.path` is resolved the same way, which is why the shipped block can say `assets/payline_excel.xlsx` |
 | `ROOT` | the repository root, one level up. **Exactly two readers, and neither is config:** `api.UI_DIST` (`ui/dist`, genuinely outside this package) and `runs.capture`'s subprocess `cwd`, because `python -m server.capture.spin` resolves the module name against the CWD and so must run from the folder that *contains* `server/` |
 
 Reach for `SERVER_DIR`, or better `resolve()`. A path anchored one level too high resolves to a

@@ -211,11 +211,37 @@ def find_window(process: str, window_class: str) -> Window:
     if not matches:
         raise WindowNotFound(
             f"no visible window matching process {process!r} and class {window_class!r}. "
-            "Is it running? If the executable or window class differs, update config.json."
+            f"Is it running? Check \"active\" in game_config.json, and that game's "
+            f"\"window_class\", if the executable or window class differ."
         )
     if len(matches) > 1:
         LOG.debug("%d windows matched, picking the largest: %r", len(matches), matches[0])
     return matches[0]
+
+
+def find_game_window(game_cfg: dict) -> Window:
+    """The active game's window, from its own block -- process and `window_class` together.
+
+    One reader for both keys, because they have to agree about which game is running and used to be
+    read separately at three call sites, each supplying its own literal `"UnityWndClass"` default.
+    Both shipped games are Unity, so that default was invisible rather than harmless: a game with no
+    `window_class` reported "no visible window matching class 'UnityWndClass'" -- a hunt for a
+    missing game -- instead of naming the key nobody had filled in.
+    """
+    game_cfg = game_cfg or {}
+    process = game_cfg.get("process")
+    window_class = game_cfg.get("window_class")
+    if not process:
+        raise WindowNotFound(
+            "there is no active game, so there is no window to match. Set \"active\" in "
+            "game_config.json to the running game's executable name.")
+    if not window_class:
+        raise WindowNotFound(
+            f"the \"{process}\" block in game_config.json has no \"window_class\", so its window "
+            f"cannot be matched -- windows are matched on process + class and never on the title, "
+            f"which Unity changes. Set games[\"{process}\"].window_class (it is "
+            f"\"UnityWndClass\" for a Unity client).")
+    return find_window(process, window_class)
 
 
 def client_size(window: Window) -> tuple[int, int]:

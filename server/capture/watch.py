@@ -248,8 +248,7 @@ class Watch:
         self.last_reacquire = now
         LOG.info("looking the game window up again (%s)", why)
         try:
-            self.game = winfocus.find_window(self.game_cfg["process"],
-                                             self.game_cfg.get("window_class", "UnityWndClass"))
+            self.game = winfocus.find_game_window(self.game_cfg)
             winfocus.ensure_restored(self.game)
             self.native = spin.capture_size(self.obs, self.scene, self.source, self.game,
                                             attempts=6, delay=0.5)
@@ -573,14 +572,15 @@ def run(args) -> int:
         obs.check_format(img_format)
         obs.check_source(source)
 
-        game = winfocus.find_window(game_cfg["process"],
-                                    game_cfg.get("window_class", "UnityWndClass"))
+        game = winfocus.find_game_window(game_cfg)
         LOG.info("game window: %s", game)
         winfocus.ensure_restored(game)
 
         # The game log is the one thing this cannot do without: it is the only record of an
-        # action taken on the touchscreen, and the only thing that says when one is finished.
-        watcher = gamelog.GameLogWatcher(game_cfg.get("log") or gamelog.DEFAULT_LOG)
+        # action taken on the touchscreen, and the only thing that says when one is finished. Its
+        # own log, named in its own block -- another game's would attribute a stranger's spins to
+        # the person sitting here.
+        watcher = gamelog.GameLogWatcher(gamelog.path_for(game_cfg))
         LOG.info("game log:  %s", watcher.path)
 
         # The panel is optional here, unlike in spin.py -- nothing is being clicked, so it is

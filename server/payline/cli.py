@@ -60,14 +60,19 @@ def main(argv=None) -> int:
         return EXIT_ERROR
 
     if args.profile:
-        from .tiles import profile
+        from .tiles import background_for, profile
 
         image, *box = args.profile
+        # The active game's own reel-background bounds when it has them, and the built-in default
+        # otherwise -- which is the normal case here, `--profile` being what you run for a game that
+        # has no block yet. Either way the answer names which was used.
+        bounds, origin = background_for(cfg)
         try:
-            result = profile(image, *(int(v) for v in box))
+            result = profile(image, *(int(v) for v in box), background_bounds=bounds)
         except (PaylineError, ValueError) as exc:
             print(exc, file=sys.stderr)
             return EXIT_ERROR
+        result["background_source"] = origin
         # Hundreds of numbers each, and only useful when reading an edge by hand.
         dense = {k: result.pop(k) for k in ("row_density", "col_density")}
         print(json.dumps(result, indent=2))

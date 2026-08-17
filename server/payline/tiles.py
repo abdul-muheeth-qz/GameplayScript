@@ -150,8 +150,38 @@ def load_tiles(out_dir: str, geometry) -> dict[str, Image.Image] | None:
     return tiles
 
 
+# The reel background as named bounds rather than as an expression: "clearly coloured, and neither
+# the bright frame art nor near-black". These five numbers describe FortuneOx's purple field, which
+# is the only art they were measured on, so a game whose reels sit on another colour sets its own
+# `reel_background` in its `payline_geometry` block and needs no code edit.
+#
+# **This one keeps a default, unlike every other per-game number here, and the reason is the
+# bootstrap:** `--profile` is what a person runs *before* that game has a block at all, so requiring
+# one would mean needing the config in order to measure the config. It is safe to default precisely
+# because this function reports and never decides -- a wrong mask shows up as obviously wrong density
+# numbers a human is reading, and it cannot reach a verdict. `background_source` says which was used.
+DEFAULT_REEL_BACKGROUND = {
+    "blue_min": 55,
+    "green_max": 75,
+    "red_max": 150,
+    "blue_over_green": 35,
+    "red_over_green": 5,
+}
+
+
+def background_for(cfg: dict | None) -> tuple[dict, str]:
+    """The active game's reel-background bounds, and where they came from."""
+    game = (cfg or {}).get("game") or {}
+    block = (game.get("payline_geometry") or {}).get("reel_background")
+    if block:
+        merged = dict(DEFAULT_REEL_BACKGROUND)
+        merged.update(block)
+        return merged, f"games.{game.get('process')}.payline_geometry.reel_background"
+    return dict(DEFAULT_REEL_BACKGROUND), "the built-in default (measured on FortuneOx's purple)"
+
+
 def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
-            sparse: float = 0.10) -> dict:
+            sparse: float = 0.10, background_bounds: dict | None = None) -> dict:
     """Reel-background density along both axes of a region -- the measuring aid for a new game.
 
     Given a rough box around the reels, this reports where the background starts and stops and
@@ -173,10 +203,13 @@ def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
     height, width, _ = frame.shape
     red, green, blue = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
 
-    # The saturated non-grey field the symbols sit on -- purple here. The test is "clearly coloured,
-    # and neither the bright frame art nor near-black"; edit it for a game with another background.
-    background = ((blue > 55) & (green < 75) & (blue > green + 35)
-                  & (red > green + 5) & (red < 150))
+    bounds = dict(DEFAULT_REEL_BACKGROUND)
+    bounds.update(background_bounds or {})
+    background = ((blue > bounds["blue_min"])
+                  & (green < bounds["green_max"])
+                  & (blue > green + bounds["blue_over_green"])
+                  & (red > green + bounds["red_over_green"])
+                  & (red < bounds["red_max"]))
 
     x0, x1 = max(0, x0), min(width, x1)
     y0, y1 = max(0, y0), min(height, y1)
@@ -205,6 +238,9 @@ def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
     return {
         "frame": f"{width}x{height}",
         "searched": (x0, y0, x1, y1),
+        # Which mask produced these numbers. A density profile read off the wrong background is the
+        # one way this aid misleads, so it says so rather than leaving it to be inferred.
+        "background_bounds": bounds,
         # The reels_roi edges, if the region was drawn generously enough around them.
         "background_rows": vertical,
         "background_cols": horizontal,

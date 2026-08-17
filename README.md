@@ -1071,6 +1071,20 @@ reels into one blob, because the kernel that bridges a symbol also bridges an 8 
 crop here does not crash; it reads a confident grid off the wrong pixels, which is worth a minute of
 a person's attention. `tiles.profile`'s docstring keeps that record so neither is retried.
 
+The mask it measures density with is the reel background's own colour, so a game whose reels sit on
+something other than FortuneOx's purple sets `payline_geometry.reel_background` (five named bounds:
+`blue_min`, `green_max`, `red_max`, `blue_over_green`, `red_over_green`) and needs no code edit.
+**This is the one per-game value that keeps a built-in default**, because `--profile` is what you run
+*before* the game has a block at all and requiring one would mean needing the config in order to
+measure the config. It is safe here and nowhere else for one reason: this function reports and never
+decides, so a wrong mask produces obviously wrong numbers a person is already reading rather than a
+verdict. It names which one it used in `background_source` either way.
+
+Two more blocks for a new game, and neither has a fallback: `reel_strips` (that game's own strip
+spreadsheet plus its mystery-symbol names) if the reel-stop checkpoint is to run at all, and
+`paylines` inside `payline_geometry` if its paytable is not the five spec lines. Leave `reel_strips`
+out and the checkpoint stands down and says so; the audit is still complete on the pixels.
+
 ### COMPARE is not equality, so the threshold is the weak point
 
 Two embeddings of the same symbol are never equal, so a decision rule is needed, and the rule is the
@@ -1111,7 +1125,7 @@ So between 0.70 and the threshold -- and **only** there -- the decision is hande
 account of the spin:
 
     telemetry.py    games.<exe>.log  ->  [Slot.HandleSlotReelStoppedMessage] reelsStops[86 ...]
-    reelstrips.py   server/assets/payline_excel.xlsx        ->  strip[reel][stop + row - 1]
+    reelstrips.py   games.<exe>.reel_strips.path            ->  strip[reel][stop + row - 1]
     matcher.py      two symbol names, which either match or do not
 
 `E{row}{reel}` is `strip[reel][stop + row - 1]`, row 1 at the top, and that rule was measured rather
@@ -1306,6 +1320,14 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
       "log": "C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log",
       "targets": { "take_win": [0.124, 0.917], "gamble": [0.124, 0.883] },
       "meter_roi": [0.138889, 0.755463, 0.869281, 0.782518]
+    },
+    "FortuneOx.exe": {
+      "…": "…",
+      "reel_strips": {
+        "path": "assets/payline_excel.xlsx",
+        "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+      },
+      "payline_geometry": { "…": "…" }
     }
   }
 }
@@ -1318,12 +1340,23 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
 | `games.<exe>.log` | the game's own log, which is what says a spin is over — and, since it also carries `reelsStops`, what the payline audit's reel-stop checkpoint reads. See [how it knows the spin is over](#how-it-knows-the-spin-is-over) |
 | `games.<exe>.targets` | the normalized click points — `{"take_win": [0.0713, 0.9724], "gamble": [0.0694, 0.9383]}`. A block per game because the points do not transfer between them; measure one with `gameclick --calibrate` |
 | `games.<exe>.meter_roi` | `extract`'s meter-strip crop for this game — see [it never assumes a pixel coordinate](#it-never-assumes-a-pixel-coordinate). Only the **active** game's is read, off `cfg["game"]`, and there is no fallback to another's. Every game's used to be raced against every screenshot; that is gone, and so is the `cfg["games"]` key that existed for it |
+| `games.<exe>.reel_strips` | `{"path": …, "placeholders": [...]}` — the spreadsheet the reel-stop checkpoint maps this game's `reelsStops` through, and which of its symbol names are mystery symbols that reveal as other art. Optional `columns` / `first_row` for a sheet laid out differently. A game without it stands the checkpoint down rather than reading another game's sheet; `placeholders` is required, and `[]` is how a game with none says so |
+| `games.<exe>.payline_geometry` | the reel window, in fractions, plus this game's `paylines` and its optional `reel_background` for `--profile`. See [the geometry is fractions all the way down](#the-geometry-is-fractions-all-the-way-down) |
 
 **An `active` with no `games` block raises, and it raises in the loader** — before OBS is launched
 or anything is clicked. There is no fallback to another game's window class, log or coordinates,
 for the reason [taking the win separately](#taking-the-win-separately--clicking-the-game-itself)
 records: run `2026-08-12_131459` is the click that landed on nothing. `meter_roi` has no fallback
 either: a `cfg` where no game defines one is refused by name rather than guessed at.
+
+**Nor does any of the rest, and four of them used to.** `log`, `window_class`, the reel strips and
+the mystery-symbol names each had a code-level default, invisible for as long as the two shipped
+games agreed. Each is now read by one function that raises and names the key —
+`gamelog.path_for`, `winfocus.find_game_window`, `reelstrips.strips_for` — and the root
+[CLAUDE.md](CLAUDE.md) table records what each fallback did when it fired. The worst was the log:
+HuffNPuffLink's path was the module default, that file exists on this cabinet, so a game block
+without a `log` opened it and the whole capture stage read another game's spins while reporting
+success.
 
 ### `config.json` — this cabinet
 
@@ -1359,6 +1392,7 @@ carries the measurement.
 | `gamelog.path` | that game's `log` |
 | `game.games` / `game.targets` | that game's `targets` |
 | the whole `payline` block | `payline.runner.DEFAULTS`, which it duplicated key for key. Its `reel_stops` block was also spelled `"c"` in the shipped file, so it had never been read at all — `payline.reel_stops.*` is still honoured if you add it back to override a default |
+| `payline.reel_stops.strips` | that game's `reel_strips.path`. This one is **not** a measurement that moved into code but a per-game asset that was in the wrong file: one cabinet-level path could not follow `active` from one game to the next, and the reel strips are the most game-specific data in the repo. It is the only retired key that **warns when it is still set**, a path that silently stopped being read being its own trap |
 
 **Both files live in `server/`, beside the code that reads them**, and so does
 `captured_files/`. Nothing outside that package reads either one, so nothing outside it needs
@@ -1416,7 +1450,7 @@ built UI at `ui/dist`, and the working directory the capture subprocess needs in
 | **server, and not code** | |
 | [server/config.json](server/config.json) | this cabinet: OBS, the i-Deck, output, Tesseract, the server |
 | [server/game_config.json](server/game_config.json) | the games, and `active` naming the one that is running |
-| [server/assets/payline_excel.xlsx](server/assets/) | the reel strips the reel-stop checkpoint maps stops through |
+| [server/assets/payline_excel.xlsx](server/assets/) | FortuneOx's reel strips, named by that game's `reel_strips.path` — one sheet per game, not one for the app |
 | `server/captured_files/` | one folder per run — the contract between the stages. Not committed |
 | **ui** | |
 | [ui/src/App.tsx](ui/src/App.tsx) | which audit is showing, and which run |

@@ -478,8 +478,7 @@ def run(args) -> int:
         # 2. The two windows, and everything the panel will say about itself. The process name is
         # kept, not just used: it goes into spin.json so a run says which game it was.
         game_process = game_cfg["process"]
-        game = winfocus.find_window(game_process,
-                                    game_cfg.get("window_class", "UnityWndClass"))
+        game = winfocus.find_game_window(game_cfg)
         LOG.info("game window: %s", game)
         # A minimised window gives OBS no frames to capture.
         winfocus.ensure_restored(game)
@@ -488,7 +487,9 @@ def run(args) -> int:
         deck_window = ideck.find_window(ideck_cfg.get("process", ideck.DEFAULT_PROCESS),
                                         ideck_cfg.get("window_class", ideck.DEFAULT_WINDOW_CLASS))
         LOG.info("i-Deck window: %s", deck_window)
-        watcher = gamelog.GameLogWatcher(game_cfg.get("log") or gamelog.DEFAULT_LOG)
+        # The active game's own log, and no fallback: reading another game's would report its
+        # spins as this one's, and the i-Deck defaults beside it are the cabinet's, not a game's.
+        watcher = gamelog.GameLogWatcher(gamelog.path_for(game_cfg))
         press_log = ideck.PressWatcher(ideck_cfg.get("log", ideck.DEFAULT_LOG))
         LOG.info("game log:  %s", watcher.path)
         LOG.info("press log: %s", press_log.path)

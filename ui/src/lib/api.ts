@@ -163,7 +163,14 @@ export type PaylineReelStops = {
   frame_time?: string | null
   /** [low, high): below the match threshold, above clearly-different. */
   band?: [number, number]
+  /** The spreadsheet the names came from -- `games.<exe>.reel_strips.path`, resolved. */
   strips?: string
+  /** Which game's block named that sheet. A reel strip is one game's symbol layout, so "whose
+   *  strips were these?" is a question the record has to be able to answer. */
+  strips_game?: string | null
+  /** This sheet's mystery-symbol names, upper-cased -- the ones that abstain rather than deciding
+   *  a pair, because they reveal as other art. `[]` is a game that has none. */
+  placeholders?: string[]
   strip_lengths?: Record<string, number>
   symbol_grid?: Record<string, string>
   adjudications?: PaylineAdjudication[]
