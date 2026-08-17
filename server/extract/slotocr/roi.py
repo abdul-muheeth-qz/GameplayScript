@@ -7,6 +7,8 @@ misses shows up as null meters, which is the failure worth having.
 import logging
 from typing import NamedTuple
 
+import numpy as np
+
 from ...utils import RoiCropError, crop_roi
 
 LOG = logging.getLogger("extract")
@@ -16,9 +18,10 @@ class MeterROI(NamedTuple):
     """The meter-bar crop, and `config:<exe>` naming the box it was cropped to.
 
     `source` rides out in the record rather than only being logged: it is the fastest way to tell
-    a mis-tuned ROI from a bad OCR read.
+    a mis-tuned ROI from a bad OCR read. `image` is a numpy array -- this stage always crops a
+    cv2-loaded screenshot, never the PIL image `payline` crops through the same `crop_roi`.
     """
-    image: object
+    image: np.ndarray
     source: str
 
 
