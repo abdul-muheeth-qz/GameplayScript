@@ -142,11 +142,6 @@ export function LedgerVerdict({ verdict }: { verdict: Verdict }) {
               {verdict.message}
             </p>
           )}
-          {verdict.model && (
-            <p className="text-[0.6875rem] text-muted-foreground/70">
-              arithmetic checked by {verdict.model}
-            </p>
-          )}
         </div>
       </div>
     </section>

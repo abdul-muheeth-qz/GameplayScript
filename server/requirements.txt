@@ -29,13 +29,15 @@ scikit-learn>=1.3
 # open_clip_torch>=2.24
 
 # -- validate --------------------------------------------------------------
-# Pinned exactly: create_agent moved package in LangChain 1.x and the reply-parsing
-# here depends on response_metadata["finish_reason"] surviving the OpenAI-compatible
-# client. langchain-openai talks to LM Studio, not to OpenAI.
-langchain==1.3.14
-langchain-core==1.5.3
-langchain-openai==1.4.1
-openai==2.53.0
+# Nothing. The stage is exact Decimal arithmetic over the records extract wrote, and the
+# standard library does that. It used to be one call to a local LLM through LM Studio, and
+# these were its client -- pinned exactly, because create_agent moved package in LangChain
+# 1.x and the reply-parsing depended on response_metadata["finish_reason"] surviving the
+# OpenAI-compatible client. Restore them alongside the model version in `git log`.
+# langchain==1.3.14
+# langchain-core==1.5.3
+# langchain-openai==1.4.1
+# openai==2.53.0
 
 # -- server ----------------------------------------------------------------
 fastapi>=0.115

@@ -49,7 +49,6 @@ from .extract import tesseract
 from .extract.runner import extract_frames
 from .payline.geometry import PaylineError, geometry_for
 from .payline.runner import build_tiles_for, settings_for, validate_paylines
-from .validate.agent import endpoint_settings
 from .validate.runner import validate_run
 
 from . import runs
@@ -353,9 +352,9 @@ def _obs_health(cfg: dict) -> dict:
 async def health():
     """One line per thing that has to be working, so a failure names itself.
 
-    Checked on demand rather than at startup: OBS gets opened and closed, LM Studio gets
-    a model swapped, and a server that decided at boot that they were fine is worse than
-    no check at all.
+    Checked on demand rather than at startup: OBS gets opened and closed, tesseract gets
+    installed and moved, and a server that decided at boot that they were fine is worse
+    than no check at all.
     """
     checks: dict[str, dict] = {}
     try:
@@ -374,26 +373,9 @@ async def health():
     except Exception as exc:
         checks["tesseract"] = {"ok": False, "detail": str(exc)}
 
-    model, base_url, _, _ = endpoint_settings(cfg)
-
-    def check_llm():
-        import httpx
-
-        reply = httpx.get(f"{base_url.rstrip('/')}/models", timeout=5)
-        reply.raise_for_status()
-        served = [m.get("id") for m in reply.json().get("data", [])]
-        if model not in served:
-            raise RuntimeError(f"{base_url} is up but is not serving {model!r} "
-                               f"(it has: {', '.join(served) or 'nothing'}). Load it in "
-                               f"LM Studio, or change validate.model in config.json.")
-        return f"{model} at {base_url}"
-
-    try:
-        checks["llm"] = {"ok": True, "detail": await asyncio.to_thread(check_llm)}
-    except Exception as exc:
-        checks["llm"] = {"ok": False,
-                         "detail": f"cannot reach {base_url}: {exc}. Start LM Studio's "
-                                   f"server, or change validate.base_url in config.json."}
+    # There is no check for the validate stage: it is exact Decimal arithmetic over the
+    # records extract wrote (see server/validate/ledger.py), so it has nothing to be up.
+    # An LM Studio probe lived here while a model owned that sum, and it gated the page.
 
     def check_payline():
         """Is there reel geometry for the running game, and can its backend run.
@@ -426,11 +408,10 @@ async def health():
 
     checks["obs"] = await asyncio.to_thread(_obs_health, cfg)
 
-    # OBS is allowed to be down; config, tesseract and the model are not. `payline` is not
-    # in that list on purpose -- the two audits need different things, and a cabinet with no
-    # LM Studio can still validate paylines while one with no geometry for the running game
-    # can still audit meters. Each page decides which checks gate it.
-    return {"ok": all(checks[k]["ok"] for k in ("config", "tesseract", "llm")),
+    # OBS is allowed to be down; config and tesseract are not. `payline` is not in that list
+    # on purpose -- the two audits need different things, and a cabinet with no reel geometry
+    # for the running game can still audit meters. Each page decides which checks gate it.
+    return {"ok": all(checks[k]["ok"] for k in ("config", "tesseract")),
             "checks": checks}
 
 

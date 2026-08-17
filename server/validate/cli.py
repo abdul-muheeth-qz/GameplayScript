@@ -7,7 +7,7 @@ The argument is a capture run folder that the extract step has already been run 
 that it holds `extract/pre_spin.json`, `extract/spin_result.json` and -- if the spin won --
 `extract/win_collected.json`.
 
-Prints Pass or Fail, and the model's reasoning on stderr.
+Prints Pass or Fail, and the working behind it on stderr.
 """
 
 import argparse
@@ -53,8 +53,8 @@ def main(argv=None) -> int:
     try:
         cfg = load_config(args.config)
     except (OSError, ValueError) as exc:
-        # The endpoint has defaults and environment overrides behind it, so a missing
-        # config is a warning rather than the end of the run.
+        # The only thing read from config here is the tolerance, which has a default, so a
+        # missing config is a warning rather than the end of the run.
         print(f"warning: could not read config ({exc}); using defaults", file=sys.stderr)
         cfg = {}
 

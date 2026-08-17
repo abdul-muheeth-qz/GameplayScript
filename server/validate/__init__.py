@@ -1,9 +1,9 @@
 """Step 3 -- decide whether the spin's meters add up.
 
 The check is `current cash = previous cash - bet + win`: the cash meter after a spin should
-be the cash before it, less the bet that was placed, plus the win this spin paid. A local
-LLM (LM Studio by default, configured under "validate" in config.json) is handed both sets
-of meters and answers with a structured verdict. Nothing in Python does the arithmetic.
+be the cash before it, less the bet that was placed, plus the win this spin paid. The sum is
+worked out in exact `Decimal` arithmetic (`ledger.judge`) and compared against the meter
+within `validate.tolerance`. This used to be one call to a local LLM; see `ledger.py`.
 
     python -m server.validate.cli captured_files/<run_id>
     python -m server.validate.cli captured_files/<run_id> --json

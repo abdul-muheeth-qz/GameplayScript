@@ -13,7 +13,7 @@ up. Three stages, one app:
 python -m pip install -r server/requirements.txt      # one venv (server/.venv) for all three stages
 cd ui; npm install; npm run build; cd ..
 
-python -m server                               # http://127.0.0.1:8000 -- the three buttons
+python -m server                               # http://127.0.0.1:8000 -- one button per audit
 ```
 
 Or run any stage on its own, over the same folder:
@@ -52,8 +52,11 @@ captured_files/2026-08-05_224937/
 So a losing spin leaves two frames and a winning one leaves three. `server/frames.py` owns those
 names and which part of the ledger each supplies.
 
-The web page is the same three stages with a button each, and holds nothing but the run id — so a
-reload, a second tab, or `?run=<folder name>` a week later all rebuild from those files.
+The web page runs all three on **one button** — it chains the same three endpoints in order and
+puts each answer on screen as it arrives — and holds nothing but the run id, so a reload, a second
+tab, or `?run=<folder name>` a week later all rebuild from those files. The stages themselves did
+not merge: they are still three endpoints and three CLIs, and a run whose frames are already on
+disk resumes from the first stage that has not run rather than spinning the cabinet again.
 
 Most of this document is about `capture`, which came first, is by far the most delicate, and
 explains the machinery the rest sits on. [Reading the meters](#reading-the-meters--extract) and
@@ -818,9 +821,8 @@ it cannot be argued with:
 ```json
 { "verdict": "pass", "expected_cash": "2926.70", "computed_cash": "2926.70",
   "difference": "0.00", "tolerance": "0.005", "record": "2909.60,18.10,1.00",
-  "formula": "current cash = previous cash - bet + win",
-  "model": "qwen2.5-7b-instruct-1m", "inferred": [],
-  "message": "2909.60 - 1.00 + 18.10 = 2926.70",
+  "formula": "current cash = previous cash - bet + win", "inferred": [],
+  "message": "2909.60 - 1.00 + 18.10 = 2926.70, and the meter read 2926.70 -- a difference of 0.00",
   "sources": { "cash_and_bet": "pre_spin.json", "win": "win_collected.json",
                "final": "win_collected.json" },
   "stages": ["pre_spin", "win_collected"] }
@@ -829,72 +831,44 @@ it cannot be argued with:
 Money crosses as strings. Reading it as `Decimal` and then putting it through a JSON float would
 undo the point of reading it as `Decimal`.
 
-### One call, no tools, and the shape of the reply is the whole design
+### The sum is done in Python, in exact `Decimal`
 
-`ChatOpenAI(...).with_structured_output(Verdict, method="json_schema")`. Both sets of meters go up
-as one JSON object:
+`ledger.judge`, and it is three lines:
 
-```json
-{ "previous": { "cash": "2909.60", "bet": "1.00" },
-  "current":  { "cash": "2926.70", "win": "18.10" } }
+```python
+computed_cash = previous["cash"] - previous["bet"] + current["win"]
+difference    = computed_cash - current["cash"]
+verdict       = "pass" if abs(difference) <= tolerance else "fail"
 ```
 
-and the model answers with the four fields of `agent.Verdict`, in this order:
+The terms, the sum, the difference and the tolerance are all `Decimal`, so the boundary sits
+exactly on half a cent rather than wherever binary float lands, and `working` — the sentence the
+CLI prints and `validate.json` keeps — is that sum written out.
 
-```json
-{ "working": "2909.60 - 1.00 + 18.10 = 2926.70",
-  "computed_cash": 2926.70, "difference": 0.00, "verdict": "pass" }
-```
+**This stage used to be one call to a local LLM** (LM Studio, `qwen2.5-7b`, `ChatOpenAI(...)
+.with_structured_output(Verdict, method="json_schema")`), and the model owned every number. The
+schema it answered with was measured at length — `working` declared before the numbers, amounts
+typed `float` rather than `str` — because the shape was what kept a 7B honest; all of that, and
+the eight-record table behind it, is in `git log` if a model is ever wanted back.
 
-**Nothing in Python adds these up or compares them.** The tolerance is interpolated into the system
-prompt and the model applies it; `computed_cash` and `difference` in `validate.json` are the
-model's own numbers, formatted to two places for the ledger. `method="json_schema"` and not
-`function_calling`, because the latter would send this as a tool and there are no tools here.
+Re-running the 14 run folders on disk that hold a `validate.json` is what the change was checked
+against: **11 of 14 agree** and every disagreement is the model having been wrong.
 
-The predecessor of this asked the same local qwen2.5-7b for one word, yes or no, and scored
-**0/6** — not unreliable but *inverted*, deterministically, at `temperature=0`. Everything about
-`Verdict` exists to avoid that, and was measured over eight records:
-
-| schema | verdicts | the numbers it returned |
+| run | the model wrote | the arithmetic |
 |---|---|---|
-| `working` first, amounts as `float` — **shipped** | **8/8** | **8/8** |
-| the same, with `working` removed | 2/8 | 0/8 — dropped the win, reached for `previous.win`, subtracted instead of added |
-| `working` first, amounts as `str` | **8/8** | 0/8 — `"in this case: 2926.70"`, `"mathematically computed to be 1155.76"` |
-| amounts as `str`, `computed_cash` declared first | 4/8 | 0/8 — `"logarithmic"`, `"in_range"`, `"synced"`, `"TBD"` |
-| amounts as `str` with a `pattern` of `^-?\d+\.\d{2}$` | — | LM Studio answers **400** on every request |
+| `2026-08-12_144541` | **fail**, `computed_cash` 1075.41, out by 0.60 | `1075.49 - 0.88 + 0.20` = **1074.81** — pass, exact |
+| `2026-08-12_162510` | **fail**, `computed_cash` 999.94, out by 1.00 | `999.12 - 0.88 + 0.70` = **998.94** — pass, exact |
+| `2026-08-12_130905` | **error**, `Connection error.` | `853.61 - 100.00 + 0.00` = **753.61** — pass, exact |
 
-Three things come out of that table, and none is cosmetic:
+Both Fails were the model mis-adding three two-place numbers it had itself written out correctly
+one line above, and reporting a real cabinet as out by 60c and by a dollar. Across all 22 folders
+the stage now reports 15 pass, 0 fail and 7 errors, every error being a `pre_spin` record whose
+cash or bet `extract` could not read — a stage-2 failure, unchanged by this.
 
-- **`working` is declared before the numbers.** The model fills the fields in schema order, so a
-  schema asking for `computed_cash` first is asking for the answer cold — the same one-forced-token
-  trap as the yes/no design. Removing that one field and changing nothing else takes the shipped
-  schema from **8/8 to 2/8**: it answered `2909.60 - 1.00 = 2908.60`, dropping the win outright,
-  and on another record reached for `previous.win` in spite of the prompt telling it not to.
-- **The amounts are typed `float`, not `str`.** A string field constrains nothing, and the model
-  fills it with a placeholder while getting the verdict beside it right — a confident `"pass"` with
-  `"logarithmic"` where the sum should be. Typed as numbers the grammar cannot emit anything but
-  digits. This is the one place in the codebase money is a float, and it is only safe because
-  nothing compares against it: the exact `Decimal`s are what go *to* the model.
-- **A JSON Schema `pattern` cannot do that job instead.** LM Studio's grammar engine fails to
-  initialise from the regex and 400s the request. Constraint has to come from the field's *type*.
-
-The older lineage, same model, all still in `git log`:
-
-| design | who compares | score |
-|---|---|---|
-| `cash_after_spin` tool does the sum in `Decimal` | Python | **12/12** |
-| tool-less, model shows its working, parse last line | Python | **10/12** |
-| tool-less, model returns a bare number | Python | **5/12** |
-| model answers yes/no | the model | **0/6** |
-
-Go back up that table if these verdicts stop being trustworthy, and re-measure on any model change:
-none of these numbers transfer.
-
-Everything else stays deliberately strict: `temperature=0`; `max_retries=0`, because the OpenAI
-SDK's default of two would turn a wedged server into three timeouts and six silent minutes; and a
-reply that hit the token cap reported as such rather than surfacing as a schema traceback, which is
-the only reason `include_raw=True` is there. `MAX_TOKENS` is 256 rather than the old 8, because the
-JSON object has to fit inside it.
+What did **not** change is the reply's shape: `working`, `computed_cash`, `difference`, `verdict`,
+in that order, so `validate.json`, the CLI and the UI ledger read exactly as before minus the
+`model` field. Nor did the two rules below, which were always the correctness question here — the
+arithmetic never was.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 
@@ -915,11 +889,11 @@ A spin has two frames, or three if it won. `validate.Sources` reads exactly two 
 | `previous` | cash, bet | `pre_spin` |
 | `current` | cash, win | the **last** frame — `win_collected` on a win, `spin_result` on a loss |
 
-So the win is always taken from the *second* record. `pre_spin`'s WIN meter is **not read and not
-sent** — it holds the **previous** spin's win, because the game leaves a paid win on display until
-the next spin clears it, so reading it there double-counts. An earlier version sent it with a
-prompt line saying to ignore it; that is strictly worse, and the measurement below is why. A value
-that is not in the prompt is one the model cannot reach for.
+So the win is always taken from the *second* record. `pre_spin`'s WIN meter is **not read** — it
+holds the **previous** spin's win, because the game leaves a paid win on display until the next
+spin clears it, so reading it there double-counts. `records.PREVIOUS_FIELDS` is `("cash", "bet")`
+for that reason, and it stays that way now the sum is Python's: a field nothing reads cannot be
+added by mistake.
 
 The reason the final frame is not always `spin_result` is that **the game announces a win without
 paying it**. Measured on run `2026-08-11_204202`:
@@ -959,9 +933,8 @@ pair are no longer read; only the three-frame layout is.
 
 ### Running it
 
-Needs LM Studio serving the configured model — `validate.base_url` / `validate.model`, or
-`LMSTUDIO_BASE_URL` / `LMSTUDIO_MODEL`. `/api/health` says whether it is up and whether the model
-it is serving is the one asked for.
+Needs nothing running: no cabinet, no OBS, no model. The only thing read from `config.json` is
+`validate.tolerance`, which defaults to half a cent, so a checkout with no config still validates.
 
 ```powershell
 python -m server.validate.cli captured_files/<run>          # Pass or Fail, with the working
@@ -1269,6 +1242,7 @@ drops the SDK's plaintext-password line exists for exactly that.
 | | `thresholds` `{pixel: 0.90, clip: 0.93}`, `cluster_distance` `{pixel: 0.10, clip: 0.07}` | per backend, because CLIP and pixel similarities are not on the same scale. The pixel number is measured on this cabinet; the clip one is not |
 | | `cross_check` true, `annotate` true, `save_tiles` true, `save_embeddings` true | the agreement check and the artefacts. Tiles and embeddings on disk are what let a reading be re-judged without re-embedding |
 | | `image` null, `symbol_library` null | `image` **overrides** the captured frame whenever it is set, so a supplied screenshot can be validated with captures on disk -- see [which image gets validated](#which-image-gets-validated). `symbol_library` is the reference art `method: "library"` needs, which the POC does not ship |
+| `validate` | `tolerance` "0.005" | how far the cash meter may be out and still pass — half a cent. The only key this stage reads; the LM Studio endpoint that used to live here (`base_url`, `model`, `api_key_env`, `timeout_s`) is gone with the model, and is ignored if left in the file |
 | | `reel_stops.enabled` true, `telemetry_dir` null, `strips` `"server/assets/payline_excel.xlsx"`, `band` null, `tolerance_s` 900, `allow_latest_fallback` false | the reel-stop checkpoint -- see [the same symbol at a low cosine](#the-reel-stop-checkpoint-the-same-symbol-at-a-low-cosine). `telemetry_dir: null` derives the folder from `target.process` (`FortuneOx.exe` -> `C:\logs\Telemetry\Data\FortuneOx`); `band: null` runs from 0.70 up to whatever `thresholds` says, so the two cannot drift apart; `allow_latest_fallback` lets it use the newest stops in the file for a frame it cannot identify, which is right only for the spin you have just made |
 | `validate` | `base_url`, `model`, `api_key_env`, `tolerance` "0.005", `timeout_s` 120 | the LM Studio endpoint. `LMSTUDIO_BASE_URL` and `LMSTUDIO_MODEL` override the file |
 | `server` | `host` 127.0.0.1, `port` 8000 | `python -m server --host/--port` override these |
@@ -1317,7 +1291,7 @@ never the current working directory, so a server started from anywhere writes in
 | [server/payline/cli.py](server/payline/cli.py) | pays / error / no pay |
 | [server/payline/test_paylines.py](server/payline/test_paylines.py) | the rule checked against the spreadsheet's own fixtures |
 | **server/validate** | |
-| [server/validate/agent.py](server/validate/agent.py) | the agent, its arithmetic tool, and the LM Studio endpoint |
+| [server/validate/ledger.py](server/validate/ledger.py) | the sum, the tolerance, and the verdict — exact `Decimal`, no model |
 | [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
 | [server/validate/runner.py](server/validate/runner.py) | the verdict object |
 | [server/validate/cli.py](server/validate/cli.py) | Pass / Fail / no verdict |
@@ -1352,12 +1326,7 @@ never the current working directory, so a server started from anywhere writes in
 | `cannot run tesseract at ...` | the OCR engine isn't installed or isn't where it was looked for; set `extract.tesseract_cmd` to the full path of `tesseract.exe` |
 | `<run> has no before or after frame` | the capture step hasn't run over that folder, or `capture.format` doesn't match what is on disk |
 | `<file>: cash value is not a number: None` | the OCR read that meter blank. Open the `_roi.png` beside it: a crop showing most of the screen means the configured box missed and detection took over |
-| `cannot reach http://localhost:1234/v1` | LM Studio's server is off, or on another port. Start it, or set `validate.base_url` |
-| `is up but is not serving <model>` | LM Studio is running a different model; load the configured one or change `validate.model` |
-| `the model did not answer in the required format — it was cut off at the 256 token cap` | the reply was truncated mid-JSON. Raise `MAX_TOKENS` in `server/validate/agent.py`, or use a model that answers more briefly |
-| `... it spent the 256 token cap reasoning` | a reasoning model thought instead of answering. Use a non-reasoning model, or change `validate.model` |
-| `... If the server rejected the schema outright` | the endpoint doesn't support `response_format: json_schema`. Check `validate.base_url` points at LM Studio, not something else OpenAI-compatible |
-| a `Pass` or `Fail` you don't believe | the model owns the verdict and every number under it — nothing here is checked in Python. `message` holds its working, so read that first; then see [the agent](#one-call-no-tools-and-the-shape-of-the-reply-is-the-whole-design) |
+| a `Pass` or `Fail` you don't believe | the sum is Python's and `message` holds it written out, so the arithmetic can be checked by eye. If it is right and the verdict still looks wrong, the meters it was given are wrong — read `extract/*.json`, not this stage. (Older `validate.json` files were written by a model that owned every number; two of them are wrong, see [the sum](#the-sum-is-done-in-python-in-exact-decimal)) |
 | a win that reports `Fail` with `computed_cash` short by exactly the win | extract missed the WIN meter on `win_collected.png`. Check `extract/win_collected.json` — if `win` is `null` there and `spin_result` read it fine, this is the known cost described [above](#two-records-and-which-frame-each-comes-from-is-the-correctness-question) |
 | `a spin is already running` | one at a time: they would share one OBS instance, one record directory and one cursor |
 | `no run called <id>` | the folder was deleted, or the capture failed before writing anything — `prune_empty` removes a run folder that captured nothing |
