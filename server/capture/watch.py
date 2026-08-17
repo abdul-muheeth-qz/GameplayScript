@@ -96,6 +96,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# -- the waits -------------------------------------------------------------
+# `watch.py` has spin.py's rule -- no fixed delay anywhere -- and four windows instead of one,
+# because here the log going quiet means different things. All four were tuned by replaying 11
+# hours of real play (485 rounds) through `actions.py`, so they are measurements and live beside
+# the loop rather than in config.json; re-run that replay after changing any of them.
+
+# The gameplay wait. It restarts on every event, so a feature is followed for as long as it keeps
+# talking. 35 s is not a typo and is nearly free: 93% of actions close on the game's own terminal
+# event, so this is a fallback, and the silences inside a feature run to 29 s. At spin.py's 8 s,
+# 49 spin outcomes fell outside every action; at 35 s, two did.
+IDLE_TIMEOUT_S = 35.0
+# For an action that is complete as soon as it stops logging -- a wager change, and nothing else.
+QUIET_S = 2.0
+# How long the game may be quiet after announcing something it will get on with by itself: a
+# bonus intro playing, measured at 68.4 s.
+LONG_WAIT_S = 90.0
+# How long it may wait for the *person*: a win on the offer, a Hold & Spin respin prompt, a gamble
+# waiting for a card. 0 means "as long as it takes", which is what the game itself does -- it has
+# no timeout there, so any bound is a guess, and a wrong guess splits one spin across two folders.
+# `Action.moved_on` and `Watch.ceiling_from` are what stop unbounded becoming stuck.
+PLAYER_WAIT_S = 0.0
+# The settle before an after shot. Scheduled, never slept -- the press after a game over was
+# measured at 0.44 s, inside this.
+AFTER_DELAY_MS = 800
+TAIL_QUIET_S = 1.0
+# The backstop on one action. It must not count time parked on an offer -- see Watch.ceiling_from.
+ACTION_TIMEOUT_S = 300.0
+POLL_INTERVAL_MS = 50
+# The standing before-frame. 0 turns it off.
+PREROLL_S = 1.0
+MILESTONE_SHOTS = True
+MILESTONE_MIN_GAP_MS = 400
+
+
 # -- the watch -------------------------------------------------------------
 
 
@@ -122,47 +156,26 @@ class Watch:
         self.native = native       # what the source itself has, before capture.scale
 
         capture = cfg.get("capture", {})
-        watch = cfg.get("watch", {})
         self.capture_cfg = capture
         self.scene = capture.get("scene", "Scene")
         self.source = capture.get("source", "Window Capture")
         self.format = capture.get("format", "png")
         self.quality = int(capture.get("quality", -1))
-        self.target = cfg.get("target", {})
+        self.game_cfg = cfg["game"]
 
-        # The gameplay wait means the same thing as spin.py's -- it restarts on every event, so a
-        # feature is followed for as long as it keeps talking -- but it is deliberately its own
-        # setting and much longer. Replayed over 11 hours of real play: at spin.py's 8 s, 49
-        # spin outcomes fell outside every action (a jackpot celebration whose two award bursts
-        # are 8.9 s apart, Hold & Spin endings that take 17-20 s to log their win, one spin that
-        # went 28.9 s from its last reel stop to its game over); at 35 s, two did.
-        #
-        # It is nearly free here, which it would not be in spin.py. 93% of actions are closed by
-        # the game's own terminal event rather than by this timeout, and any action still
-        # waiting on it closes the instant the player does something else. The only price is how
-        # late the *last* action before a pause gets written.
-        self.idle_timeout = float(watch.get("idle_timeout_s", 35.0))
-        # ...and this is the one for an action that is complete as soon as it stops logging,
-        # which means a wager change and nothing else.
-        self.quiet_s = float(watch.get("quiet_s", 2.0))
-        # ...and this is how long the game is allowed to be quiet after announcing something it
-        # is going to get on with by itself: a bonus intro playing (68.4 s, measured).
-        self.long_wait_s = float(watch.get("long_wait_s", 90.0))
-        # ...and this is how long it may wait for the *person*: a win on the collect/gamble
-        # offer, a Hold & Spin respin prompt, a gamble waiting for a card. 0 means "as long as it
-        # takes", which is what the game itself does -- it has no timeout there, so any bound
-        # here is a guess, and a wrong guess splits one spin across two folders and gives it a
-        # second `after` frame. A positive value restores a bounded wait, closing the round and
-        # filing whatever the player eventually does as a new one.
-        self.player_wait_s = float(watch.get("player_wait_s", 0.0))
-        self.after_delay = float(watch.get("after_delay_ms",
-                                           cfg.get("spin", {}).get("after_delay_ms", 800))) / 1000
-        self.tail_quiet = float(watch.get("tail_quiet_s", 1.0))
-        self.ceiling = float(watch.get("action_timeout_s", 300.0))
-        self.interval = float(watch.get("poll_interval_ms", 50)) / 1000.0
-        self.preroll_s = float(watch.get("preroll_s", 1.0))
-        self.milestone_gap = float(watch.get("milestone_min_gap_ms", 400)) / 1000.0
-        self.milestones = milestones and bool(watch.get("milestone_shots", True))
+        # The four waits, and the rest of the loop's timing. All module constants -- see "the
+        # waits" above for what each one was measured against.
+        self.idle_timeout = IDLE_TIMEOUT_S
+        self.quiet_s = QUIET_S
+        self.long_wait_s = LONG_WAIT_S
+        self.player_wait_s = PLAYER_WAIT_S
+        self.after_delay = AFTER_DELAY_MS / 1000
+        self.tail_quiet = TAIL_QUIET_S
+        self.ceiling = ACTION_TIMEOUT_S
+        self.interval = POLL_INTERVAL_MS / 1000.0
+        self.preroll_s = PREROLL_S
+        self.milestone_gap = MILESTONE_MIN_GAP_MS / 1000.0
+        self.milestones = milestones and MILESTONE_SHOTS
 
         self.by_position = {b.position: b.name for b in panel.buttons} if panel else {}
         # Seeded from the log's history so the first action can be judged against something: a
@@ -264,8 +277,8 @@ class Watch:
         self.last_reacquire = now
         LOG.info("looking the game window up again (%s)", why)
         try:
-            self.game = winfocus.find_window(self.target.get("process", "HuffNPuffLink.exe"),
-                                             self.target.get("window_class", "UnityWndClass"))
+            self.game = winfocus.find_window(self.game_cfg["process"],
+                                             self.game_cfg.get("window_class", "UnityWndClass"))
             winfocus.ensure_restored(self.game)
             self.native = spin.capture_size(self.obs, self.scene, self.source, self.game,
                                             attempts=6, delay=0.5)
@@ -565,8 +578,7 @@ def run(args) -> int:
 
     obs_cfg = cfg.get("obs", {})
     capture_cfg = cfg.get("capture", {})
-    target_cfg = cfg.get("target", {})
-    gamelog_cfg = cfg.get("gamelog", {})
+    game_cfg = cfg["game"]
     ideck_cfg = cfg.get("ideck", {})
 
     scene = capture_cfg.get("scene", "Scene")
@@ -585,28 +597,25 @@ def run(args) -> int:
 
     obs = spin.ObsSession(host=obs_cfg.get("host", "localhost"),
                           port=int(obs_cfg.get("port", 4455)),
-                          password=obs_cfg.get("password", ""),
-                          timeout=float(obs_cfg.get("timeout", 5)))
+                          password=obs_cfg.get("password", ""))
     watch = None
     exit_code = spin.EXIT_OK
     stopped_by = ""
 
     try:
-        obs.ensure_running(exe_path=obs_cfg.get("exe_path"),
-                           wait_s=float(obs_cfg.get("launch_wait_s", 40)),
-                           settle_s=float(obs_cfg.get("launch_settle_s", 3)))
+        obs.ensure_running(exe_path=obs_cfg.get("exe_path"))
         obs.connect()
         obs.check_format(img_format)
         obs.check_source(source)
 
-        game = winfocus.find_window(target_cfg.get("process", "HuffNPuffLink.exe"),
-                                    target_cfg.get("window_class", "UnityWndClass"))
+        game = winfocus.find_window(game_cfg["process"],
+                                    game_cfg.get("window_class", "UnityWndClass"))
         LOG.info("game window: %s", game)
         winfocus.ensure_restored(game)
 
         # The game log is the one thing this cannot do without: it is the only record of an
         # action taken on the touchscreen, and the only thing that says when one is finished.
-        watcher = gamelog.GameLogWatcher(gamelog_cfg.get("path", gamelog.DEFAULT_LOG))
+        watcher = gamelog.GameLogWatcher(game_cfg.get("log") or gamelog.DEFAULT_LOG)
         LOG.info("game log:  %s", watcher.path)
 
         # The panel is optional here, unlike in spin.py -- nothing is being clicked, so it is

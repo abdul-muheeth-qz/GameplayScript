@@ -3,16 +3,27 @@ Locate the CASH/WIN/BET meter-bar region within a full screenshot, so the
 rest of the pipeline (and every OCR call) can operate on a small crop
 instead of the whole, visually busy image.
 
-One method: a normalized [x0, y0, x1, y1] box per known game layout
-(`roi_config.CONFIGURED_BOXES`). Exact, and works across every screenshot that
-shares a layout, because the box is fractions of the frame rather than pixels.
+One method: a normalized [x0, y0, x1, y1] box per game, read straight off
+`game_config.json`'s `games.<exe>.meter_roi` -- there is no separate list and
+no fallback file any more; `settings.load_config` puts every game's raw block
+on `cfg["games"]`, and `_candidate_boxes` below collects whichever of them
+define a `meter_roi`. Exact, and works across every screenshot that shares a
+layout, because the box is fractions of the frame rather than pixels.
 
-Choosing between the boxes is `server.utils.crop_best_box` -- generic, and
-knowing nothing about meters. What lives *here* is the half that is specific to
-this stage: **how a crop is scored.** "Does this box apply?" is answered by
-running the real extraction on it and counting the meter fields it resolved, so
-each candidate costs a full extraction to validate; the winner's results ride
-along on the returned MeterROI so the pipeline doesn't repeat that work.
+**Every game's box is raced, not just the active one.** This is the one place
+in the codebase that reads `cfg["games"]` instead of `cfg["game"]`, and
+deliberately so: this stage runs over loose screenshots (`Images/`, the
+regression suite) that carry no game of their own, so there is no "active
+game" to single out the way `payline.geometry_for` or `gameclick.targets_for`
+do. Choosing between the boxes is `server.utils.crop_best_box` -- generic, and
+knowing nothing about meters. What lives *here* is the half that is specific
+to this stage: **how a crop is scored.** "Does this box apply?" is answered by
+running the real extraction on it and counting the meter fields it resolved,
+so each candidate costs a full extraction to validate; the winner's results
+ride along on the returned MeterROI so the pipeline doesn't repeat that work.
+Every candidate is scored in full -- there is no early exit on a field count
+any more, because there are at most a handful of games configured, not a
+sweep of tuning parameters.
 
 **Nothing backs this method up, and nothing rescues a bad crop.** Two other
 methods used to live here -- equal horizontal bands, and OpenCV dark-panel
@@ -22,7 +33,7 @@ methods mid-image on a field count. That read well, and it made "which pixels
 was this number read from?" a question only `roi_source` could answer after the
 fact, while charging every ordinary frame for the losing methods. A crop that
 misses the meter bar now shows up as null meters, which is the failure worth
-having: it names the box that was handed to Tesseract instead of quietly
+having: it names the game whose box was handed to Tesseract instead of quietly
 reporting a whole-image read nobody asked for.
 
 The multi-box race here is not a fallback. Those boxes describe alternative
@@ -37,13 +48,12 @@ methods (rather than re-implementing a weaker one-off check).
 import logging
 from typing import NamedTuple, Optional
 
-from ...utils import crop_best_box
-from .roi_config import CONFIDENT_FIELDS, CONFIGURED_BOXES
+from ...utils import RoiCropError, crop_best_box
 from .extraction import extract_all
 
 LOG = logging.getLogger("extract")
 
-BOXES_NAME = "roi_config.CONFIGURED_BOXES"
+BOXES_NAME = "game_config.json's games.*.meter_roi"
 
 
 class MeterROI(NamedTuple):
@@ -61,13 +71,30 @@ class MeterROI(NamedTuple):
     extracted: Optional[tuple] = None
 
 
+def _candidate_boxes(cfg: dict | None) -> list[dict]:
+    """One `{"label": exe, "box": [...]}` per game in `cfg["games"]` that has a
+    `meter_roi`. The label is the executable itself -- there is one box per
+    game, so nothing else is needed to tell two candidates apart.
+    """
+    games = (cfg or {}).get("games") or {}
+    boxes = [{"label": exe, "box": block["meter_roi"]}
+             for exe, block in games.items() if block and block.get("meter_roi")]
+    if not boxes:
+        raise RoiCropError(
+            "no game in game_config.json's \"games\" has a \"meter_roi\", so there is no "
+            "box to crop the meter strip to. Add \"meter_roi\": [x0, y0, x1, y1] to the "
+            "games that need one -- normalized fractions of the frame, the way "
+            "\"targets\" are.")
+    return boxes
+
+
 def _fields_resolved(extracted):
     """How many distinct meter fields a (cell, word, tokens) triple resolved.
 
     A field the word method asserted BLANK does not count. It carries a real
     reading -- the label was found and its meter is empty -- but it resolved no
-    value, and counting it would let a box win this race, and clear
-    CONFIDENT_FIELDS, on the strength of meters it could not actually read.
+    value, and counting it would let a box win this race on the strength of
+    meters it could not actually read.
     """
     cell_results, word_results, _ = extracted
     return len(set(cell_results)
@@ -80,28 +107,27 @@ def score_crop(crop):
     Run the real extraction over these pixels and rank the crop by how many
     meter fields came back. The extraction itself is returned alongside,
     because it is the same work the pipeline is about to do -- see MeterROI.
-
-    This is the whole downstream extraction, so scoring is NOT cheap. That is
-    why `locate_meter_roi` passes `confident=CONFIDENT_FIELDS`.
     """
     extracted = extract_all(crop)
     return _fields_resolved(extracted), extracted
 
 
-def locate_meter_roi(image):
-    """Crop `image` to the best-reading box in `roi_config.CONFIGURED_BOXES`.
+def locate_meter_roi(image, cfg: dict | None = None):
+    """Crop `image` to the best-reading box among every game's `meter_roi` in
+    `cfg["games"]`.
 
-    Returns a MeterROI whose `source` is "config:<label>" -- the box that was
-    actually cropped to. It rides out in the record because it is the fastest
-    way to tell a mis-tuned ROI from a bad OCR read.
+    Returns a MeterROI whose `source` is "config:<exe>" -- the game whose box
+    was actually cropped to. It rides out in the record because it is the
+    fastest way to tell a mis-tuned ROI from a bad OCR read.
 
     The selection rules -- best box rather than first, ties to the earlier box,
     a frame where nothing scored still returning pixels -- are
-    `server.utils.crop_best_box`'s, and are written up there.
+    `server.utils.crop_best_box`'s, and are written up there. Raises
+    `RoiCropError` when no game has a `meter_roi` to offer at all.
     """
-    best = crop_best_box(image, CONFIGURED_BOXES, score=score_crop,
-                         confident=CONFIDENT_FIELDS, boxes_name=BOXES_NAME)
+    boxes = _candidate_boxes(cfg)
+    best = crop_best_box(image, boxes, score=score_crop, boxes_name=BOXES_NAME)
     if best.rank == 0:
-        LOG.warning("no configured ROI box resolved a meter field; using config:%s "
-                    "anyway. Add a box for this layout to %s", best.label, BOXES_NAME)
+        LOG.warning("no game's meter_roi resolved a meter field; using config:%s "
+                    "anyway. Add a meter_roi for this layout to %s", best.label, BOXES_NAME)
     return MeterROI(best.image, f"config:{best.label}", best.reading)

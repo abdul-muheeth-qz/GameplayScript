@@ -38,6 +38,13 @@ from . import logtail
 
 DEFAULT_LOG = r"C:\logs\Game\HuffNPuffLink\Logs\HuffNPuffLink_Theme.log"
 
+# How long the log may go quiet before a spin is called over. It **restarts on every
+# event**, which is what lets a 53 s Hold & Spin be followed to its end, so this is a
+# "stopped talking" bound and not a total. A flat total was tried and cut a feature off
+# mid-way. It lives here rather than in config.json because it is a measurement against
+# real log history -- see CLAUDE.md's "Timing invariants".
+IDLE_TIMEOUT_S = 8.0
+
 # What ends a spin: the outcome is on screen and the game is waiting for input again.
 #
 # `win` has to be in here. A win leaves the game parked on the collect/gamble offer and it does

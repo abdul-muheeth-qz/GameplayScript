@@ -419,7 +419,10 @@ class Recording:
     file is closed, with muxing still to finish (`_settled`).
     """
 
-    def __init__(self, obs: ObsSession, folder: str, name: str = "recording",
+    # "spin", not "recording": the run folder contract names spin.mp4 (server/frames.py's
+    # neighbours in CLAUDE.md), and this default is now the only place that name is set --
+    # it used to be config.json's `record.name`, which restated it.
+    def __init__(self, obs: ObsSession, folder: str, name: str = "spin",
                  stop_wait_s: float = 20.0, start_wait_s: float = 10.0):
         self.obs = obs
         self.folder = os.path.abspath(folder)

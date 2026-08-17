@@ -111,6 +111,17 @@ EXIT_OK, EXIT_ERROR, EXIT_ABORTED = 0, 1, 2
 
 METHODS = ("post", "sendinput")
 
+# `sendinput` is the one that works here, and `post` is kept selectable and documented as not
+# working -- see `click`. This is the default `config.json`'s `game_click.click_method`
+# overrides, which exists only so the broken method can be *named* and probed.
+CLICK_METHOD = "sendinput"
+
+# How long the button is held, and how long to wait for the game's own log to confirm the click.
+# Mechanics rather than preferences, so they live beside the code that uses them; the 2 s is
+# against a measured `TouchMsg` that lands in well under one.
+CLICK_HOLD_MS = 80
+CONFIRM_TIMEOUT_S = 2.0
+
 # What the game may log in answer to a click, most specific first. `touch` is last because it is
 # the least specific -- it fires for any touch anywhere, so it answers "did this reach the game"
 # and nothing else.
@@ -129,16 +140,16 @@ def find_window(process: str, window_class: str) -> winfocus.Window:
     try:
         return winfocus.find_window(process=process, window_class=window_class)
     except winfocus.WindowNotFound as exc:
-        raise GameClickError(f"{exc} Set \"target.process\" and \"target.window_class\" in "
-                             "config.json if the game's executable or window class differ.") \
+        raise GameClickError(f"{exc} Check \"active\" in game_config.json, and that game's "
+                             "\"window_class\", if the executable or window class differ.") \
             from exc
 
 
 # -- where to click --------------------------------------------------------
 
 
-def targets_for(game_cfg: dict, process: str) -> dict:
-    """The click targets for the game named by `target.process`.
+def targets_for(game_cfg: dict) -> dict:
+    """The click targets out of the active game's block (`cfg["game"]`).
 
     Normalizing a target to the client area makes it survive a *resized* window; it does not make
     it survive a *different game*, and nothing in the geometry says which it is looking at. So the
@@ -153,25 +164,23 @@ def targets_for(game_cfg: dict, process: str) -> dict:
     (`2026-08-12_131459`): the click was delivered, landed on nothing, and the collect failed
     with a win still standing on the offer.
 
-    **`game.games` and `game.targets` are two shapes, not a fallback pair.** Which one is in use
-    is decided by whether `game.games` exists at all; a config that has it but has no block for
-    the running game is an *error*, never a quiet reuse of some other game's points. That is
-    `extract`'s no-fallback ROI rule for the same reason: a wrong coordinate is a click into dead
-    space that costs a whole run to find, and silently substituting one leaves "what was this
-    click aimed at?" unanswerable afterwards. The flat shape stays valid, because a checkout that
-    only ever sees one game has no reason to name it twice.
+    **There is no fallback to another game's points, and that is the whole rule.** Which game's
+    block this is was decided by `game_config.json`'s `active`, and `settings.active_game` already
+    raised if there was no block for it -- so by the time this is called the only thing that can
+    be missing is `targets` itself, which is an *error* rather than a quiet reach for somebody
+    else's coordinates. That is `extract`'s no-fallback ROI rule for the same reason: a wrong
+    coordinate is a click into dead space that costs a whole run to find, and silently
+    substituting one leaves "what was this click aimed at?" unanswerable afterwards.
     """
-    games = game_cfg.get("games")
-    if not games:
-        return game_cfg.get("targets") or {}
-    if process not in games:
+    targets = game_cfg.get("targets")
+    if not targets:
+        process = game_cfg.get("process") or "the active game"
         raise GameClickError(
-            f"\"game.games\" in config.json has no targets for {process} -- it has "
-            + ", ".join(sorted(games)) + ". Every game draws TAKE WIN somewhere else, so there "
-            f"is nothing here that is safe to click. Add a \"{process}\" block, measuring its "
-            "points with `python -m server.capture.gameclick --calibrate` while a win is "
-            "pending.")
-    return games[process] or {}
+            f"the \"{process}\" block in game_config.json has no \"targets\", so there is no "
+            f"point on the glass that is safe to click. Every game draws TAKE WIN somewhere "
+            f"else. Measure this one's with `python -m server.capture.gameclick --calibrate` "
+            f"while a win is pending, and add it as \"targets\": {{\"take_win\": [x, y]}}.")
+    return targets
 
 
 def resolve(window: winfocus.Window, point) -> tuple[tuple[int, int], tuple[int, int]]:
@@ -507,20 +516,22 @@ def run(args) -> int:
               file=sys.stderr)
         return EXIT_ERROR
 
-    game_cfg = cfg.get("game", {})
-    target_cfg = cfg.get("target", {})
-    log_path = cfg.get("gamelog", {}).get("path", gamelog.DEFAULT_LOG)
-    method = args.method or game_cfg.get("click_method", "sendinput")
-    hold_ms = int(game_cfg.get("click_hold_ms", 80))
-    confirm_timeout = float(game_cfg.get("confirm_timeout_s", 2.0))
+    # The active game, resolved out of game_config.json: process, window class, log and targets,
+    # already agreed with each other.
+    game_cfg = cfg["game"]
+    click_cfg = cfg.get("game_click", {})
+    log_path = game_cfg.get("log") or gamelog.DEFAULT_LOG
+    method = args.method or click_cfg.get("click_method", CLICK_METHOD)
+    hold_ms = CLICK_HOLD_MS
+    confirm_timeout = CONFIRM_TIMEOUT_S
     # sendinput cannot work without it, so the config default is on and --foreground only has to
     # force it when the config says otherwise.
-    foreground = args.foreground or bool(game_cfg.get("foreground", True))
+    foreground = args.foreground or bool(click_cfg.get("foreground", True))
 
-    process = target_cfg.get("process", "HuffNPuffLink.exe")
+    process = game_cfg["process"]
 
     try:
-        window = find_window(process, target_cfg.get("window_class", "UnityWndClass"))
+        window = find_window(process, game_cfg.get("window_class", "UnityWndClass"))
         winfocus.ensure_restored(window)
 
         if args.calibrate:
@@ -530,10 +541,10 @@ def run(args) -> int:
         if args.probe:
             point = args.probe
         elif args.target:
-            targets = targets_for(game_cfg, process)
+            targets = targets_for(game_cfg)
             if args.target not in targets:
                 raise GameClickError(
-                    f"no target called {args.target!r} for {process}. config.json holds: "
+                    f"no target called {args.target!r} for {process}. game_config.json holds: "
                     + (", ".join(sorted(targets)) if targets else "nothing yet -- run "
                                                                   "--calibrate to measure one"))
             point = targets[args.target]

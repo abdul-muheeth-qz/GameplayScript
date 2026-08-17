@@ -17,8 +17,11 @@ Two things about its shape, because the rest of the stage is written against the
   sum, the difference and the tolerance are all `Decimal` and the boundary sits exactly on
   half a cent instead of wherever binary float lands. Nothing here may become a float.
 
-The tolerance is an argument rather than a constant here: `runner.DEFAULT_TOLERANCE` is the
-default and `config.json`'s `validate.tolerance` overrides it.
+The tolerance lives here, beside the comparison it governs, rather than in a config file.
+It is not a knob anybody turns: money is two decimal places and `TOLERANCE` is half a
+cent, so the boundary is unreachable in practice and a config that restated it was one
+more thing to keep in step with the code. `judge` still takes it as an argument so a
+caller can pass another value deliberately.
 """
 
 from __future__ import annotations
@@ -28,6 +31,11 @@ from typing import Literal, NamedTuple
 
 # What is checked, and what the UI prints under the ledger heading.
 FORMULA = "current cash = previous cash - bet + win"
+
+# Cash values are decimal currency; treat a difference under half a cent as rounding noise
+# rather than a real mismatch. A Decimal, not a float, so the boundary sits exactly on half
+# a cent instead of wherever binary float lands.
+TOLERANCE = Decimal("0.005")
 
 
 class Verdict(NamedTuple):
@@ -48,7 +56,7 @@ def pad(value: Decimal) -> str:
 
 
 def judge(previous: dict[str, Decimal], current: dict[str, Decimal],
-          tolerance: Decimal) -> Verdict:
+          tolerance: Decimal = TOLERANCE) -> Verdict:
     """Work the spin's ledger out and say whether the cash meter follows from it.
 
     `previous` supplies cash and bet, `current` supplies cash and win -- which frame each
@@ -64,7 +72,7 @@ def judge(previous: dict[str, Decimal], current: dict[str, Decimal],
 
     # abs() rather than the two comparisons, and <= so a difference sitting exactly on the
     # tolerance passes. With money at two places and a tolerance of half a cent that
-    # boundary is unreachable, but the tolerance is configurable and may not stay so.
+    # boundary is unreachable, but a caller may pass a wider one.
     verdict = "pass" if abs(difference) <= tolerance else "fail"
 
     return Verdict(working, computed_cash, difference, verdict)

@@ -377,11 +377,24 @@ def test_missing_folder_names_the_setting():
 
 def test_folder_is_derived_from_the_process():
     """A second game needs no config edit."""
-    folder = telemetry.telemetry_dir({"target": {"process": "HuffNPuffLink.exe"}}, {})
+    folder = telemetry.telemetry_dir({"game": {"process": "HuffNPuffLink.exe"}}, {})
     assert folder.endswith("HuffNPuffLink")
-    configured = telemetry.telemetry_dir({"target": {"process": "FortuneOx.exe"}},
+    configured = telemetry.telemetry_dir({"game": {"process": "FortuneOx.exe"}},
                                         {"reel_stops": {"telemetry_dir": "D:/elsewhere"}})
     assert configured == "D:/elsewhere"
+
+
+def test_the_games_own_telemetry_dir_is_used_before_deriving_one():
+    """A telemetry folder belongs to a game, so game_config.json's block wins over the
+    derived path -- and payline's own setting still wins over both."""
+    game = {"process": "FortuneOx.exe", "telemetry_dir": "D:/from-the-game-block"}
+    assert telemetry.telemetry_dir({"game": game}, {}) == "D:/from-the-game-block"
+    assert telemetry.telemetry_dir(
+        {"game": game}, {"reel_stops": {"telemetry_dir": "D:/from-payline"}}) == "D:/from-payline"
+    # An empty one is not a choice: fall through to the derived folder.
+    assert telemetry.telemetry_dir(
+        {"game": {"process": "FortuneOx.exe", "telemetry_dir": None}}, {}
+    ).endswith("FortuneOx")
 
 
 def main() -> int:

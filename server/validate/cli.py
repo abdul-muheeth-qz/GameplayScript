@@ -15,8 +15,6 @@ import json
 import sys
 from pathlib import Path
 
-from ..settings import load_config
-
 from .runner import RESULT_FILE, find_records, validate_records, validate_run
 
 # A Fail is a verdict about the spin. An error means no verdict was reached at all --
@@ -34,8 +32,6 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folder", type=Path,
                         help="a capture run folder the extract step has been run over")
-    parser.add_argument("--config", default=None,
-                        help="path to config.json (default: the one at the repo root)")
     parser.add_argument("--json", action="store_true",
                         help="print the whole verdict object instead of one word")
     parser.add_argument("--write", action="store_true",
@@ -50,23 +46,17 @@ def main(argv=None) -> int:
         print(f"Folder not found: {args.folder}", file=sys.stderr)
         return EXIT_ERROR
 
-    try:
-        cfg = load_config(args.config)
-    except (OSError, ValueError) as exc:
-        # The only thing read from config here is the tolerance, which has a default, so a
-        # missing config is a warning rather than the end of the run.
-        print(f"warning: could not read config ({exc}); using defaults", file=sys.stderr)
-        cfg = {}
-
+    # No config is read here at all: the tolerance lives in `ledger.TOLERANCE`, beside the
+    # comparison it governs, so this stage runs against a checkout with no config.json.
     if args.write:
-        result = validate_run(str(args.folder), cfg)
+        result = validate_run(str(args.folder))
     else:
         try:
             sources = find_records(args.folder)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_ERROR
-        result = validate_records(sources, cfg)
+        result = validate_records(sources)
 
     if args.json:
         print(json.dumps(result, indent=2))

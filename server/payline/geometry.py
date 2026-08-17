@@ -1,7 +1,7 @@
 """Where the reels are, and what a payline is -- the only file to edit for a new game.
 
-Same role `slotocr/roi_config.py` plays for the meter strip, and the same idiom: every
-number here is a **fraction**, never a pixel. Three levels of it, because the thing being
+Same idiom as `game_config.json`'s per-game `meter_roi` (see `extract/slotocr/roi.py`):
+every number here is a **fraction**, never a pixel. Three levels of it, because the thing being
 located is nested:
 
     REELS_ROI      fractions of the whole FRAME     -- where the reel window is
@@ -13,7 +13,7 @@ That is what makes it work on a bigger screen. The same frame resampled from 0.6
 size. A flat pixel margin would not have: 8 px is a fifth of a cell at 0.6x and a fortieth
 at 3x, so it is expressed against the cell it trims.
 
-**Keyed by `target.process`, and a game with no block raises.** Fractions survive a change
+**Keyed by the active game's process, and a game with no block raises.** Fractions survive a change
 of *scale*; they do not survive a change of *aspect ratio* or of game art. FortuneOx's reel
 window is 0.045-0.956 of the width and 0.564-0.827 of the height; applying that to
 HuffNPuffLink's 612x961 portrait window lands on the wrong pixels entirely and would report
@@ -215,19 +215,19 @@ def cell_name(row: int, reel: int) -> str:
 
 
 def geometry_for(cfg: dict) -> Geometry:
-    """The geometry for the game named by `target.process` in config.json.
+    """The geometry for the active game -- `game_config.json`'s `active`.
 
     Raises and names the process when there is no block for it. There is deliberately no
     fallback: reading a grid off the wrong fractions produces a confident answer about
     pixels that hold something else, which is worse than no answer. See the module
     docstring for the run that established that.
     """
-    process = (cfg.get("target") or {}).get("process")
+    process = (cfg.get("game") or {}).get("process")
     if not process:
         raise PaylineError(
-            "config.json has no target.process, so there is no way to tell which game's "
-            "reel geometry to use. Set it to the game's executable name, e.g. "
-            "\"FortuneOx.exe\"")
+            "there is no active game, so there is no way to tell which game's reel "
+            "geometry to use. Set \"active\" in game_config.json to the game's executable "
+            "name, e.g. \"FortuneOx.exe\"")
 
     block = GAMES.get(process)
     if block is None:

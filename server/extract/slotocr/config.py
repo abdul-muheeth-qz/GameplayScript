@@ -49,7 +49,7 @@ LABEL_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 # ---------------------------------------------------------------------------
 # Where the ROI numbers went
 # ---------------------------------------------------------------------------
-# Everything about *locating* the meter strip -- which of the three cropping
-# methods runs, the horizontal-band counts, and the normalized boxes that used
-# to be ROI_REGIONS here -- lives in slotocr/roi_config.py. This file is the
-# constants for *reading* the crop once it exists.
+# Everything about *locating* the meter strip -- the normalized boxes that used to be
+# ROI_REGIONS here, one per game -- lives in game_config.json's games.<exe>.meter_roi
+# (see slotocr/roi.py, which reads and races them). This file is the constants for
+# *reading* the crop once it exists.

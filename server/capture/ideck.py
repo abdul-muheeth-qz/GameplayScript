@@ -68,6 +68,13 @@ DEFAULT_PROCESS = "OledPanelSvc.exe"
 DEFAULT_WINDOW_CLASS = "SDL_app"
 DEFAULT_LOG = r"C:\logs\OledPanelSvc.log"
 
+# How long the button is held down, and how long to wait for OledPanelSvc.log to confirm the
+# press. Both are mechanics of this panel rather than anybody's preference, so they live here
+# instead of in config.json -- and the confirmation is what makes a silent miss impossible,
+# so a person shortening it from a config file is not a change worth inviting.
+CLICK_HOLD_MS = 80
+CONFIRM_TIMEOUT_S = 2.0
+
 # Relative to %CABINET_MODULE%: the cabinet module supplies the layout, because the panel
 # differs per cabinet type.
 LAYOUT_RELATIVE = os.path.join("deployment", "cfg", "ButtonPanel", "virtual_oled.xml")

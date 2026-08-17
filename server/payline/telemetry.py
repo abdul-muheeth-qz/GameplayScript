@@ -80,13 +80,21 @@ class Entry:
 
 
 def telemetry_dir(cfg: dict, settings: dict) -> str:
-    """Where to look. `payline.reel_stops.telemetry_dir` wins; otherwise it is derived from
-    `target.process`, so a second game needs no config edit -- `FortuneOx.exe` becomes
-    `C:\\logs\\Telemetry\\Data\\FortuneOx`."""
+    """Where to look, most specific first.
+
+    1. `payline.reel_stops.telemetry_dir`, for a caller passing settings in directly.
+    2. The active game's own `telemetry_dir` in `game_config.json` -- the right home for it,
+       since a telemetry folder belongs to a game and not to this stage.
+    3. Derived from the active game's process, so a second game needs no edit at all:
+       `FortuneOx.exe` becomes `C:\\logs\\Telemetry\\Data\\FortuneOx`.
+    """
     configured = (settings.get("reel_stops") or {}).get("telemetry_dir")
     if configured:
         return configured
-    process = (cfg.get("target") or {}).get("process") or ""
+    game = cfg.get("game") or {}
+    if game.get("telemetry_dir"):
+        return game["telemetry_dir"]
+    process = game.get("process") or ""
     return os.path.join(DEFAULT_DIR_ROOT, os.path.splitext(process)[0] or "")
 
 

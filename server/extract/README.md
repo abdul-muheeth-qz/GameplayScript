@@ -8,9 +8,12 @@ python -m server.extract.cli captured_files/<run_id>     # writes one record per
 python -m server.extract.cli server/extract/Images        # the sample screenshots, JSON to stdout
 ```
 
-The frame is cropped to the meter strip by a normalized box per game layout, listed in
-[`slotocr/roi_config.py`](slotocr/roi_config.py). Nothing backs it up: a box that misses the meter
-bar reads as null meters rather than being quietly rescued.
+The frame is cropped to the meter strip by a normalized box held per game in
+[`game_config.json`](../../game_config.json)'s `games.<exe>.meter_roi` -- every game's box is
+raced against the screenshot, not just the active one's, since a loose image (the fixtures below)
+carries no game of its own. There is no separate file or code fallback for this any more: a `cfg`
+with no game defining a `meter_roi` is refused by name. Nothing backs the chosen box up either way:
+one that misses the meter bar reads as null meters rather than being quietly rescued.
 
 Picking between those boxes is [`server/utils/roi_crop.py`](../utils/roi_crop.py), which is generic
 and takes the scorer as an argument; how a crop is *scored* — run the extraction, count the meter

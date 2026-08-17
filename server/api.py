@@ -43,7 +43,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .settings import DEFAULT_CONFIG, ROOT, load_config
+from .settings import DEFAULT_CONFIG, DEFAULT_GAME_CONFIG, ROOT, load_config
 from . import frames
 from .extract import tesseract
 from .extract.runner import extract_frames
@@ -148,7 +148,8 @@ async def validate(request: RunRequest):
     cfg = config()
     try:
         folder = runs.require_run(cfg, request.run_id)
-        await asyncio.to_thread(validate_run, folder, cfg)
+        # No cfg: the tolerance lives in validate.ledger, beside the comparison it governs.
+        await asyncio.to_thread(validate_run, folder)
     except runs.RunError as exc:
         raise _fail(exc)
     except Exception as exc:
@@ -331,8 +332,7 @@ def _obs_health(cfg: dict) -> dict:
     obs_cfg = cfg.get("obs", {})
     session = ObsSession(host=obs_cfg.get("host", "localhost"),
                          port=int(obs_cfg.get("port", 4455)),
-                         password=obs_cfg.get("password", ""),
-                         timeout=float(obs_cfg.get("timeout", 5)))
+                         password=obs_cfg.get("password", ""))
     try:
         session.connect()
         result = {"ok": True, "detail": f"OBS {session.version}"}
@@ -359,7 +359,14 @@ async def health():
     checks: dict[str, dict] = {}
     try:
         cfg = load_config()
-        checks["config"] = {"ok": True, "detail": DEFAULT_CONFIG}
+        # Both files, and which game they resolved to. The active game is the one setting
+        # that changes what every other check means -- the reel geometry, the click points
+        # and the log all follow from it -- so it belongs on the page rather than only in a
+        # log line. A game_config.json naming a game with no block never reaches here:
+        # settings.load_config raises, and this reports that instead.
+        checks["config"] = {"ok": True,
+                            "detail": f"{DEFAULT_CONFIG} + {DEFAULT_GAME_CONFIG}, "
+                                      f"playing {cfg['game']['process']}"}
     except (OSError, ValueError) as exc:
         return {"ok": False, "checks": {"config": {"ok": False, "detail": str(exc)}}}
 

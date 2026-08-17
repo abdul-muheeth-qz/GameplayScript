@@ -17,8 +17,9 @@ The folder must be a capture run [extract](../extract/) has already been run ove
 `0` pass, `1` fail, `2` no verdict. A Fail is a judgement about the spin; an error means no
 judgement was reached, and keeping them apart is what lets a test runner tell them apart.
 
-Needs nothing running — no cabinet, no OBS, nothing over the network. The one key read from
-`config.json` is `validate.tolerance`, and it has a default.
+Needs nothing running — no cabinet, no OBS, nothing over the network — and reads no config file:
+this stage imports `settings` nowhere. The tolerance is `ledger.TOLERANCE`, half a cent, beside the
+comparison it governs.
 
 This was a standalone project (`spin-validator`) that read two files with fixed names and printed
 one word. It now reads what extract wrote into the run folder and writes a verdict object with the

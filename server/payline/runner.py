@@ -57,10 +57,11 @@ DEFAULTS = {
     "save_embeddings": True,
     "image": None,
     "symbol_library": None,
-    # The reel-stop checkpoint. `telemetry_dir` null derives the folder from target.process
-    # (FortuneOx.exe -> C:\logs\Telemetry\Data\FortuneOx); `band` null runs from 0.70 up to
-    # whatever payline.thresholds says, so the two cannot drift apart. See
-    # matcher.ReelStopMatcher.
+    # The reel-stop checkpoint. `telemetry_dir` null falls through to the active game's own
+    # `telemetry_dir` in game_config.json and then to a folder derived from its process
+    # (FortuneOx.exe -> C:\logs\Telemetry\Data\FortuneOx) -- see telemetry.telemetry_dir;
+    # `band` null runs from 0.70 up to whatever `thresholds` says, so the two cannot drift
+    # apart. See matcher.ReelStopMatcher.
     "reel_stops": {
         "enabled": True,
         "telemetry_dir": None,

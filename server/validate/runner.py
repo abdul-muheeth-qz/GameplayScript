@@ -48,16 +48,10 @@ from typing import NamedTuple
 
 from .. import frames
 from ..extract.runner import EXTRACT_SUBDIR
-from .ledger import FORMULA, judge, pad
+from .ledger import FORMULA, TOLERANCE, judge, pad
 from .records import CURRENT_FIELDS, PREVIOUS_FIELDS, RecordError, load_values
 
 LOG = logging.getLogger("validate")
-
-# Cash values are decimal currency; treat differences under half a cent as rounding noise
-# rather than a real mismatch. Overridable from config.json's validate.tolerance, and
-# carried as Decimal so the boundary sits exactly on half a cent instead of wherever binary
-# float lands.
-DEFAULT_TOLERANCE = Decimal("0.005")
 
 RESULT_FILE = "validate.json"
 
@@ -92,10 +86,12 @@ def find_records(folder: str | os.PathLike) -> Sources:
     return Sources(previous, result, (frames.PRE_SPIN, frames.SPIN_RESULT))
 
 
-def validate_records(sources: Sources, cfg: dict | None = None) -> dict:
-    """Judge one spin from its two records. Never raises: errors are a verdict."""
-    cfg = cfg or {}
-    tolerance = Decimal(str(cfg.get("validate", {}).get("tolerance", DEFAULT_TOLERANCE)))
+def validate_records(sources: Sources, tolerance: Decimal = TOLERANCE) -> dict:
+    """Judge one spin from its two records. Never raises: errors are a verdict.
+
+    `tolerance` is `ledger.TOLERANCE` -- half a cent -- and is an argument rather than a
+    config key, because it lives beside the comparison it governs. See `ledger`.
+    """
     result = {"verdict": "error", "expected_cash": None, "computed_cash": None,
               "difference": None, "tolerance": str(tolerance), "record": None,
               "formula": FORMULA, "inferred": [],
@@ -136,7 +132,7 @@ def validate_records(sources: Sources, cfg: dict | None = None) -> dict:
     return result
 
 
-def validate_run(run_dir: str, cfg: dict | None = None) -> dict:
+def validate_run(run_dir: str, tolerance: Decimal = TOLERANCE) -> dict:
     """Validate a capture run folder and write validate.json into it."""
     try:
         sources = find_records(run_dir)
@@ -146,7 +142,7 @@ def validate_run(run_dir: str, cfg: dict | None = None) -> dict:
                 "difference": None, "tolerance": None, "record": None,
                 "sources": None, "stages": []}
 
-    result = validate_records(sources, cfg)
+    result = validate_records(sources, tolerance)
     path = os.path.join(run_dir, RESULT_FILE)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2)

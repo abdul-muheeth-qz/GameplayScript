@@ -145,7 +145,7 @@ def main(argv=None) -> int:
     results = []
     for path in image_paths:
         try:
-            record = process_image(path, roi_dir=args.out)
+            record = process_image(path, roi_dir=args.out, cfg=cfg)
         except Exception as exc:
             LOG.exception("error processing %s", path)
             record = {"image": os.path.basename(path), "error": str(exc)}
