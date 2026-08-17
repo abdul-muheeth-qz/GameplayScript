@@ -9,10 +9,23 @@ stage feeds downstream is meaningless if the crop is half a cell out, and the sh
 that in one glance -- which is why the tiles are their own step in the UI rather than an
 invisible part of the reading.
 
-The crop resolves through `server.geometry.pixel_box`, the same rule `extract` crops the
-meter strip with. Two levels of it: the ROI is a fraction of the frame, and each cell is a
-fraction of the ROI. The inner margin is a fraction of the cell, not a pixel count, so a
-bigger screen trims proportionally rather than shaving a sliver off a much larger tile.
+**Both levels of the crop go through the shared rule, and neither restates it.** The reel
+window is `server.utils.crop_roi` -- one box in, that region out, the same call `extract`
+crops the meter strip with -- and the cells are `server.geometry.pixel_box`, which is what
+`crop_roi` is built on: the ROI is a fraction of the frame, each cell is a fraction of the
+ROI, and the inner margin is a fraction of the cell, so a bigger screen trims proportionally
+rather than shaving a sliver off a much larger tile.
+
+`cell_boxes` used to round its own fractions, which was the last copy of that arithmetic in
+the tree. Routing it through `pixel_box` was verified to change nothing: 676,159 cell boxes
+over 45,561 ROI sizes, and 225 real tiles over three frames at five scales, byte for byte
+identical, every difference a cell so small that both versions refuse it.
+
+**One box, never a choice between boxes.** `geometry_for` supplies it, keyed by the active
+game and validated before use, and there is deliberately nothing to fall back to -- a wrong
+reel window does not fail, it reads a confident grid off unrelated pixels. `crop_roi` used to
+be `crop_best_box`, which took a *list* and kept whichever crop scored best; that is gone from
+the codebase entirely, from both stages. See its module docstring for why.
 """
 
 from __future__ import annotations
@@ -23,6 +36,7 @@ import os
 from PIL import Image, ImageDraw
 
 from ..geometry import pixel_box
+from ..utils import RoiCropError, crop_roi
 from .geometry import PaylineError, cell_name
 
 LOG = logging.getLogger("payline")
@@ -33,39 +47,56 @@ CONTACT_SHEET = "contact_sheet.png"
 
 
 def crop_reels(image_path: str, geometry) -> Image.Image:
-    """Open a frame and return just the reel window."""
+    """Open a frame and return just the reel window.
+
+    The crop is `server.utils.crop_roi`, the same call `extract` crops the meter strip
+    with -- one box in, that region out. `RoiCropError` is translated to `PaylineError`
+    because that is the type this package's callers catch (`payline.cli`, `api`), and an
+    escaping ValueError would reach the browser as a 500 with a traceback instead of as
+    the prose it already is.
+    """
     try:
         frame = Image.open(image_path).convert("RGB")
     except OSError as exc:
         raise PaylineError(f"cannot read {image_path}: {exc}") from None
 
-    edges = pixel_box(geometry.reels_roi, frame.width, frame.height)
-    if edges is None:
-        raise PaylineError(
-            f"the reels ROI {geometry.reels_roi} is empty on a "
-            f"{frame.width}x{frame.height} frame -- check reels_roi for "
-            f"{geometry.process} in server/payline/geometry.py")
-    return frame.crop(edges)
+    try:
+        return crop_roi(frame, geometry.reels_roi,
+                        what=f"the reels ROI for {geometry.process} (reels_roi in "
+                             f"game_config.json's games[\"{geometry.process}\"]"
+                             f".payline_geometry)")
+    except RoiCropError as exc:
+        raise PaylineError(str(exc)) from None
+
+
+def _inset(lo: float, hi: float, margin_frac: float) -> tuple[float, float]:
+    """One cell's bounds with the margin trimmed off both ends, still as fractions.
+
+    Trimming in fractions rather than in pixels is what lets `pixel_box` do the rounding
+    for both levels: the margin is a fraction of the cell, and a fraction of a fraction of
+    the ROI is still a fraction of the ROI.
+    """
+    margin = (hi - lo) * margin_frac
+    return lo + margin, hi - margin
 
 
 def cell_boxes(geometry, roi_size: tuple[int, int]) -> dict[str, tuple[int, int, int, int]]:
     """{'E11': (x0, y0, x1, y1), ...} in pixels within an ROI of `roi_size`.
 
     The margin is already trimmed off every side. Edges come from the fractions
-    independently rather than from a per-cell pixel width, so a cell's right edge lands on
-    exactly the pixel the gutter beside it starts at.
+    independently -- `pixel_box` again, the same rule the ROI itself is cropped by, rather
+    than a second copy of it here -- so a cell's right edge lands on exactly the pixel the
+    gutter beside it starts at. A cell the margin has trimmed away entirely comes back from
+    `pixel_box` as None, which is the same condition this used to test for by hand.
     """
     roi_w, roi_h = roi_size
     boxes = {}
     for r, (fy0, fy1) in enumerate(geometry.row_bounds, start=1):
         for c, (fx0, fx1) in enumerate(geometry.reel_bounds, start=1):
-            x0, x1 = fx0 * roi_w, fx1 * roi_w
-            y0, y1 = fy0 * roi_h, fy1 * roi_h
-            margin_x = (x1 - x0) * geometry.inner_margin_frac
-            margin_y = (y1 - y0) * geometry.inner_margin_frac
-            box = (round(x0 + margin_x), round(y0 + margin_y),
-                   round(x1 - margin_x), round(y1 - margin_y))
-            if box[2] <= box[0] or box[3] <= box[1]:
+            x0, x1 = _inset(fx0, fx1, geometry.inner_margin_frac)
+            y0, y1 = _inset(fy0, fy1, geometry.inner_margin_frac)
+            box = pixel_box((x0, y0, x1, y1), roi_w, roi_h)
+            if box is None:
                 raise PaylineError(
                     f"cell {cell_name(r, c)} is empty on a {roi_w}x{roi_h} reel window. "
                     f"The frame is too small for this geometry, or inner_margin_frac "

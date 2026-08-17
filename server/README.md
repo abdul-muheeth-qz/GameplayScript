@@ -101,11 +101,20 @@ anchor — which is how `assets/payline_excel.xlsx` broke when this folder was a
   `OBS_WS_PASSWORD` in the environment overrides it, and `spin._ScrubSecrets` keeps it out of
   `run.log`. **It is tracked in git, password and all.**
 - **[game_config.json](game_config.json)** — the games. `active` names the running executable and
-  `games` holds a block per game (`window_class`, `log`, `targets`, `meter_roi`). No secret.
+  `games` holds a block per game (`window_class`, `log`, `targets`, `meter_roi`, `payline_geometry`).
+  No secret. **Every number that is per-game is in there**, the payline stage's reel fractions
+  included: they were a `GAMES` dict in `payline/geometry.py`, which made adding a game a code edit
+  and a config edit that had to agree. `geometry.py` now holds only the rule a block has to satisfy.
 
 `settings.load_config` reads both and returns one dict, resolving the active game's block onto
-`cfg["game"]` with `process` folded in, and copying the raw `games` mapping onto `cfg["games"]`
-(unresolved, every game — `extract/slotocr/roi.py` is the reader that needs it that way).
+`cfg["game"]` with `process` folded in. That is the only view of the games any stage gets — `extract`
+crops each frame to `cfg["game"]["meter_roi"]` and `payline` reads its geometry from
+`cfg["game"]["payline_geometry"]`, off the same resolved block. An unresolved `cfg["games"]` (every
+game's block) used to be published alongside it for `extract/slotocr/roi.py`, which raced every game's
+box against every screenshot; that race is gone and so is the key. `payline.geometry`'s
+`configured_games`/`geometry_for_game` read the file directly instead, for the two questions that are
+about the file rather than the running game — which games have a block, and one named game's block
+whatever `active` says.
 
 **Changing `active` is the one line you change to point the tool at another game**, and everything
 follows from it: the window it finds, the log it treats as the oracle, the reel geometry, the point
@@ -153,7 +162,7 @@ core: every module in `capture/` talks to live Windows APIs, a running game, a r
 | stage | how it is checked |
 |---|---|
 | `capture` | `--dry-run`, then a real run, then read `run.log` and `spin.json` in the run folder |
-| `extract` | offline: `python -m server.extract.cli server/extract/Images` over the fourteen fixtures, then read `roi_source` in each record. This is the regression suite |
+| `extract` | offline: `python -m server.extract.cli server/extract/Images` over the fourteen fixtures, then read `roi_source` in each record. This is the regression suite — and it takes **two runs** to cover it, since the crop is the *active* game's box: 11 fields with `active: HuffNPuffLink.exe`, 18 with `active: FortuneOx.exe`. Pass `--config` a copy with `active` switched rather than editing the shipped file |
 | `validate` | needs nothing running at all — re-run it over the folders already in `captured_files/`, covering both a winning and a losing one |
 | `payline` | `test_paylines.py` (the rule, against the spreadsheet's own fixtures) and `test_reelstrips.py` (the checkpoint) run without pytest and without a cabinet. Then `payline.cli` over a FortuneOx folder on disk — and **look at `payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop landed |
 | the API | `python -m server`, then `/api/health` — it names each config file it read and the game it resolved |

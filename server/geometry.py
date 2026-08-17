@@ -32,6 +32,12 @@ def pixel_box(box, width: int, height: int) -> tuple[int, int, int, int] | None:
     The edges come from the fractions independently, which is what lets two boxes sharing
     an edge round to exactly the same pixel -- so a strip cut into adjacent boxes has no
     gap or overlap at the seams, whatever the image size.
+
+    This is the definition and nothing more. **Actually cropping an image is
+    `server.utils.crop_roi`**, which both stages call: it handles a numpy array and a PIL
+    image alike and raises with the box named, and it lives in `utils/` so this module
+    stays free of any opinion about what an image is. A numpy-only `crop_normalized_box`
+    used to sit here for the box race's benefit; the race is gone and so is it.
     """
     x0f, y0f, x1f, y1f = box
     x0 = max(0, min(width, int(round(x0f * width))))
@@ -41,13 +47,3 @@ def pixel_box(box, width: int, height: int) -> tuple[int, int, int, int] | None:
     if x1 <= x0 or y1 <= y0:
         return None
     return x0, y0, x1, y1
-
-
-def crop_normalized_box(image, box):
-    """Crop a numpy image (HxW or HxWxC) to a normalized box. None if it is empty."""
-    height, width = image.shape[:2]
-    edges = pixel_box(box, width, height)
-    if edges is None:
-        return None
-    x0, y0, x1, y1 = edges
-    return image[y0:y1, x0:x1]

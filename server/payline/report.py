@@ -171,8 +171,12 @@ def print_results(record: dict) -> None:
           f"   reels {record.get('reels_size') or '?'}"
           f"   tile {record.get('tile_size') or '?'}")
     geom = record["geometry"]
+    # `measured_on` is optional: the blocks live in game_config.json now and carry only the
+    # five keys the crop needs, so print the clause when a block does state it and leave it
+    # out rather than printing "measured on None". Same conditional the UI already has.
+    measured = f", measured on {geom['measured_on']}" if geom.get("measured_on") else ""
     print(f"  Geometry   : {geom['label']} for {geom['process']}, "
-          f"{geom['grid']}, measured on {geom['measured_on']}")
+          f"{geom['grid']}{measured}")
     print(f"  Embedding  : {record['backend']}")
     print(f"  Matching   : {record['matcher']}")
 

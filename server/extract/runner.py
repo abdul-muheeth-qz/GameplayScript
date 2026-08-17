@@ -57,8 +57,8 @@ def extract_frames(run_dir: str, cfg: dict | None = None) -> dict:
     external process and pytesseract releases the GIL waiting on it, so this really is
     about a third of the wall clock of doing three in turn.
 
-    `cfg` is also handed to `process_image`, which reads every game's `meter_roi` out of
-    `cfg["games"]` (from `game_config.json`) for the candidate ROI boxes -- see
+    `cfg` is also handed to `process_image`, which crops each frame to the active game's
+    `meter_roi` -- `cfg["game"]`, resolved from `game_config.json`'s `active`. See
     `slotocr.roi.locate_meter_roi`.
     """
     cfg = cfg or {}

@@ -1,8 +1,8 @@
 """Step 2 -- read the meters off a captured frame.
 
 Crops a captured frame to the CASH / WIN / BET meter bar and OCRs only that strip with
-Tesseract. No fixed pixel coordinates: the crop is a normalized box, one per game, held
-in `game_config.json`'s `games.<exe>.meter_roi`, and nothing rescues one that misses.
+Tesseract. No fixed pixel coordinates: the crop is a normalized box, the active game's
+`games.<exe>.meter_roi` in `game_config.json`, and nothing rescues one that misses.
 
     python -m server.extract.cli server/captured_files/<run_id>   # a whole run folder
     python -m server.extract.cli some/screenshot.png       # one image, JSON to stdout

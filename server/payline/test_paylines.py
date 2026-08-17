@@ -136,9 +136,9 @@ def test_geometry_paylines_are_the_five_lines():
 
 def test_geometry_rejects_an_overlapping_reel():
     """Two cells may never share pixels -- pixel_box clamps, so this has to raise here."""
-    from .geometry import GAMES, Geometry, PaylineError
+    from .geometry import Geometry, PaylineError, configured_games
 
-    block = dict(GAMES["FortuneOx.exe"])
+    block = dict(configured_games()["FortuneOx.exe"])
     block["reel_bounds"] = [[0.0, 0.5], [0.4, 1.0]]
     try:
         Geometry("Test.exe", block)
@@ -148,10 +148,27 @@ def test_geometry_rejects_an_overlapping_reel():
         raise AssertionError("an overlapping reel_bounds was accepted")
 
 
-def test_shipped_geometry_validates():
-    from .geometry import GAMES, Geometry
+def test_geometry_names_a_missing_key():
+    """The blocks are hand-edited JSON now, so an incomplete one must say which key."""
+    from .geometry import Geometry, PaylineError, configured_games
 
-    for process, block in GAMES.items():
+    block = {k: v for k, v in configured_games()["FortuneOx.exe"].items()
+             if k != "row_bounds"}
+    try:
+        Geometry("Test.exe", block)
+    except PaylineError as exc:
+        assert "row_bounds" in str(exc) and "game_config.json" in str(exc)
+    else:
+        raise AssertionError("a block with no row_bounds was accepted")
+
+
+def test_shipped_geometry_validates():
+    """Every payline_geometry block in game_config.json, whatever `active` says."""
+    from .geometry import Geometry, configured_games
+
+    blocks = configured_games()
+    assert blocks, "game_config.json has no payline_geometry block at all"
+    for process, block in blocks.items():
         geometry = Geometry(process, block)
         assert geometry.rows >= 1 and geometry.reels >= 2
         assert len(geometry.cells) == geometry.rows * geometry.reels

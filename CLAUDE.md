@@ -144,7 +144,11 @@ returns them merged:
   `spin._ScrubSecrets` keeps it out of `run.log`. (It is **currently tracked in git**, password and
   all — the README used to say otherwise. Worth deciding deliberately rather than by accident.)
 - `server/game_config.json` — the games: `active` names the running executable and `games` holds a
-  block per game (`window_class`, `log`, `targets`, `meter_roi`). No secret, so it is committable.
+  block per game (`window_class`, `log`, `targets`, `meter_roi`, `payline_geometry`). No secret, so it
+  is committable. **Every per-game number is in this one block**, so adding a game is one file: the
+  payline reel fractions were a `GAMES` dict in `payline/geometry.py` until they moved here, which
+  meant a new game took a code edit and a config edit that had to agree — the same split
+  `settings.active_game` exists to close. `geometry.py` keeps the rule, not the numbers.
 
 **Both of them, and `captured_files/`, live inside `server/`** — beside the code that reads them,
 because nothing outside that package reads either. The repository root holds the two shared
@@ -206,11 +210,12 @@ server/
   frames.py           the frame names a run folder holds (pre_spin, spin_result, win_collected),
                        and which part of the ledger each supplies. No dependencies, so every
                        stage can import it
-  geometry.py         normalized boxes -> pixels, one rule. Imported by extract (the meter strip)
-                       and payline (the reel window). No dependencies, same reason as frames.py
+  geometry.py         the DEFINITION: normalized box -> pixel edges, one rule. No dependencies,
+                       same reason as frames.py, and no opinion about what an image is
   utils/              stage-agnostic helpers built on those. Arguments only, no config
-    roi_crop.py       crop_best_box(image, boxes, score) -- the best-box-wins rule, ties to the
-                       earlier box, early exit on `confident`. Pure logic, so it is testable
+    roi_crop.py       crop_roi(image, box, what) -- one box in, that region out, on a numpy
+                       array or a PIL image alike. THE crop for both extract (the meter
+                       strip) and payline (the reel window). No list, no scoring, no choosing
   runs.py              the run folder as state: name it, fill it, read it back. The capture lock
   api.py               the three endpoints, /api/health, and the files the UI shows
   __main__.py          `python -m server`
@@ -233,12 +238,11 @@ server/
     runner.py         the before/after pair -> two JSON records in the run folder
     cli.py            a run folder, or loose images
     tesseract.py      find the engine binary: config, then env, then the Windows default
-    slotocr/          roi.py crops to the meter strip -- it collects every game's meter_roi
-                      out of cfg["games"] and hands the choosing to utils.crop_best_box,
-                      owning only *how a crop is scored*; extraction.py + matching.py read
-                      the crop; panel_detection.py and ocr_utils.py are the OpenCV
-                      underneath; config.py holds FIELD_LABELS (the boxes are in
-                      game_config.json, not a slotocr file)
+    slotocr/          roi.py crops to the meter strip -- the ACTIVE game's meter_roi off
+                      cfg["game"], through utils.crop_roi, and nothing behind it;
+                      extraction.py + matching.py read the crop; panel_detection.py and
+                      ocr_utils.py are the OpenCV underneath; config.py holds FIELD_LABELS
+                      (the boxes are in game_config.json, not a slotocr file)
 
   validate/           STAGE 3 -- decide whether the money adds up
     records.py        read the two records as exact Decimals; a blank WIN meter means 0.00
@@ -247,8 +251,9 @@ server/
     cli.py            Pass / Fail / no verdict, with the exit codes to match
 
   payline/            THE OTHER AUDIT -- does the grid pay the lines it claims
-    geometry.py       where the reels are (normalized, per game) and what a payline is. The only
-                       file to edit for a new game, and it RAISES for a game it has no block for
+    geometry.py       what a valid reel geometry is (normalized, per game) and what a payline is.
+                       The numbers are game_config.json's games.<exe>.payline_geometry; this
+                       validates one and RAISES for a game that has no block
     tiles.py          the ROI crop, the 15 cells, the contact sheet, and --profile
     embeddings.py     one vector per cell: the pixel backend (default) and OpenCLIP
     matcher.py        COMPARE -> yes/no, three ways, the cross-check between them, and the
@@ -646,9 +651,20 @@ OBS's own profile names. Hence `obs_client.Recording`, and three rules in it:
 
 The POC this came from hardcoded pixels measured on a 1073x1852 screenshot. This cabinet captures at
 1080x1849, so those numbers were already ~7 px off, and on a bigger screen they are meaningless.
-`payline/geometry.py` is fractions at three nested levels, because the thing being located is nested:
+The geometry is fractions at three nested levels, because the thing being located is nested:
 `reels_roi` is a fraction of the **frame**, `reel_bounds`/`row_bounds` are fractions of that **ROI**,
 and `inner_margin_frac` is a fraction of each **cell**.
+
+**Those numbers live in `game_config.json`**, as `games.<exe>.payline_geometry` — `label`,
+`reels_roi`, `reel_bounds`, `row_bounds`, `inner_margin_frac` — beside the same game's `meter_roi`,
+`targets` and `log`, and `settings.active_game` folds the whole block onto `cfg["game"]`, so
+`geometry_for` reads it from exactly where `extract` reads `meter_roi`. `payline/geometry.py` holds
+the **rule**: what a valid block is (`Geometry._validate`, plus `REQUIRED_KEYS` and the coercion
+above it, because a hand-edited block fails at runtime where a Python literal failed while it was
+being written), what a payline is (`DEFAULT_PAYLINES`), and the refusal to guess. `measured_on` and
+`notes` are optional and the shipped block carries neither — the FortuneOx provenance is in
+`geometry.py`'s docstring and in the paragraph below, and `describe()` reports `measured_on: null`,
+which `report.print_results` and the UI both omit rather than print.
 
 **The margin is the one that matters most and is easiest to get wrong.** Left as the POC's flat 8 px
 it is a fifth of a cell at 0.6x and a fortieth at 3x. Verified by resampling one frame and re-reading
@@ -667,16 +683,34 @@ strip by the same one. Verified equivalent to the definition it replaced over 20
 (image size, box) pairs, so the shared-edge guarantee — two boxes sharing an edge round to the same
 pixel, at any image size — is untouched.
 
+**Both of payline's levels go through it, cells included.** `tiles.cell_boxes` used to round its own
+fractions — the last restatement of that rule in the tree — and now composes the inner margin into
+fractions of the ROI and hands the box to `pixel_box`, which also gets the clamping and the
+empty-cell answer for free (a cell `pixel_box` returns None for is exactly the cell the old
+by-hand test refused, so the `PaylineError` is unchanged). Verified to change nothing: 676,159 cell
+boxes over 45,561 ROI sizes — the real reel windows from 375x189 to 3489x1529, 30,000 random sizes,
+and every size from 1x1 up — and 225 real tiles cut from three frames at five scales, byte for byte
+identical, with 0 mismatches and every difference a collapsed cell both versions raise on.
+
+**The reel window is cropped by `utils.crop_roi`, the same call `extract` uses for the meter strip.**
+One box in, that region out, on a PIL image here and a numpy array there. `crop_reels` translates
+`RoiCropError` to `PaylineError` because that is the type this package's callers catch — an escaping
+`ValueError` would reach the browser as a 500 with a traceback instead of as the prose it already is.
+There is exactly one box, `geometry_for`'s, and never a choice between boxes: a wrong reel window
+does not fail, it reads a confident grid off unrelated pixels.
+
 ### Keyed by the active game, and it must never fall back
 
-A game with no block **raises and names the process**. Fractions survive a change of scale; they do
+A game with no `payline_geometry` **raises and names the process**, and lists which games do have
+one. Fractions survive a change of scale; they do
 not survive a change of aspect ratio or of game art. FortuneOx's reel window applied to
 HuffNPuffLink's 612x961 portrait window lands on unrelated pixels and reports a perfectly confident
 grid. This is the rule for `gameclick`'s normalized click points, for the identical
 reason — run `2026-08-12_131459` is the one where a fallback would have been indistinguishable from
 correct behaviour until the money was wrong.
 
-Adding a game is `payline.cli --profile <image> X0 Y0 X1 Y1` plus a block. **`--profile` reports, it
+Adding a game is `payline.cli --profile <image> X0 Y0 X1 Y1` plus a `payline_geometry` block in
+`game_config.json` — no code edit. **`--profile` reports, it
 does not detect**, and that is deliberate: two auto-detection approaches were written and measured
 against this cabinet's nine FortuneOx frames, and both failed.
 
@@ -909,50 +943,53 @@ the two halves disagreed before they were joined. Renaming a key here is the sin
 change, because everything downstream iterates that dict. The lists beside the keys are OCR
 *synonyms* — what Tesseract might have read off the screen — so `BALANCE` stays in the list.
 
-### One way to crop the ROI: the best of every game's box, and no fallback
+### One way to crop the ROI: the active game's box, and no fallback
 
 **The boxes live in `game_config.json`**, one per game — `games.<exe>.meter_roi`, a normalized
 `[x0, y0, x1, y1]` — and that file is what a person edits to change the crop; there is no separate
 `roi_config.py` any more, and no code-level fallback if a `cfg` carries none. `slotocr/config.py`
 is the constants for *reading* the crop once it's made, not for locating it.
 
-`settings.load_config` copies the raw `games` mapping onto `cfg["games"]` (every game, not just the
-active one), and `roi.locate_meter_roi(image, cfg)` collects `{"label": exe, "box": ...}` for every
-game in it that has a `meter_roi`, then crops to whichever reads best — at ~8 s a frame, because
-each candidate costs a full extraction to validate. `roi_source` in each record is `config:<exe>`:
-the game whose box won, not necessarily the *active* one.
+`roi.locate_meter_roi(image, cfg)` crops to **`cfg["game"]["meter_roi"]` — the active game's box,
+the only one it looks at** — through `utils.crop_roi`, and returns a `MeterROI` of the crop and
+`config:<exe>`. `roi_source` in each record is that string, and it is always the active game now.
 
-**This race is deliberately not scoped to the active game.** Unlike `cfg["game"]`, which raises if
-`active` names a game with no block, `process_image` runs over loose images too (the `Images/`
-fixtures) that carry no game of their own — so every game's box is tried against every screenshot,
-and the winner is whichever reads best, not whichever belongs to `active`. Don't "simplify" this to
-`cfg["game"]["meter_roi"]` alone; that would silently stop reading every fixture whose layout
-belongs to a game that is not currently `active`.
+**There is nothing behind the box.** A crop that misses the meter bar shows up as null meters, which
+is the failure worth having. No active game, an active game with no `meter_roi`, and a box that is
+not a region of the image are three separate `RoiCropError`s, each naming what to edit, raised before
+anything is OCR'd. `extract.cli`'s `except (OSError, ValueError)` still falls back to `cfg = {}` for
+the *rest* of that stage's config (the Tesseract path), and ROI location then fails by name.
 
-**A `cfg` with no game defining a `meter_roi` raises, by name, rather than guessing** — `roi._candidate_boxes`
-raises `RoiCropError` before any cropping is attempted. There is no code fallback for a missing or
-unreadable `game_config.json` here, unlike the two-file split described above: `extract.cli`'s
-`except (OSError, ValueError)` still falls back to `cfg = {}` for the *rest* of that stage's config
-(the Tesseract path), but with `cfg["games"]` then empty, ROI location fails and names what to fix.
+**Never add a fallback to another game's box.** Same rule, same reason, as `payline.geometry_for` and
+`gameclick.targets_for`: normalized fractions survive a change of screen *size* and not a change of
+*game*, and a box on unrelated pixels reports a confident wrong number instead of failing.
 
-**There is no fallback behind the winning box either**, and that is the point. A crop that misses
-the meter bar shows up as null meters. The multi-box race itself is not a fallback and stays —
-those boxes are alternative layouts of the same thing, and choosing between them is what the
-method *is*.
+#### The box race is gone, and is not to be reintroduced
 
-**The race itself is `server/utils/roi_crop.py`, and the split is deliberate.** `crop_best_box`
-holds the part that has nothing to do with meters — walk the boxes, crop each, keep the best-ranked
-— and takes the scorer as an argument. `roi.score_crop` is the half that is this stage's: run
-`extract_all` over the crop and rank it by `_fields_resolved`. The point of the split is that the
-selection rules are pure logic over a callable, so they are unit-testable without Tesseract, a
-screenshot or a cabinet, which nothing in `extract` was before. Keep the scorer out of `utils/` —
-a helper there that imported `extraction` would make a shared module depend on one stage's OCR.
+Every game's `meter_roi` used to be cropped in turn, each candidate validated by running the real
+extraction over it and ranked by how many fields came back, best crop winning:
+`utils.crop_best_box` (with `BoxCrop` and a `confident` early exit) choosing, `roi.score_crop` and
+`roi._fields_resolved` scoring, `roi._candidate_boxes` building the list off `cfg["games"]`, and
+`MeterROI.extracted` carrying the winner's extraction forward so the pipeline did not repeat it. All
+of that is deleted, `cfg["games"]` included — `settings.load_config` no longer publishes it, and
+`cfg["game"]` is the only view of the games. Four reasons it should not come back:
 
-**Every candidate is scored in full; there is no early exit any more.** An earlier version had a
-`CONFIDENT_FIELDS` threshold (`crop_best_box`'s `confident` argument) that stopped the race as soon
-as a box cleared it, because scoring costs a full extraction and the list could be long. Removed on
-request, since `cfg["games"]` normally holds a handful of entries rather than a sweep of tuning
-geometries — the cost of scoring the rest of a short list is not worth a second knob to explain.
+- **It chose which pixels to believe by reading them.** "Which pixels was this number read from?" was
+  answerable only after the fact, via `roi_source`.
+- **It ranked on a field count**, which is the one thing the band sweep below proves you must never
+  tune a crop on. The two rules were in direct contradiction and the sweep's is the one with a wrong
+  reading behind it.
+- **It was the only stage whose answer did not depend on `active`**, so a mis-set `active` was
+  invisible here and fatal everywhere else.
+- It cost a full extraction per candidate, ~8 s a frame each, to pick a box config already named.
+
+Measured over the fourteen `Images/` fixtures: **the race was only ever choosing between the two
+layouts.** `active: HuffNPuffLink.exe` resolves 11 fields, `active: FortuneOx.exe` resolves 18, and
+29 is exactly what the race resolved — every value identical, including the `230313.00` misread.
+The real captured frames re-read byte-identically, `validate.json` included. The cost, and it is
+real: **it now takes two `active` settings to cover all fourteen fixtures**, because a fixture of a
+non-active layout reads nothing rather than being rescued by a stranger's box. That is the point of
+the change, not a regression to fix — `server/extract/README.md` records the two commands.
 
 **Two other methods, and the horizontal-band sweep that used to justify the early exit, were
 removed on request** — `BANDS` (the frame cut into equal horizontal strips) and `DYNAMIC` (OpenCV
@@ -965,17 +1002,14 @@ balance as **108900.00** and invented a win of **89.00** out of the fragment `",
 confident fields, two of them fabricated. Don't reintroduce a field-count-driven method without
 also reintroducing that rule, or a config change that scores well can still be confidently wrong.
 
-Two rules inside the box race were each bought with a wrong reading, and both now live in
-`utils.crop_best_box`:
-
-- **The best box wins, not the first that resolved anything.**
-  A box aimed at another layout can land somewhere unrelated on this screenshot and still scrape
-  one plausible number out of it. Under the original first-past-the-post rule, adding a box for
-  this cabinet silently degraded four of the sample images that were fine before it.
-- **`best_rank` starts at −1, not 0**, so the first usable box always becomes the winner. With
-  nothing behind this method any more, a frame where no box resolved a single field still has to
-  return pixels; it returns the head of the preference order and `roi.locate_meter_roi` warns on
-  `rank == 0`, rather than reporting a whole-image read nobody asked for.
+The observation the race was built on is worth keeping even though the race is not, because it is the
+argument for cropping one named box: **a box aimed at another layout can land somewhere unrelated on
+a screenshot and still scrape one plausible number out of it.** That is why adding this cabinet's box
+under the original first-past-the-post rule silently degraded four of the fourteen sample images, and
+"best box wins" was a patch on the symptom — it read every box and compared them. Cropping only the
+active game's box removes the premise instead: nothing lands on unrelated pixels unless `active` is
+wrong, and an `active` that is wrong fails loudly in `settings.active_game`, `gameclick.targets_for`
+and `payline.geometry_for` already.
 
 `HuffNPuffLink.exe`'s `meter_roi` is this cabinet's box, and its bottom edge is 752 px of 961 and
 deliberately not 754: the meter strip is only ~26 px tall, and two more rows of pixels pull the
@@ -1069,9 +1103,10 @@ invented `win=1.0` on three of them by reaching past the blank WIN cell to BET's
 label it found but whose row holds no value it can claim (`labelled_fields`). That is a positive
 reading of an empty meter, and it closes the two holes an absent key opens: `pipeline` merges the
 word method over the per-cell one, and `run_elimination_pass` only fires for a field in `missing`.
-The record itself is byte-identical to the not-found record, so the output contract is unchanged;
-`roi._fields_resolved` must not count a blank, or a box wins the configured race on meters it
-could not read.
+The record itself is byte-identical to the not-found record, so the output contract is unchanged.
+(This used to carry a second consequence — `roi._fields_resolved` must not count a blank, or a box
+wins the ROI race on meters it could not read. The race and that function are gone; the blank record
+stands on its own two reasons above.)
 
 One live consequence, worth knowing before touching this again: the rejection is what *exposed*
 the `-00` misread on `2026-08-10_173258`. WIN there used to take CASH's `$2,185.10` and lose it

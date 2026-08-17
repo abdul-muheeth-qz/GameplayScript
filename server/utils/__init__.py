@@ -8,9 +8,11 @@ package that happened to need them first.
 
 The line between this and `server/geometry.py`: geometry.py is the *definition*
 of a normalized box and how it becomes pixels, depended on by two stages and
-frozen. This is the reusable work built on top of that definition.
+frozen. This is the reusable work built on top of that definition -- currently
+one function, `crop_roi`, which is how both `extract` and `payline` turn a box
+into pixels.
 """
 
-from .roi_crop import BoxCrop, RoiCropError, crop_best_box
+from .roi_crop import RoiCropError, crop_roi, image_size
 
-__all__ = ["BoxCrop", "RoiCropError", "crop_best_box"]
+__all__ = ["RoiCropError", "crop_roi", "image_size"]

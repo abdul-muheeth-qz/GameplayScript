@@ -51,5 +51,5 @@ LABEL_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 # ---------------------------------------------------------------------------
 # Everything about *locating* the meter strip -- the normalized boxes that used to be
 # ROI_REGIONS here, one per game -- lives in game_config.json's games.<exe>.meter_roi
-# (see slotocr/roi.py, which reads and races them). This file is the constants for
+# (see slotocr/roi.py, which crops to the active game's). This file is the constants for
 # *reading* the crop once it exists.

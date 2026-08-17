@@ -23,7 +23,7 @@ import sys
 import tempfile
 
 from . import reelstrips, telemetry
-from .geometry import GAMES, Geometry, PaylineError
+from .geometry import PaylineError, geometry_for_game
 from .matcher import Decision, ReelStopMatcher
 
 # The mapping supplied with the request, read off the game's own screen.
@@ -50,7 +50,8 @@ def strips():
 
 
 def geometry():
-    return Geometry("FortuneOx.exe", GAMES["FortuneOx.exe"])
+    """FortuneOx's shipped block, by name -- `active` may be pointing at another game."""
+    return geometry_for_game("FortuneOx.exe")
 
 
 class FixedMatcher:

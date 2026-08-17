@@ -20,14 +20,15 @@ onto the `game` key and its process name folded in:
     cfg["game"] == {"process": "FortuneOx.exe", "window_class": "UnityWndClass",
                     "log": ..., "targets": {...}}
 
-The raw `games` mapping is also copied onto `cfg["games"]`, unresolved -- every game's
-block, not just the active one. `extract/slotocr/roi.py` is the one reader of it: each
-game may carry a `meter_roi` (a normalized `[x0, y0, x1, y1]` box for its meter strip),
-and extract races *every* game's box against a screenshot rather than only the active
-one's, because it runs over loose images (the `Images/` regression suite) that carry no
-game of their own -- there is no "active game" to single out the way `payline.geometry_for`
-or `gameclick.targets_for` do. `cfg["game"]` (the active one) also carries its own
-`meter_roi` this way, since `active_game` folds every key in a game's block onto it.
+**`cfg["game"]` is the only view of the games, and every stage reads that one.** It carries
+the active game's `meter_roi` too -- `active_game` folds every key of a game's block onto it
+-- so `extract` crops the meter strip by the active game's box exactly as `payline` and
+`gameclick` use the active game's reel fractions and click points. An unresolved
+`cfg["games"]` (every game's block, not just the active one) was published here as well, for
+one reader: `extract/slotocr/roi.py` used to race *every* game's `meter_roi` against a
+screenshot and keep whichever read best. That race is gone, and with it the only thing whose
+answer did not depend on `active`, so `cfg["games"]` is gone too -- one game, one box, named
+by `active`.
 
 That resolution is the point of the split. The process name, the window class, the game
 log and the click targets all have to agree about which game is running, and they used to
@@ -133,10 +134,6 @@ def load_config(path: str | None = None, games_path: str | None = None) -> dict:
                                    GAME_CONFIG_NAME))
     games_cfg = _read(games_path)
     cfg["game"] = active_game(games_cfg, games_path)
-    # Unresolved, every game -- unlike "game" above, which is only the active one. See
-    # the module docstring: extract/slotocr/roi.py is what reads this, and it is not
-    # scoped to the active game.
-    cfg["games"] = games_cfg.get("games") or {}
 
     # The environment wins, so the password need not be in a file at all.
     password = os.environ.get("OBS_WS_PASSWORD")

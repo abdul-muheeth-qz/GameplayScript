@@ -19,7 +19,8 @@ from the failure to reach one.
 
 `--profile` is the aid for adding a game: give it a rough box around the reels and it reports
 where the reel background actually starts and stops and where the gutters are, for a person to
-turn into a `geometry.GAMES` block. It does not guess the box -- see `tiles.profile` for the
+turn into a `payline_geometry` block in `game_config.json` (`geometry.py` holds the rule those
+numbers have to satisfy, not the numbers). It does not guess the box -- see `tiles.profile` for the
 two auto-detection approaches that were written, measured against this cabinet's frames, and
 thrown away.
 """

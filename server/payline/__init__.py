@@ -16,9 +16,13 @@ Ported from the payline POC (bungaroshini/payline). What changed on the way in, 
     `spin_result.png` rather than converted from the POC's 1073x1852 screenshot. See
     `geometry.py` -- it is the difference between working on one capture and working on any
     screen size.
-  * **`config.yaml` is gone.** One config file and one loader for the whole repo
-    (`server.settings`), so the tunables are a `payline` block in `config.json` and the
-    geometry is a Python module of constants, in the same division `extract` uses.
+  * **`config.yaml` is gone.** One loader for the whole repo (`server.settings`), and the
+    same division `extract` uses: the geometry is a `payline_geometry` block on the game it
+    was measured on in `game_config.json`, exactly where that game's `meter_roi` is, and
+    everything that is a *measurement* rather than a per-game number is a constant beside
+    the logic it governs (`runner.DEFAULTS`). `geometry.py` holds the rule a block has to
+    satisfy, not the numbers -- it was a `GAMES` dict of them until that move, which made
+    adding a game a code edit and a config edit that had to agree.
   * **Paths are anchored on `server/`** (`settings.resolve`), not on the CWD. The POC wrote
     to a relative `output/`, which from a server lands wherever it was started.
   * **Errors are `PaylineError` prose naming the key to fix**, rather than `sys.exit` with a

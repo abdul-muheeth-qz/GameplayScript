@@ -50,20 +50,19 @@ def process_image(image_path, roi_dir=None, cfg=None):
     """Read the meters off one screenshot.
 
     `cfg` is a loaded config dict (`settings.load_config`'s return) or None; it is passed
-    straight through to `roi.locate_meter_roi`, which reads `cfg["games"]` for every
-    game's `meter_roi` box and races them. `cfg=None` (or a `cfg` with no games at all)
-    means there is nothing to crop to, and `locate_meter_roi` raises rather than guessing.
+    straight through to `roi.locate_meter_roi`, which crops to the active game's
+    `meter_roi`. `cfg=None`, no `active`, or an active game with no `meter_roi` means there
+    is nothing to crop to, and `locate_meter_roi` raises by name rather than guessing.
     """
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
-    # ---- (0) Locate the meter-bar ROI and crop to it FIRST ----
-    # The best-reading box among every game's meter_roi in game_config.json; nothing backs
-    # it up. Whatever it hands back, we crop down to just that region and hand ONLY this
-    # small crop to Tesseract for every OCR call from here on — never the full, visually
-    # busy screenshot. This is faster and avoids background artwork confusing the OCR
-    # engine.
+    # ---- (0) Crop to the meter-bar ROI FIRST ----
+    # The active game's meter_roi from game_config.json, and nothing behind it. We crop
+    # down to just that region and hand ONLY this small crop to Tesseract for every OCR
+    # call from here on — never the full, visually busy screenshot. This is faster and
+    # avoids background artwork confusing the OCR engine.
     roi = locate_meter_roi(image, cfg)
     roi_image = roi.image
     img_h, img_w = roi_image.shape[:2]
@@ -93,13 +92,11 @@ def process_image(image_path, roi_dir=None, cfg=None):
     # fields the primary method missed. Works well when each meter is drawn as
     # its own small, cleanly-separated panel.
     #
-    # Locating the ROI chose its box by validating it, which already ran both
-    # methods over these exact pixels — reuse that instead of OCR'ing the same
-    # crop a second time.
-    if roi.extracted is not None:
-        panel_cell_results, panel_word_results, panel_currency_tokens = roi.extracted
-    else:
-        panel_cell_results, panel_word_results, panel_currency_tokens = extract_all(roi_image)
+    # Run once, here. Locating the ROI used to pick its box by scoring candidates
+    # — a full extraction each — and hand the winner's results along so this
+    # wasn't paid for twice. There is one configured box now and nothing to
+    # score, so the extraction happens in exactly one place.
+    panel_cell_results, panel_word_results, panel_currency_tokens = extract_all(roi_image)
 
     panel_results = dict(panel_cell_results)
     panel_results.update(panel_word_results)  # word-OCR method takes priority

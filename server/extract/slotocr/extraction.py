@@ -381,9 +381,11 @@ def extract_all(image):
     whole run down — the two methods are independent fallbacks for each
     other, so one failing is not fatal.
 
-    This exists so a caller that has ALREADY paid for both methods on a given
-    crop (roi.locate_meter_roi, validating a configured ROI box) can hand the
-    results to the pipeline instead of making it re-OCR the identical pixels.
+    Running both from one place is the point: `pipeline.process_image` calls this
+    once on the ROI crop. It used to have a second caller -- `roi.score_crop`,
+    which ran it on every candidate box to decide which one to keep and handed
+    the winner's results along so they were not paid for twice. That race is
+    gone; there is one configured box and one extraction.
     """
     try:
         word_results, currency_tokens = extract_fields_via_panel_word_ocr(image)

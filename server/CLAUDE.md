@@ -80,9 +80,14 @@ Two files, both in this folder, and `settings.load_config` returns them merged �
 [README.md](README.md#configuration-two-files-split-by-what-changes-them).
 
 - Read **`cfg["game"]["process"]`**, never a `target` key; `target`, `gamelog` and `game.games` are
-  gone. `cfg["games"]` (unresolved, every game) exists for `extract/slotocr/roi.py` alone.
+  gone. **`cfg["game"]` is the only view of the games** — `cfg["games"]` (unresolved, every game)
+  existed for `extract/slotocr/roi.py`'s box race and went with it. Don't republish it.
+- **Every per-game number belongs in that game's block**, so adding a game is one file. The payline
+  reel fractions were a `GAMES` dict in `payline/geometry.py` and are now
+  `games.<exe>.payline_geometry`; `geometry.py` keeps the rule and validates a block, and there is no
+  Python literal left for a person to have to edit in step with the config.
 - **An `active` with no block raises in the loader.** So does a game with no `targets` when a click
-  is needed, and a game with no payline geometry. **Never add a fallback to another game's numbers**
+  is needed, and a game with no `payline_geometry`. **Never add a fallback to another game's numbers**
   — normalized coordinates survive a change of *scale* and not a change of *game*, and a fallback is
   indistinguishable from correct behaviour until the money is wrong.
 - **Nothing that is a measurement is configurable**, and don't move one back into `config.json` to
@@ -133,12 +138,15 @@ comes from a log written by something else: the game's own log, `OledPanelSvc.lo
 - **`slotocr.config.FIELD_LABELS`'s keys (`cash`, `win`, `bet`) are what `validate` reads.** The
   cash key is `cash` and not `balance` for exactly that reason. Renaming one is the single point of
   change. The lists beside the keys are OCR *synonyms*, so `BALANCE` stays in the list.
-- **The ROI boxes live in `game_config.json`**, one per game, and every game's box is raced against
-  every screenshot — deliberately **not** scoped to the active game, because this runs over loose
-  images that carry no game of their own. A `cfg` where no game defines a `meter_roi` raises by name.
-- **There is no fallback behind the winning box.** A crop that misses the meter shows up as null
-  meters, and that is correct. The multi-box race is not a fallback — those are alternative layouts
-  of the same thing.
+- **The ROI boxes live in `game_config.json`**, one per game, and the crop is the **active** game's
+  (`cfg["game"]["meter_roi"]`, via `utils.crop_roi`). No active game, no `meter_roi` on it, or a box
+  that is not a region of the image each raise `RoiCropError` naming what to edit.
+- **There is no fallback behind that box, and never one to another game's.** A crop that misses the
+  meter shows up as null meters, and that is correct. **The box race is gone** — `crop_best_box`,
+  `score_crop`, `_fields_resolved`, `_candidate_boxes`, `MeterROI.extracted` and `cfg["games"]` are
+  all deleted, and it must not come back: it chose which pixels to believe by reading them, and it
+  ranked candidates on a field count, which is the one thing the rule below forbids. Consequence to
+  know before running the fixtures: covering all fourteen now takes two `active` settings.
 - **Tune a crop on the values it reads, never on how many fields it resolved.** The sweep that
   scored the most fields was the worst of them and invented two of its three confident numbers.
 - The reading rules — a value is never to the left of its label; never take a suffix of a malformed
@@ -172,8 +180,16 @@ is `("cash", "bet")` for that reason, and don't add `win` back "for completeness
   is the one that matters most. A literal pixel here is the same class of bug as a fixed delay in
   `capture/` — and so is a literal font size in `report.py`'s captions, which are fitted to the reel
   window's width, never sized.
-- **`geometry_for` raises for a game it has no block for, and must never fall back.** Adding a game
-  is `--profile` plus a block. **`--profile` reports, it does not detect**: two auto-detection
+- **Both crop levels go through the shared rule** — the reel window via `utils.crop_roi` (the same
+  call `extract` crops the meter strip with) and the cells via `geometry.pixel_box` underneath it —
+  so the fraction→pixel arithmetic has one definition. Don't rewrite it inside `tiles.py`; compose
+  the margin into fractions and let `pixel_box` round. `crop_reels` translates `RoiCropError` to
+  `PaylineError`, because that is what `payline.cli` and `api` catch.
+- **`geometry_for` raises for a game with no `payline_geometry` block, and must never fall back.** It
+  reads the block off `cfg["game"]`; `geometry_for_game(process)` is the by-name form the test modules
+  use, since `active` is not necessarily the game a shipped block belongs to. Adding a game
+  is `--profile` plus a block in `game_config.json`, and no code edit at all.
+  **`--profile` reports, it does not detect**: two auto-detection
   approaches were written, measured and failed, and `tiles.profile`'s docstring holds that record so
   neither is retried.
 - **COMPARE is not equality, and the threshold is the one unmeasured number.** `pixel` is the
