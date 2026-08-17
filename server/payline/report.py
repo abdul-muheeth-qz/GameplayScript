@@ -180,7 +180,7 @@ def print_results(record: dict) -> None:
     if stops.get("status") == "on":
         print(f"  Reel stops : {stops.get('stops')}  from {stops.get('file')}"
               f" line {stops.get('line')}")
-        print(f"               {stops.get('timestamp')}, game {stops.get('game_id')}")
+        print(f"               {stops.get('timestamp')}")
         print(f"               chosen by {stops.get('matched_by')}")
         print(f"               band cos {stops['band'][0]:.2f}-{stops['band'][1]:.2f}, "
               f"{len(stops.get('adjudications') or [])} pair(s) reached, "

@@ -157,25 +157,25 @@ export type PaylineAdjudication = {
 }
 
 /**
- * The checkpoint that reads the game's own `BaseGameReelStops` out of the telemetry log and
- * maps them through the reel strips, so an ambiguous COMPARE is decided on symbol *names*
- * rather than on pixels.
+ * The checkpoint that reads the game's own reel stops out of its log (the
+ * `[Slot.HandleSlotReelStoppedMessage] reelsStops[...]` line) and maps them through the reel
+ * strips, so an ambiguous COMPARE is decided on symbol *names* rather than on pixels.
  *
- * `status` is "on", "off" (disabled in config) or "unavailable" (configured on, but the
- * telemetry or the spreadsheet could not be read -- `detail` says which). Unavailable is not a
+ * `status` is "on", "off" (disabled in config) or "unavailable" (configured on, but the game
+ * log or the spreadsheet could not be read -- `detail` says which). Unavailable is not a
  * failure: the audit still has a complete pixel reading. It is reported because a checkpoint
  * that silently did nothing leaves the answer it would have corrected on screen.
  */
 export type PaylineReelStops = {
   status: "on" | "off" | "unavailable"
   detail?: string
-  /** One stop per reel, left to right, straight out of the telemetry. */
+  /** One stop per reel, left to right, straight out of the game log. */
   stops?: number[]
   timestamp?: string | null
-  game_id?: string | null
   file?: string
   line?: number
-  folder?: string
+  /** How many log files were searched -- the live one plus its rotated siblings. */
+  logs?: number
   entries?: number
   /** How this entry was chosen -- by the frame's own time, or as a reported fallback. */
   matched_by?: string

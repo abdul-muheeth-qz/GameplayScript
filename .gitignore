@@ -8,13 +8,6 @@ venv/
 env/
 ENV/
 
-# Left behind by running the OCR step against loose images.
-roi_crops/
-
-# The standalone validator stage 3 was ported from, kept on disk as reference. It is a
-# git repository of its own, so committing it here would nest one inside the other.
-spin-validator/
-
 # UI
 ui/node_modules/
 ui/dist/

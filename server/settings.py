@@ -18,7 +18,7 @@ of the file.
 onto the `game` key and its process name folded in:
 
     cfg["game"] == {"process": "FortuneOx.exe", "window_class": "UnityWndClass",
-                    "log": ..., "telemetry_dir": ..., "targets": {...}}
+                    "log": ..., "targets": {...}}
 
 The raw `games` mapping is also copied onto `cfg["games"]`, unresolved -- every game's
 block, not just the active one. `extract/slotocr/roi.py` is the one reader of it: each
@@ -30,10 +30,12 @@ or `gameclick.targets_for` do. `cfg["game"]` (the active one) also carries its o
 `meter_roi` this way, since `active_game` folds every key in a game's block onto it.
 
 That resolution is the point of the split. The process name, the window class, the game
-log, the click targets and the telemetry folder all have to agree about which game is
-running, and they used to be four separate top-level keys (`target`, `gamelog`,
-`game.games`, `payline.reel_stops.telemetry_dir`) that a person had to change together --
-a half-done edit read as a working config and failed at the cabinet. Now there is one
+log and the click targets all have to agree about which game is running, and they used to
+be four separate top-level keys (`target`, `gamelog`, `game.games`,
+`payline.reel_stops.telemetry_dir`) that a person had to change together --
+a half-done edit read as a working config and failed at the cabinet. `log` now carries the
+payline stage's reel stops too (`payline/telemetry.py`), which is what let the last of
+those four go. Now there is one
 `active` line, and **an `active` naming a game with no block raises here**, before OBS is
 launched or anything is clicked. That is `gameclick.targets_for`'s no-fallback rule moved
 one layer earlier: run `2026-08-12_131459` is the click that landed on nothing because one

@@ -30,8 +30,8 @@ works on both, the payline audit needs a geometry block per game and currently h
   decides which cells hold the same symbol, and walks each payline left to right counting the
   matching run from reel 1. No OCR, no model, no cabinet. Writes `payline.json`. One COMPARE in the
   ambiguous 0.70-threshold band is settled not by pixels but by the game's own reel stops, read from
-  its telemetry log and mapped through `server/assets/payline_excel.xlsx` -- the reel-stop
-  checkpoint, which is the only oracle this audit has.
+  its log (the same one capture watches) and mapped through `server/assets/payline_excel.xlsx` --
+  the reel-stop checkpoint, which is the only oracle this audit has.
 - **`server/`** + **`ui/`** — a FastAPI app exposing those stages as endpoints, and a
   React/Vite/shadcn page with two tabs — Meter Validation and Payline Validation — over one run.
 
@@ -112,8 +112,8 @@ and `python -m server.payline.test_reelstrips` (the reel-stop checkpoint, agains
 stops) — between them the only genuinely unit-testable things in the repo — and by re-running
 `payline.cli` over the FortuneOx run folders on disk, then **looking at
 `payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop is right.
-The checkpoint needs the telemetry folder to exist but no cabinet: with it missing it reports
-`status: "unavailable"` and the audit still runs on the pixels.
+The checkpoint needs the game's log file to exist but no cabinet: with it missing, or holding no
+reel stops, it reports `status: "unavailable"` and the audit still runs on the pixels.
 
 **Two config files, split by what changes them**, and `settings.load_config` returns them merged:
 
@@ -122,14 +122,16 @@ The checkpoint needs the telemetry folder to exist but no cabinet: with it missi
   `spin._ScrubSecrets` keeps it out of `run.log`. (It is **currently tracked in git**, password and
   all — the README used to say otherwise. Worth deciding deliberately rather than by accident.)
 - `game_config.json` — the games: `active` names the running executable and `games` holds a block
-  per game (`window_class`, `log`, `telemetry_dir`, `targets`). No secret, so it is committable.
+  per game (`window_class`, `log`, `targets`, `meter_roi`). No secret, so it is committable.
 
 `load_config` resolves the active block onto **`cfg["game"]`** with `process` folded in, and
 `active` naming a game with no block **raises in the loader** (`settings.active_game`). That is the
-point of the split: the process name, the window class, the game log, the click targets and the
-telemetry folder all have to agree about which game is running, and they used to be four separate
+point of the split: the process name, the window class, the game log and the click targets all have
+to agree about which game is running, and they used to be four separate
 top-level keys (`target`, `gamelog`, `game.games`, `payline.reel_stops.telemetry_dir`) that a person
 had to change together — a half-done edit read as a working config and failed at the cabinet.
+`log` now feeds the payline checkpoint's reel stops as well as capture, which is what retired the
+last of those four.
 Read `cfg["game"]["process"]`, never a `target` key; `target`, `gamelog` and `game.games` are gone.
 
 **Nothing that is a measurement is configurable.** Every timing, threshold and tolerance now lives
@@ -205,7 +207,7 @@ server/
     embeddings.py     one vector per cell: the pixel backend (default) and OpenCLIP
     matcher.py        COMPARE -> yes/no, three ways, the cross-check between them, and the
                        reel-stop CHECKPOINT that decides the ambiguous band on symbol names
-      telemetry.py    the game's own BaseGameReelStops, and *which* entry is this frame's spin
+      telemetry.py    the game log's own reelsStops, and *which* entry is this frame's spin
       reelstrips.py   payline_excel.xlsx -> a symbol name per cell. No openpyxl; stdlib zip+xml
     paylines.py       the rule itself. Pure logic over a matcher, no pixels -- do not touch
     report.py         payline.json, the CSV audit trail, the annotated images
@@ -679,10 +681,11 @@ and a row, so the two cells rarely carry the same overlay.
 
 So between 0.70 and the threshold, the decision is handed to an oracle rather than to a number.
 `matcher.ReelStopMatcher` wraps whichever strategy is running and, in that band only, answers on
-**symbol names**: `telemetry.py` reads the spin's `BaseGameReelStops` out of the game's own telemetry
-log, `reelstrips.py` maps those five numbers through `server/assets/payline_excel.xlsx`, and two names
+**symbol names**: `telemetry.py` reads the spin's `reelsStops` out of the game's own log — the same
+`games.<exe>.log` capture watches — `reelstrips.py` maps those five numbers through
+`server/assets/payline_excel.xlsx`, and two names
 either match or they do not. Outside the band nothing changes — a confident pixel reading is never
-overturned, which is what stops a stale telemetry file or a drifted strip from rewriting a verdict it
+overturned, which is what stops a stale log or a drifted strip from rewriting a verdict it
 has no business touching.
 
 **The mapping is `strip[reel][stop + row - 1]`, and it was measured, not assumed.** The mapping
@@ -693,11 +696,11 @@ fixtures in `test_reelstrips.py`. Position 200 is an `X` terminator in every ree
 
 Four things are load-bearing, and each is a way to be confidently wrong:
 
-- **It only ever speaks about the spin the frame can be *proved* to be.** The stops entry lands 3-4 s
-  before the `spin_result.png` it belongs to (measured across six consecutive captures), so the entry
-  chosen is the last one at or before the frame's own mtime. When there is none, the checkpoint
-  **stands down** and reports `status: "unavailable"` rather than judging on the newest entry in the
-  file. Run `2026-08-13_114200` is why: captured at 11:42 against a telemetry file that begins at
+- **It only ever speaks about the spin the frame can be *proved* to be.** The stops line lands a few
+  seconds before the `spin_result.png` it belongs to (1.8 s and 2.5 s on the two run folders on disk),
+  so the entry chosen is the last one at or before the frame's own mtime. When there is none, the
+  checkpoint **stands down** and reports `status: "unavailable"` rather than judging on the newest
+  entry in the log. Run `2026-08-13_114200` is why: captured at 11:42 against a log that begins at
   12:08, where the nearest entry is a spin four hours later. `payline.reel_stops.allow_latest_fallback`
   opts into the by-hand behaviour ("open the newest log, take the last stops"), which is right only
   while auditing the spin you have just made — and `matched: false` still says so in the record.
@@ -718,12 +721,27 @@ Four things are load-bearing, and each is a way to be confidently wrong:
   `pays_without_checkpoint` exists: without it the cross-check table appears to contradict the verdict
   above it.
 
-The telemetry lines are **not valid JSON and must not be parsed as such** — `"Event":FortuneOx
-[monitoring]` has a bare word where a value belongs, `ProgressiveQualified:False` is Python's
-spelling, and `"2026-08-13T15:58:0905:30"` is missing the `+` of its offset. The newest file is also
-not necessarily the one with the stops: only the `_server_` files carry the marker, and a `_client_`
-file is newer than the server file here, so the search is "the newest file that actually contains an
-entry". The spreadsheet needs no new dependency (`zipfile` + `xml.etree`), and its symbol names are
+**The stops come from the game log, not from the platform's telemetry service, and that swap was
+measured before it was made.** The old source was `C:\logs\Telemetry\Data\<game>\*.log`'s
+`BaseGameReelStops`, found through a `payline.reel_stops.telemetry_dir` setting that fell back to a
+path derived from the process name. Over every entry both sources hold on this machine — 595
+game-log against 593 telemetry, paired by timestamp within 5 s — **593 agree and 0 disagree**, the
+game line landing 0.51 s after the telemetry line (median; −0.03 s to +1.00 s), and the two extras
+are spins the telemetry missed. So one file, one setting, and `telemetry_dir` and its
+`DEFAULT_DIR_ROOT` are gone; `telemetry.py` keeps its name and reads `cfg["game"]["log"]`.
+
+Three things about that reader are load-bearing. **The marker is anchored on its handler**
+(`[Slot.HandleSlotReelStoppedMessage] reelsStops[...]`), not on the word `reelsStops` — all 595
+occurrences here are that handler's, but the same log carries `LastStopsMsg`, `StopsMsg`,
+`SyncStopsMsg` and `HandleInternalSlotReelsStoppedMsg`, and `gamelog.EVENTS` narrows for the same
+reason. **The rotated siblings are merged**, because the log rotates at ~20 MB and the rotated file
+here holds 345 of the 595 entries — reading only the live path would stand the checkpoint down on
+any run older than the last rotation. **It is not a fallback for a game that does not log it**:
+FortuneOx writes this marker to `FortuneOx_Server.log`, which `games["FortuneOx.exe"].log` does not
+point at, so the checkpoint reports `unavailable` there and the pixels decide — which is what it did
+before, there being no FortuneOx telemetry folder on this machine either.
+
+The spreadsheet needs no new dependency (`zipfile` + `xml.etree`), and its symbol names are
 `t="str"` **cached XLOOKUP results against an external workbook** — a reader that handles only shared
 and inline strings finds an empty sheet, which is what the first version of `reelstrips.py` did.
 

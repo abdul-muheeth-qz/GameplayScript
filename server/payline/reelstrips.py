@@ -1,8 +1,8 @@
 """THE CHECKPOINT, part 1 -- the reel strips, read out of the spreadsheet.
 
 `server/assets/payline_excel.xlsx` is one sheet: a `Position` column and one column per reel
-(`R1`..`R5`), 200 positions of symbol names each. A spin's `BaseGameReelStops` from the
-telemetry log is one stop per reel, and the three cells that reel shows are the strip entries
+(`R1`..`R5`), 200 positions of symbol names each. A spin's `reelsStops` from the game's own
+log is one stop per reel, and the three cells that reel shows are the strip entries
 at **stop, stop+1, stop+2** -- so cell `E{row}{reel}` is `strip[reel][stop[reel] + row - 1]`,
 row 1 at the top.
 
@@ -108,9 +108,9 @@ class ReelStrips:
         """`{'E11': 'Pisces', ...}` for one spin's stops. `stops` is one per reel, left first."""
         if len(stops) < reels:
             raise PaylineError(
-                f"the telemetry gave {len(stops)} reel stops but this game's geometry has "
+                f"the game log gave {len(stops)} reel stops but this game's geometry has "
                 f"{reels} reels, so there is no stop for reel {len(stops) + 1}. Check that "
-                f"payline.reel_stops.telemetry_dir points at the running game's telemetry")
+                f"games.<exe>.log in game_config.json names the running game's log")
         return {cell_name(r, c): self.symbol(c, stops[c - 1], r)
                 for r in range(1, rows + 1)
                 for c in range(1, reels + 1)}

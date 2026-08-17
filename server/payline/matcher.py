@@ -199,13 +199,13 @@ class ReelStopMatcher(BaseMatcher):
     pair from the other direction.
 
     So between `band` (0.70 by default) and the matcher's own threshold, the decision is handed
-    to the telemetry: `BaseGameReelStops` for this spin, mapped through the reel strips in
+    to the game's own log: this spin's `reelsStops`, mapped through the reel strips in
     `payline_excel.xlsx`, gives a symbol name per cell, and two names either match or they do
     not. Outside that band nothing changes -- a confident pixel reading is never overturned,
-    which is what keeps a stale telemetry file or a drifted strip from rewriting a verdict it
+    which is what keeps a stale log or a drifted strip from rewriting a verdict it
     has no business touching.
 
-    **It abstains rather than guessing, in three cases, and each is reported.** No telemetry or
+    **It abstains rather than guessing, in three cases, and each is reported.** No stops or
     no strips (the audit still runs, on the pixels alone); a cell whose name is a mystery
     symbol, which reveals as other art and so cannot be compared by name (`reelstrips`'
     `PLACEHOLDERS`); and a cell the grid has no name for at all. Abstaining leaves the inner
@@ -395,8 +395,7 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
     try:
         band = _band(settings, inner, backend)
         strips = reelstrips.load_strips(stops_cfg.get("strips"))
-        folder = telemetry.telemetry_dir(cfg, settings)
-        found = telemetry.latest_stops(folder, image_path,
+        found = telemetry.latest_stops(cfg, image_path,
                                        float(stops_cfg.get("tolerance_s")
                                              or telemetry.DEFAULT_TOLERANCE_S))
         grid = strips.grid(found["stops"], geometry.rows, geometry.reels)

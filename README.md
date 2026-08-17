@@ -1040,7 +1040,7 @@ whose pairs cross both a reel and a row, so the two cells rarely carry the same 
 So between 0.70 and the threshold -- and **only** there -- the decision is handed to the game's own
 account of the spin:
 
-    telemetry.py    C:\logs\Telemetry\Data\FortuneOx\*.log  ->  "BaseGameReelStops":["86",...]
+    telemetry.py    games.<exe>.log  ->  [Slot.HandleSlotReelStoppedMessage] reelsStops[86 ...]
     reelstrips.py   server/assets/payline_excel.xlsx        ->  strip[reel][stop + row - 1]
     matcher.py      two symbol names, which either match or do not
 
@@ -1048,18 +1048,19 @@ account of the spin:
 than assumed: the mapping supplied with the request (stops `[24, 79, 153, 25, 0]`) reproduces all
 fifteen names exactly, and run `2026-08-13_153618` (`[86, 121, 127, 138, 86]`) is 15/15 against its
 own contact sheet. Both are fixtures in `test_reelstrips.py`, which needs no cabinet, no model and no
-telemetry service. Position 200 of every reel is an `X` terminator rather than a symbol, so the strips
+running game. Position 200 of every reel is an `X` terminator rather than a symbol, so the strips
 are 200 long and that is the modulus for the wrap.
 
 **Outside the band nothing changes.** A confident pixel reading is never overturned, which is what
-keeps a stale telemetry file or a drifted reel strip from rewriting a verdict it has no business
+keeps a stale log or a drifted reel strip from rewriting a verdict it has no business
 touching. Four further rules, each of them a way to be confidently wrong:
 
-- **It only speaks about the spin the frame can be proved to be.** The stops entry lands 3-4 s before
-  the `spin_result.png` it belongs to, measured across six consecutive captures, so the entry used is
+- **It only speaks about the spin the frame can be proved to be.** The stops line lands a few seconds
+  before the `spin_result.png` it belongs to (1.8 s and 2.5 s on the two run folders on disk), so the
+  entry used is
   the last one at or before the frame's own timestamp. With none, the checkpoint stands down and says
-  `status: "unavailable"` instead of judging on whatever is last in the file. Run `2026-08-13_114200`
-  is why -- captured at 11:42 against a file that begins at 12:08, where the nearest entry is a spin
+  `status: "unavailable"` instead of judging on whatever is last in the log. Run `2026-08-13_114200`
+  is why -- captured at 11:42 against a log that begins at 12:08, where the nearest entry is a spin
   four hours later. `payline.reel_stops.allow_latest_fallback` opts into the by-hand reading ("open the
   newest log, take the last stops"), correct only while auditing the spin you have just made.
 - **A mystery symbol cannot decide a pair.** `Mystery1`, `Mystery2` and `Mystery (Orb)` are 15% of
@@ -1077,11 +1078,27 @@ touching. Four further rules, each of them a way to be confidently wrong:
   other", and the checkpoint is not a vision strategy; feeding it in would report the checkpoint doing
   its job as a threshold to recalibrate.
 
-Two things about the inputs are worth knowing before touching either reader. The telemetry lines are
-**not valid JSON** -- `"Event":FortuneOx    [monitoring]` has a bare word where a value belongs,
-`ProgressiveQualified:False` is Python's spelling, and `"2026-08-13T15:58:0905:30"` is missing the `+`
-of its offset -- so they are read with regex, and only the `_server_` files carry the marker at all
-(the newest file in the folder here is a `_client_` one with none). And the spreadsheet's symbol names
+**The stops used to come from the platform's telemetry service** -- `C:\logs\Telemetry\Data\<game>`,
+`"BaseGameReelStops":["86",...]`, found through a `payline.reel_stops.telemetry_dir` setting that fell
+back to a folder derived from the process name. It now reads the game's own log instead, the same file
+capture treats as its oracle, and the swap was measured before it was made: over every entry both
+sources hold on this machine -- 595 game-log against 593 telemetry, paired by timestamp within 5 s --
+**593 agree and 0 disagree**, the game line landing 0.51 s after the telemetry line (median, −0.03 s
+to +1.00 s), and the two extras are spins the telemetry missed. One file instead of two, one setting
+instead of three, and no `telemetry_dir`.
+
+Three things about that reader are worth knowing before touching it. **The marker is anchored on its
+handler**, `[Slot.HandleSlotReelStoppedMessage]`, not on the word `reelsStops`: all 595 occurrences
+here are that handler's, but the log also carries `LastStopsMsg`, `StopsMsg`, `SyncStopsMsg` and
+`HandleInternalSlotReelsStoppedMsg`, any of which could grow a similar payload. **The rotated siblings
+are merged** -- the log rotates at ~20 MB and the rotated file here holds 345 of the 595 entries, so
+reading only the live path would stand the checkpoint down on any run older than the last rotation.
+And **a game that does not log it gets no substitute**: FortuneOx writes this marker to
+`FortuneOx_Server.log`, which `games["FortuneOx.exe"].log` does not name, so the checkpoint reports
+`unavailable` and the pixels decide -- as they already did, there being no FortuneOx telemetry folder
+on this machine either.
+
+The spreadsheet's symbol names
 are `t="str"`, **cached XLOOKUP results against an external workbook**, not shared strings: a reader
 that handles only shared and inline strings finds an empty sheet, which is exactly what the first
 version of `reelstrips.py` did. It is parsed with `zipfile` and `xml.etree`, so no new dependency.
@@ -1216,7 +1233,6 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
     "HuffNPuffLink.exe": {
       "window_class": "UnityWndClass",
       "log": "C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log",
-      "telemetry_dir": null,
       "targets": { "take_win": [0.124, 0.917], "gamble": [0.124, 0.883] },
       "meter_roi": [0.138889, 0.755463, 0.869281, 0.782518]
     }
@@ -1226,10 +1242,9 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
 
 | Key | |
 |---|---|
-| `active` | the executable that is running. **This is the one line you change to point the tool at another game**, and everything below follows from it: the window it finds, the log it treats as the oracle, the reel geometry `payline` uses, the telemetry folder the reel-stop checkpoint reads, and the point it clicks to take a win. `settings.load_config` resolves it onto `cfg["game"]` |
+| `active` | the executable that is running. **This is the one line you change to point the tool at another game**, and everything below follows from it: the window it finds, the log it treats as the oracle, the reel geometry `payline` uses, and the point it clicks to take a win. `settings.load_config` resolves it onto `cfg["game"]` |
 | `games.<exe>.window_class` | matched with the process, never the title — Unity titles change, `UnityWndClass` does not |
-| `games.<exe>.log` | the game's own log, which is what says a spin is over. See [three logs are the oracles](#three-logs-are-the-oracles) |
-| `games.<exe>.telemetry_dir` | `null` derives it from the executable (`FortuneOx.exe` → `C:\logs\Telemetry\Data\FortuneOx`), so a second game usually needs nothing here |
+| `games.<exe>.log` | the game's own log, which is what says a spin is over — and, since it also carries `reelsStops`, what the payline audit's reel-stop checkpoint reads. See [three logs are the oracles](#three-logs-are-the-oracles) |
 | `games.<exe>.targets` | the normalized click points — `{"take_win": [0.0713, 0.9724], "gamble": [0.0694, 0.9383]}`. A block per game because the points do not transfer between them; measure one with `gameclick --calibrate` |
 | `games.<exe>.meter_roi` | `extract`'s candidate meter-strip crop for this game — see [it never assumes a pixel coordinate](#it-never-assumes-a-pixel-coordinate). Every game's is raced against every screenshot regardless of `active`, because a loose image (the `Images/` fixtures) has no game to look up; `settings.load_config` copies the whole `games` mapping onto `cfg["games"]`, unresolved, for exactly that |
 

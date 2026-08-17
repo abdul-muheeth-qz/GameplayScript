@@ -4,7 +4,6 @@
     "HuffNPuffLink.exe": {
       "window_class": "UnityWndClass",
       "log": "C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log",
-      "telemetry_dir": null,
       "targets": {
         "take_win": [0.124, 0.917],
         "gamble": [0.124, 0.883]
@@ -14,7 +13,6 @@
     "FortuneOx.exe": {
       "window_class": "UnityWndClass",
       "log": "C:\\logs\\Game\\FortuneOx\\Logs\\FortuneOx_Client.log",
-      "telemetry_dir": null,
       "targets": {
         "take_win": [0.0713, 0.9724],
         "gamble": [0.0694, 0.9383]

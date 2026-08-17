@@ -57,14 +57,12 @@ DEFAULTS = {
     "save_embeddings": True,
     "image": None,
     "symbol_library": None,
-    # The reel-stop checkpoint. `telemetry_dir` null falls through to the active game's own
-    # `telemetry_dir` in game_config.json and then to a folder derived from its process
-    # (FortuneOx.exe -> C:\logs\Telemetry\Data\FortuneOx) -- see telemetry.telemetry_dir;
-    # `band` null runs from 0.70 up to whatever `thresholds` says, so the two cannot drift
-    # apart. See matcher.ReelStopMatcher.
+    # The reel-stop checkpoint. There is no path to set: the stops are read from the active
+    # game's own log, `games.<exe>.log` in game_config.json, which is the same file the capture
+    # stage reads -- see telemetry.game_logs. `band` null runs from 0.70 up to whatever
+    # `thresholds` says, so the two cannot drift apart. See matcher.ReelStopMatcher.
     "reel_stops": {
         "enabled": True,
-        "telemetry_dir": None,
         "strips": reelstrips.DEFAULT_STRIPS,
         "band": None,
         "tolerance_s": telemetry.DEFAULT_TOLERANCE_S,
@@ -85,8 +83,8 @@ def settings_for(cfg: dict | None) -> dict:
         if merged.get(key):
             merged[key] = resolve(merged[key])
     # `reel_stops` is the one nested block, so it is merged key by key rather than replaced:
-    # a config that sets only `telemetry_dir` must still get the default band and strips,
-    # and a plain `merged.update` would have left the other three keys missing.
+    # a config that sets only `tolerance_s` must still get the default band and strips,
+    # and a plain `merged.update` would have left the other keys missing.
     stops = dict(DEFAULTS["reel_stops"])
     stops.update(merged.get("reel_stops") or {})
     if stops.get("strips"):
