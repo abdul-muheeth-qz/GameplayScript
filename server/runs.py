@@ -5,7 +5,7 @@ whole state model -- the server keeps nothing in memory between requests, so a r
 a restart or a second browser tab all see the same thing, and a run from last week
 replays exactly like one from a minute ago.
 
-    captured_files/<run_id>/
+    server/captured_files/<run_id>/
         pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
         win_collected.png                                             capture, wins only
         extract/pre_spin.json  extract/spin_result.json  *_roi.png    extract
@@ -72,7 +72,7 @@ def new_run_id() -> str:
 
 
 def run_dir(cfg: dict, run_id: str) -> str:
-    """The folder for `run_id`, having checked the id cannot escape captured_files/."""
+    """The folder for `run_id`, having checked the id cannot escape server/captured_files/."""
     if not RUN_ID_RE.match(run_id):
         raise RunError(f"not a run id: {run_id!r}")
     return os.path.join(captures_dir(cfg), run_id)
@@ -129,6 +129,10 @@ async def capture(cfg: dict, run_id: str, *, dry_run=False, no_record=False,
 
     LOG.info("capture: %s", " ".join(argv))
     proc = await asyncio.create_subprocess_exec(
+        # ROOT (the repository root), not server/: `-m server.capture.spin` resolves
+        # against the CWD, so it has to run from the folder that *contains* the package.
+        # Where it writes is not the CWD's business -- --run-dir is absolute, and
+        # settings.resolve anchors everything else on server/.
         *argv, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         # spin.py never reads stdin, and a console handle it does not need is one more
         # thing that can differ between running it by hand and running it from here.
@@ -150,7 +154,7 @@ async def capture(cfg: dict, run_id: str, *, dry_run=False, no_record=False,
     if record is None:
         # prune_empty deletes a folder that captured nothing at all.
         raise RunError("the capture reported success but wrote no spin.json -- check "
-                       "run.log in the run's folder under captured_files/")
+                       "run.log in the run's folder under server/captured_files/")
     return record
 
 

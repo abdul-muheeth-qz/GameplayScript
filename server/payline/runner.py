@@ -14,7 +14,7 @@ been produced to be believed.
 **Which image.** `spin_result` of the run by default -- via `server.frames`, so the newest
 spin's own outcome, and legacy `after.png` folders and any configured image format come for
 free. `payline.image` in config.json overrides that when it is set, so a supplied screenshot
-can be validated without emptying `captured_files/` first. `image_source` in the record says
+can be validated without emptying `server/captured_files/` first. `image_source` in the record says
 which it was, because "the crop is fine but you validated the wrong picture" is otherwise
 invisible. See `source_image`.
 
@@ -104,7 +104,7 @@ def source_image(run_dir: str, settings: dict) -> tuple[str, str]:
     otherwise. **It is an override, not a fallback**, and that is the point of it: a supplied
     screenshot has to be validatable while real captures are sitting on disk, because
     otherwise the only way to demonstrate this stage on a chosen image would be to empty
-    `captured_files/` first.
+    `server/captured_files/` first.
 
     The cost of an override is that a stale setting quietly audits the wrong picture, so
     nothing here is silent: the path is logged, `image_source` in the record names it, and the

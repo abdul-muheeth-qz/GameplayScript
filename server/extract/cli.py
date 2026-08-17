@@ -1,6 +1,6 @@
 r"""Read the slot meters off one or more screenshots.
 
-    python -m server.extract.cli captured_files/2026-08-07_141726   # a capture run folder
+    python -m server.extract.cli server/captured_files/2026-08-07_141726   # a capture run folder
     python -m server.extract.cli server/extract/Images/after.png    # one image
     python -m server.extract.cli some/folder/ --out results/        # a folder of images
 
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="write one <name>.json per image here, and the ROI crops "
                              "alongside them (default for loose images: print only)")
     parser.add_argument("--config", default=None,
-                        help="path to config.json (default: the one at the repo root)")
+                        help="path to config.json (default: server/config.json)")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 

@@ -8,9 +8,9 @@ current cash = previous cash - bet + win
 ```
 
 ```powershell
-python -m server.validate.cli captured_files/<run_id>          # Pass or Fail, with the working
-python -m server.validate.cli captured_files/<run_id> --json   # the full verdict object
-python -m server.validate.cli captured_files/<run_id> --write  # also write validate.json
+python -m server.validate.cli server/captured_files/<run_id>          # Pass or Fail, with the working
+python -m server.validate.cli server/captured_files/<run_id> --json   # the full verdict object
+python -m server.validate.cli server/captured_files/<run_id> --write  # also write validate.json
 ```
 
 The folder must be a capture run [extract](../extract/) has already been run over. Exit codes are

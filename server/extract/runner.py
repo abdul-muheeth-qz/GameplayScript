@@ -3,7 +3,7 @@
 This is the whole hand-off between capture and validate, and it is the reason the OCR
 half stopped printing its answer to stdout. A run folder after this has run:
 
-    captured_files/<run_id>/
+    server/captured_files/<run_id>/
         pre_spin.png  spin_result.png      <- capture wrote these
         win_collected.png                  <- and this one too, if the spin won
         extract/pre_spin.json              <- one record object, not a list

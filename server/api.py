@@ -2,7 +2,7 @@
 
 Deliberately thin: it sequences the stages and serves their files, and owns no logic of
 its own. Every endpoint takes or returns a `run_id`, which is a folder name under
-`captured_files/` -- see server/runs.py for why the state model is the folder and not
+`server/captured_files/` -- see server/runs.py for why the state model is the folder and not
 memory.
 
 Two audits over the same capture, and they share only the spin:
@@ -55,6 +55,9 @@ from . import runs
 
 LOG = logging.getLogger("server")
 
+# ROOT, not SERVER_DIR: the built UI is the one thing this serves that is not in this
+# package. Everything else -- both config files, captured_files/ -- is under server/, and
+# `settings.resolve` anchors there.
 UI_DIST = os.path.join(ROOT, "ui", "dist")
 
 app = FastAPI(title="Slot spin capture, extract and validate", version="1.0")
@@ -201,7 +204,7 @@ def _payline_run(cfg: dict, run_id: str | None) -> str:
         return fresh
 
     raise HTTPException(400,
-        f"no capture under captured_files/ holds a {frames.SPIN_RESULT} frame, so there is "
+        f"no capture under server/captured_files/ holds a {frames.SPIN_RESULT} frame, so there is "
         f"nothing to read the reels off. Capture a spin from the Meter Validation tab, or set "
         f"payline.image in config.json to an image to validate instead.")
 

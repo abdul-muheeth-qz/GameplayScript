@@ -1,9 +1,9 @@
 """Stage 4 from the command line, over a run folder or a loose image.
 
     python -m server.payline.cli                                    the newest usable capture
-    python -m server.payline.cli captured_files/<run>               one particular run
-    python -m server.payline.cli captured_files/<run> --tiles-only  just crop and cut
-    python -m server.payline.cli captured_files/<run> --json        the whole record
+    python -m server.payline.cli server/captured_files/<run>               one particular run
+    python -m server.payline.cli server/captured_files/<run> --tiles-only  just crop and cut
+    python -m server.payline.cli server/captured_files/<run> --json        the whole record
     python -m server.payline.cli --image <path>                     a loose image, forced
     python -m server.payline.cli --profile <path> X0 Y0 X1 Y1       measure a new game
 
@@ -44,7 +44,7 @@ EXIT_PAYS, EXIT_ERROR, EXIT_NO_PAY = 0, 1, 2
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", nargs="?",
-                        help="a run folder under captured_files/ (default: the newest one "
+                        help="a run folder under server/captured_files/ (default: the newest one "
                              "holding a spin_result frame)")
     parser.add_argument("--image", help="validate this image instead of a run's frame")
     parser.add_argument("--profile", nargs=5, metavar=("IMAGE", "X0", "Y0", "X1", "Y1"),
@@ -52,7 +52,7 @@ def main(argv=None) -> int:
     parser.add_argument("--tiles-only", action="store_true",
                         help="crop and cut the tiles, then stop")
     parser.add_argument("--json", action="store_true", help="print the whole record")
-    parser.add_argument("--config", help="a config.json other than the repository's")
+    parser.add_argument("--config", help="a config.json other than server/config.json")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 

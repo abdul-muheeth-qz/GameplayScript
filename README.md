@@ -24,18 +24,18 @@ python -m server.capture.spin --dry-run           # check everything and shoot o
 python -m server.capture.spin --no-record         # skip the video; capture only the two frames
 python -m server.capture.watch                    # watch a person play until Ctrl-C, capturing every action
 
-python -m server.extract.cli captured_files/<run>       # read the meters, write the two records
-python -m server.validate.cli captured_files/<run>      # Pass or Fail, exit 0 or 1
+python -m server.extract.cli server/captured_files/<run>       # read the meters, write the two records
+python -m server.validate.cli server/captured_files/<run>      # Pass or Fail, exit 0 or 1
 ```
 
 Run them from the repository root — they are `-m` modules, and that is what puts the `server`
 package (and `server.settings`) on the path.
 
-Everything lands in one folder per run under `captured_files/`, and that folder is the only thing the
+Everything lands in one folder per run under `server/captured_files/`, and that folder is the only thing the
 three stages share. Nothing is passed between them by argument or by a path baked into a script:
 
 ```
-captured_files/2026-08-05_224937/
+server/captured_files/2026-08-05_224937/
     pre_spin.png            the screen before the press
     spin_result.png         once the game reported the spin over, WIN meter showing what it paid
     win_collected.png       after TAKE WIN was clicked on the glass -- wins only, and then it is
@@ -61,6 +61,13 @@ disk resumes from the first stage that has not run rather than spinning the cabi
 Most of this document is about `capture`, which came first, is by far the most delicate, and
 explains the machinery the rest sits on. [Reading the meters](#reading-the-meters--extract) and
 [Deciding whether it adds up](#deciding-whether-it-adds-up--validate) cover the other two.
+
+**This is the whole record, both halves together.** Each half also has its own pair of documents
+for working inside it alone — [server/README.md](server/README.md) and
+[server/CLAUDE.md](server/CLAUDE.md) for the Python, [ui/README.md](ui/README.md) and
+[ui/CLAUDE.md](ui/CLAUDE.md) for the browser. They are scoped, not summarised: each says what
+you need in order to change that folder and points back here for the measurement behind a rule,
+so there is one copy of every number and it is the one below.
 
 ## What it does, step by step
 
@@ -457,7 +464,7 @@ Ctrl-C is the normal way to stop, and exits `0`.
 gamble or collect that answers it:
 
 ```
-captured_files/watch_2026-08-06_170314/
+server/captured_files/watch_2026-08-06_170314/
     session.json                  rewritten after every round, so an interruption costs nothing
     run.log
     rounds/
@@ -634,7 +641,7 @@ a row already trusted.
 
 Everything is either a fraction of the image or derived from it at runtime. The meter strip is
 cropped out by a **normalized `[x0, y0, x1, y1]` box per game**, held in
-[`game_config.json`](game_config.json)'s `games.<exe>.meter_roi` — the file you edit to change the
+[`game_config.json`](server/game_config.json)'s `games.<exe>.meter_roi` — the file you edit to change the
 crop. Adding a layout is one line in a game's block and no code. It is not scoped to the *active*
 game, though: every game's box is raced against every screenshot regardless of which one is
 running, because a loose image (the fixtures in `Images/`) carries no game of its own to look up.
@@ -917,8 +924,8 @@ Needs nothing running: no cabinet, no OBS, nothing over the network, and **no co
 the comparison it governs.
 
 ```powershell
-python -m server.validate.cli captured_files/<run>          # Pass or Fail, with the working
-python -m server.validate.cli captured_files/<run> --json  # the full verdict object
+python -m server.validate.cli server/captured_files/<run>          # Pass or Fail, with the working
+python -m server.validate.cli server/captured_files/<run> --json  # the full verdict object
 ```
 
 The folder must be a capture run the extract step has already been run over, so that it holds
@@ -987,7 +994,7 @@ confident grid. This is the same rule -- and the same reason -- as the per-game 
 Adding a game is `--profile` plus a block:
 
 ```powershell
-python -m server.payline.cli --profile captured_files/<run>/spin_result.png 0 900 1080 1600
+python -m server.payline.cli --profile server/captured_files/<run>/spin_result.png 0 900 1080 1600
 ```
 
 Give it a rough box around the reels and it reports where the background actually starts and stops
@@ -1151,9 +1158,9 @@ direction is untested -- there is no winning FortuneOx run with a clean terminal
 
 ```powershell
 python -m server.payline.cli                                    # the newest usable capture
-python -m server.payline.cli captured_files/<run>               # the grid, every COMPARE, the pays
-python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, then stop
-python -m server.payline.cli captured_files/<run> --json        # the whole record
+python -m server.payline.cli server/captured_files/<run>               # the grid, every COMPARE, the pays
+python -m server.payline.cli server/captured_files/<run> --tiles-only  # crop and cut, then stop
+python -m server.payline.cli server/captured_files/<run> --json        # the whole record
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.test_paylines                          # the rule, without any pixels
 python -m server.payline.test_reelstrips                        # the reel-stop checkpoint
@@ -1179,7 +1186,7 @@ Two sources, and the one in use is always named above the image and in the recor
 
 An override rather than a fallback, and that is the point of it: a chosen screenshot has to be
 validatable while real captures are sitting on disk, or the only way to demonstrate this stage
-on a particular image would be to empty `captured_files/` first.
+on a particular image would be to empty `server/captured_files/` first.
 
 ```json
 "payline": { "image": "data/input/demo_spin.png" }
@@ -1215,10 +1222,11 @@ configured image format work unchanged.
 
 ## Configuration
 
-**Two files, split by what changes them.** `config.json` is this machine; `game_config.json` is the
-games. Everything else — every timing, every threshold — lives in the code beside the logic it
-governs, because those are measurements rather than preferences and a file that restated them was
-one more thing to keep in step.
+**Two files, split by what changes them, and both in `server/`.**
+[`server/config.json`](server/config.json) is this machine;
+[`server/game_config.json`](server/game_config.json) is the games. Everything else — every timing,
+every threshold — lives in the code beside the logic it governs, because those are measurements
+rather than preferences and a file that restated them was one more thing to keep in step.
 
 `config.json` holds the obs-websocket password, so `OBS_WS_PASSWORD` in the environment overrides
 it and the password is never written to `run.log` — the logging filter that drops the SDK's
@@ -1244,7 +1252,7 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
 |---|---|
 | `active` | the executable that is running. **This is the one line you change to point the tool at another game**, and everything below follows from it: the window it finds, the log it treats as the oracle, the reel geometry `payline` uses, and the point it clicks to take a win. `settings.load_config` resolves it onto `cfg["game"]` |
 | `games.<exe>.window_class` | matched with the process, never the title — Unity titles change, `UnityWndClass` does not |
-| `games.<exe>.log` | the game's own log, which is what says a spin is over — and, since it also carries `reelsStops`, what the payline audit's reel-stop checkpoint reads. See [three logs are the oracles](#three-logs-are-the-oracles) |
+| `games.<exe>.log` | the game's own log, which is what says a spin is over — and, since it also carries `reelsStops`, what the payline audit's reel-stop checkpoint reads. See [how it knows the spin is over](#how-it-knows-the-spin-is-over) |
 | `games.<exe>.targets` | the normalized click points — `{"take_win": [0.0713, 0.9724], "gamble": [0.0694, 0.9383]}`. A block per game because the points do not transfer between them; measure one with `gameclick --calibrate` |
 | `games.<exe>.meter_roi` | `extract`'s candidate meter-strip crop for this game — see [it never assumes a pixel coordinate](#it-never-assumes-a-pixel-coordinate). Every game's is raced against every screenshot regardless of `active`, because a loose image (the `Images/` fixtures) has no game to look up; `settings.load_config` copies the whole `games` mapping onto `cfg["games"]`, unresolved, for exactly that |
 
@@ -1289,15 +1297,22 @@ carries the measurement.
 | `game.games` / `game.targets` | that game's `targets` |
 | the whole `payline` block | `payline.runner.DEFAULTS`, which it duplicated key for key. Its `reel_stops` block was also spelled `"c"` in the shipped file, so it had never been read at all — `payline.reel_stops.*` is still honoured if you add it back to override a default |
 
-Relative paths — `output.dir`, `--out`, `--run-dir` — are resolved against the repository root,
-never the current working directory, so a server started from anywhere writes into the same
-`captured_files/` the command line uses.
+**Both files live in `server/`, beside the code that reads them**, and so does
+`captured_files/`. Nothing outside that package reads either one, so nothing outside it needs
+them; the repository root holds the two shared documents and the two folders and nothing else.
+
+Relative paths — `output.dir`, `--out`, `--run-dir`, `payline.image` — are resolved against
+`server/` (`settings.resolve`), never the current working directory, so a server started from
+anywhere writes into the same `server/captured_files/` the command line uses. `server/settings.py`
+keeps a second anchor, `ROOT`, for the two things that genuinely are outside the package: the
+built UI at `ui/dist`, and the working directory the capture subprocess needs in order for
+`python -m server.capture.spin` to resolve at all.
 
 ## Files
 
 | File | |
 |---|---|
-| [server/settings.py](server/settings.py) | the one config loader, and the root every relative path anchors on |
+| [server/settings.py](server/settings.py) | the one config loader, and the two anchors every relative path hangs off |
 | [server/geometry.py](server/geometry.py) | normalized boxes, and the one rule for turning them into pixels |
 | [server/utils/roi_crop.py](server/utils/roi_crop.py) | crop to the best-reading of a list of boxes; the scorer is an argument |
 | [server/api.py](server/api.py) | the endpoints, health, and the files the page shows |
@@ -1335,14 +1350,20 @@ never the current working directory, so a server started from anywhere writes in
 | [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
 | [server/validate/runner.py](server/validate/runner.py) | the verdict object |
 | [server/validate/cli.py](server/validate/cli.py) | Pass / Fail / no verdict |
+| **server, and not code** | |
+| [server/config.json](server/config.json) | this cabinet: OBS, the i-Deck, output, Tesseract, the server |
+| [server/game_config.json](server/game_config.json) | the games, and `active` naming the one that is running |
+| [server/assets/payline_excel.xlsx](server/assets/) | the reel strips the reel-stop checkpoint maps stops through |
+| `server/captured_files/` | one folder per run — the contract between the stages. Not committed |
 | **ui** | |
 | [ui/src/App.tsx](ui/src/App.tsx) | which audit is showing, and which run |
 | [ui/src/components/PageShell.tsx](ui/src/components/PageShell.tsx) | the chrome both audits share, and the mode switch |
 | [ui/src/pages/MeterValidation.tsx](ui/src/pages/MeterValidation.tsx) | capture, extract, validate |
 | [ui/src/pages/PaylineValidation.tsx](ui/src/pages/PaylineValidation.tsx) | capture, tiles, paylines |
-| **root** | |
-| [config.json](config.json) | this cabinet: OBS, the i-Deck, output, Tesseract, the server |
-| [game_config.json](game_config.json) | the games, and `active` naming the one that is running |
+| **docs** | |
+| README.md, CLAUDE.md (here) | the whole thing, both halves, and every measurement behind it |
+| [server/README.md](server/README.md), [server/CLAUDE.md](server/CLAUDE.md) | the Python half on its own |
+| [ui/README.md](ui/README.md), [ui/CLAUDE.md](ui/CLAUDE.md) | the browser half on its own |
 
 ## When it doesn't work
 

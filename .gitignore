@@ -1,3 +1,5 @@
+# The run folders. They live in server/, beside the code and the config that make them; the
+# bare pattern matches at any depth, so a leftover captured_files/ at the root is covered too.
 captured_files/
 __pycache__/
 *.pyc

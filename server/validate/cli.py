@@ -1,7 +1,7 @@
 """Validate one slot spin.
 
-    python -m server.validate.cli captured_files/2026-08-11_212236
-    python -m server.validate.cli captured_files/2026-08-11_212236 --json
+    python -m server.validate.cli server/captured_files/2026-08-11_212236
+    python -m server.validate.cli server/captured_files/2026-08-11_212236 --json
 
 The argument is a capture run folder that the extract step has already been run over, so
 that it holds `extract/pre_spin.json`, `extract/spin_result.json` and -- if the spin won --

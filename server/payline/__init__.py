@@ -4,7 +4,7 @@ A fourth stage in the same shape as the other three -- it reads a frame `capture
 wrote and writes its own files beside it, so the run folder stays the whole contract and
 nothing is passed between stages by argument:
 
-    captured_files/<run_id>/
+    server/captured_files/<run_id>/
         spin_result.png                                    capture wrote this
         payline/reels.png  tiles/e11.png ...               tiles
         payline/tiles.json  contact_sheet.png              tiles
@@ -19,8 +19,8 @@ Ported from the payline POC (bungaroshini/payline). What changed on the way in, 
   * **`config.yaml` is gone.** One config file and one loader for the whole repo
     (`server.settings`), so the tunables are a `payline` block in `config.json` and the
     geometry is a Python module of constants, in the same division `extract` uses.
-  * **Paths are anchored on the repo root**, not on the CWD or on the package directory.
-    The POC wrote to a relative `output/`, which from a server lands wherever it was started.
+  * **Paths are anchored on `server/`** (`settings.resolve`), not on the CWD. The POC wrote
+    to a relative `output/`, which from a server lands wherever it was started.
   * **Errors are `PaylineError` prose naming the key to fix**, rather than `sys.exit` with a
     bare string -- the API hands the message straight to the browser.
 

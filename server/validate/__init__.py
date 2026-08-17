@@ -5,8 +5,8 @@ be the cash before it, less the bet that was placed, plus the win this spin paid
 worked out in exact `Decimal` arithmetic (`ledger.judge`) and compared against the meter
 within `validate.tolerance`.
 
-    python -m server.validate.cli captured_files/<run_id>
-    python -m server.validate.cli captured_files/<run_id> --json
+    python -m server.validate.cli server/captured_files/<run_id>
+    python -m server.validate.cli server/captured_files/<run_id> --json
 """
 
 from .runner import read_result, validate_records, validate_run

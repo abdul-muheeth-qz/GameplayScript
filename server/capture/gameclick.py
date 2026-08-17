@@ -501,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="click even though no win is pending. A click at an idle screen can "
                              "land on a bet button and place a real wager")
     parser.add_argument("--config", default=None,
-                        help="path to config.json (default: the one at the repo root)")
+                        help="path to config.json (default: server/config.json)")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     return parser
 

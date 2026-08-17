@@ -56,7 +56,7 @@ import time
 from datetime import datetime
 
 from .. import frames
-from ..settings import DEFAULT_CONFIG, ROOT, load_config
+from ..settings import DEFAULT_CONFIG, load_config, resolve
 
 from . import gameclick, gamelog, ideck, winfocus
 from .obs_client import MAX_DIM, ObsError, ObsSession, Recording, clamp_dim
@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "the newest one -- the timestamp is only second-granular, so "
                             "two runs a second apart would collide.")
     parser.add_argument("--config", default=None,
-                       help="path to config.json (default: the one at the repo root)")
+                       help="path to config.json (default: server/config.json)")
     parser.add_argument("-v", "--verbose", action="store_true",
                        help="debug logging (always written to run.log regardless)")
     return parser
@@ -525,12 +525,12 @@ def run(args) -> int:
     collect_after_spin = (not args.no_collect) and COLLECT_AFTER_SPIN
     if args.run_dir:
         # Named by the caller, so it can find the artefacts without racing the timestamp.
-        run_dir = args.run_dir if os.path.isabs(args.run_dir) else os.path.join(ROOT,
-                                                                               args.run_dir)
+        # `resolve` anchors a relative one on `server/`, not on the CWD -- the server
+        # passes an absolute path, but a person running this by hand from anywhere gets
+        # the same folder the CLI and the UI read.
+        run_dir = resolve(args.run_dir)
     else:
-        base_out = args.out or cfg.get("output", {}).get("dir", "captures")
-        if not os.path.isabs(base_out):
-            base_out = os.path.join(ROOT, base_out)
+        base_out = resolve(args.out or cfg.get("output", {}).get("dir", "captures"))
         suffix = "_dryrun" if args.dry_run else ""
         run_dir = os.path.join(base_out, datetime.now().strftime("%Y-%m-%d_%H%M%S") + suffix)
     os.makedirs(run_dir, exist_ok=True)

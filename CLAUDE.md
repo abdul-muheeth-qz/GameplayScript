@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One app, one capture, **two audits** of it, on an ICE cabinet dev machine. Capture a spin, then
 either read the credit meters off the frames and check that the money adds up, or read the reel
-grid off the result frame and check that the paylines pay what they say. `config.json`'s
-`game_config.json`'s `active` says which game (`HuffNPuffLink.exe`, `FortuneOx.exe`); the meter audit
-works on both, the payline audit needs a geometry block per game and currently has FortuneOx's.
+grid off the result frame and check that the paylines pay what they say.
+`server/game_config.json`'s `active` says which game (`HuffNPuffLink.exe`, `FortuneOx.exe`); the
+meter audit works on both, the payline audit needs a geometry block per game and currently has
+FortuneOx's.
 
 - **`server/capture/`** — `spin.py` **causes** one spin: opens OBS, finds the game and i-Deck windows,
   starts OBS recording into the run folder, screenshots, clicks Repeat Bet on the i-Deck, waits
@@ -40,11 +41,31 @@ behaviour in this codebase is explained there and in module docstrings, with the
 justified it. Read the docstring of a module before changing it; nearly every odd-looking line is
 load-bearing and was arrived at by a failure.
 
+### Which document to read, and where to write a new rule
+
+Three pairs, and the root pair is the authority. **This file and [README.md](README.md) are the
+whole thing, both halves together**; each half then has its own pair scoped to working inside it:
+
+| | for |
+|---|---|
+| `CLAUDE.md`, `README.md` (here) | the app: the two audits, the cabinet, every measurement, and anything that crosses the server/ui line |
+| [server/CLAUDE.md](server/CLAUDE.md), [server/README.md](server/README.md) | the Python: the stages, the run folder, the config, the CLIs |
+| [ui/CLAUDE.md](ui/CLAUDE.md), [ui/README.md](ui/README.md) | the browser: the two pages, the shell, the API client, the build |
+
+**A measurement is written down once, and it is written here.** The per-folder files state the rule
+and link back for the number behind it, rather than repeating it — two copies of "44.8 s worst" is
+how one of them ends up stale and believed. So: a rule about how the Python is laid out goes in
+`server/`; a rule about how the pages behave goes in `ui/`; a number that came off the cabinet, and
+anything the two halves have to agree about (the run folder contract, the shape of `RunState`),
+goes here. When a change makes one of these wrong, fix that one and check the other two mention it.
+
 ## Commands
 
-One virtualenv (`server/.venv`) and one `server/requirements.txt` for all three stages. Every
+One virtualenv (`server/.venv`) and one `server/requirements.txt` for all four stages. Every
 Python entry point is a `-m` module and must be run **from the repository root** — that is what
-puts `server/` (and `server.settings`) on the path.
+puts `server/` (and `server.settings`) on the path. Note that the run folders it reads and writes
+are under `server/captured_files/`, so a path argument is `server/captured_files/<run>` even though
+the command is run one level above it.
 
 ```powershell
 python -m pip install -r server/requirements.txt
@@ -76,20 +97,20 @@ python -m server.capture.watch                # watch a person play until Ctrl-C
 python -m server.capture.watch --duration 900 --max-rounds 40 --no-milestones
 
 # stage 2 -- extract
-python -m server.extract.cli captured_files/<run>   # writes one record per frame into extract/
+python -m server.extract.cli server/captured_files/<run>   # writes one record per frame into extract/
 python -m server.extract.cli server/extract/Images   # loose images, JSON list to stdout
 python -m server.extract.cli <img> --out <dir>
 
 # stage 3 -- validate  (no config at all: the tolerance is ledger.TOLERANCE)
-python -m server.validate.cli captured_files/<run>          # Pass / Fail, exit 0 / 1 / 2
-python -m server.validate.cli captured_files/<run> --json   # the full verdict object
-python -m server.validate.cli captured_files/<run> --write  # also write validate.json
+python -m server.validate.cli server/captured_files/<run>          # Pass / Fail, exit 0 / 1 / 2
+python -m server.validate.cli server/captured_files/<run> --json   # the full verdict object
+python -m server.validate.cli server/captured_files/<run> --write  # also write validate.json
 
 # the payline audit -- the other reading of the same capture
-python -m server.payline.cli captured_files/<run>               # the grid, every COMPARE, the pays
+python -m server.payline.cli server/captured_files/<run>               # the grid, every COMPARE, the pays
 python -m server.payline.cli                                    # ...over the newest usable capture
-python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, then stop
-python -m server.payline.cli captured_files/<run> --json        # the whole record
+python -m server.payline.cli server/captured_files/<run> --tiles-only  # crop and cut, then stop
+python -m server.payline.cli server/captured_files/<run> --json        # the whole record
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.cli --profile <img> X0 Y0 X1 Y1        # measure a new game's reels
 python -m server.payline.test_paylines                          # the rule, no pixels needed
@@ -102,10 +123,10 @@ distinction a test runner needs; `payline.cli` is the same shape, `0` some line 
 pays. There is no build step or linter for the Python, and no meaningful way to add unit tests for
 the capture core, because every module there talks to live Windows APIs, a running game, a running
 `OledPanelSvc.exe`, and OBS. Verification is `--dry-run` followed by a real run, then reading
-`captured_files/<run>/run.log` and `spin.json`.
+`server/captured_files/<run>/run.log` and `spin.json`.
 `extract` runs offline against the fixtures in `server/extract/Images/` and should be checked there
 after any change. `validate` needs nothing running at all, so it is checked by re-running it over
-the run folders already in `captured_files/` — there are winning and losing ones on disk, and both
+the run folders already in `server/captured_files/` — there are winning and losing ones on disk, and both
 paths through `Sources` need covering. `payline` needs no cabinet either: check it
 with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures)
 and `python -m server.payline.test_reelstrips` (the reel-stop checkpoint, against two real spins'
@@ -115,14 +136,30 @@ stops) — between them the only genuinely unit-testable things in the repo — 
 The checkpoint needs the game's log file to exist but no cabinet: with it missing, or holding no
 reel stops, it reports `status: "unavailable"` and the audit still runs on the pixels.
 
-**Two config files, split by what changes them**, and `settings.load_config` returns them merged:
+**Two config files, split by what changes them, both in `server/`**, and `settings.load_config`
+returns them merged:
 
-- `config.json` — this cabinet: OBS, the i-Deck hardware, `output.dir`, the Tesseract path, the
+- `server/config.json` — this cabinet: OBS, the i-Deck hardware, `output.dir`, the Tesseract path, the
   server's host and port. It holds the obs-websocket password; `OBS_WS_PASSWORD` overrides it, and
   `spin._ScrubSecrets` keeps it out of `run.log`. (It is **currently tracked in git**, password and
   all — the README used to say otherwise. Worth deciding deliberately rather than by accident.)
-- `game_config.json` — the games: `active` names the running executable and `games` holds a block
-  per game (`window_class`, `log`, `targets`, `meter_roi`). No secret, so it is committable.
+- `server/game_config.json` — the games: `active` names the running executable and `games` holds a
+  block per game (`window_class`, `log`, `targets`, `meter_roi`). No secret, so it is committable.
+
+**Both of them, and `captured_files/`, live inside `server/`** — beside the code that reads them,
+because nothing outside that package reads either. The repository root holds the two shared
+documents, `server/` and `ui/`, and nothing else. That is why `settings.py` has **two** anchors and
+picking the wrong one is a silent bug:
+
+- `SERVER_DIR` — this package. Both config files, and `settings.resolve`, so a relative path in a
+  config (`output.dir: "captured_files"`) or on the command line (`--out`, `--run-dir`) means
+  `server/…`. `payline.reelstrips.DEFAULT_STRIPS` is relative for the same reason.
+- `ROOT` — the repository root, one level up. Exactly two readers, and neither is config:
+  `api.UI_DIST` (`ui/dist`, genuinely outside the package) and `runs.capture`'s subprocess `cwd`,
+  because `python -m server.capture.spin` resolves the module against the CWD and so has to run
+  from the folder that *contains* `server/`. Don't reach for `ROOT` for anything else — a path
+  anchored one level too high resolves to a folder that exists and is empty, which reads as a
+  missing file rather than as a wrong anchor.
 
 `load_config` resolves the active block onto **`cfg["game"]`** with `process` folded in, and
 `active` naming a game with no block **raises in the loader** (`settings.active_game`). That is the
@@ -148,15 +185,24 @@ overrides are still honoured if one is added back.
 
 ## Architecture
 
-Two top-level folders: `server/` (every line of Python) and `ui/`. Inside `server/`, one package
-per stage plus the API itself. No framework beyond FastAPI, which sequences and serves and owns no
-logic of its own.
+Two top-level folders: `server/` (every line of Python, both config files, and the captures) and
+`ui/`. Inside `server/`, one package per stage plus the API itself. No framework beyond FastAPI,
+which sequences and serves and owns no logic of its own. The repository root holds those two
+folders and the two shared documents, and nothing else.
 
 ```
 server/
-  settings.py         the one loader for BOTH config files, and ROOT (the repo root, one level
-                       up). Resolves game_config.json's active game onto cfg["game"] and raises
-                       if there is no block for it. Everything relative anchors here, not on CWD
+  config.json         this cabinet. Tracked in git, password and all
+  game_config.json    the games, and `active` naming the running one
+  captured_files/     one folder per run -- the contract between the stages. Not committed
+  requirements.txt    one venv (server/.venv) for all four stages
+  assets/             payline_excel.xlsx, the reel strips the checkpoint maps stops through
+
+  settings.py         the one loader for BOTH config files, and the two anchors: SERVER_DIR
+                       (this package -- both config files, and what `resolve` hangs a relative
+                       path off) and ROOT (one level up, for ui/dist and the capture subprocess's
+                       cwd, and nothing else). Resolves game_config.json's active game onto
+                       cfg["game"] and raises if there is no block for it. Never the CWD
   frames.py           the frame names a run folder holds (pre_spin, spin_result, win_collected),
                        and which part of the ledger each supplies. No dependencies, so every
                        stage can import it
@@ -241,7 +287,7 @@ There is no shared database, no session, and no in-memory state on the server. O
 run holds every stage's output, and its name is the run id:
 
 ```
-captured_files/<run_id>/
+server/captured_files/<run_id>/
     pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
       (spin.json's `meters_settled_by` says which marker released the spin_result shot)
     win_collected.png                                             capture, wins only
@@ -780,7 +826,7 @@ instead of papering over it.
 ### `payline.image` is an override, and it invalidates the tiles
 
 Set it and it is read *instead of* the captured frame, whether or not captures exist -- because a
-chosen screenshot has to be demonstrable without emptying `captured_files/` first. It is stated as
+chosen screenshot has to be demonstrable without emptying `server/captured_files/` first. It is stated as
 a mode rather than flagged as a warning: a supported feature that renders as an error is its own
 kind of bug. What keeps it honest is that it is never silent -- logged, named in `image_source`,
 and printed above the image on the page -- and that a missing path is refused by name rather than

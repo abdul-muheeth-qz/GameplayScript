@@ -45,10 +45,21 @@ Everything a person is not expected to change lives in the code beside the logic
 governs -- `spin.TIMEOUT_S`, `watch.IDLE_TIMEOUT_S`, `validate.ledger.TOLERANCE`,
 `payline.runner.DEFAULTS` -- rather than being restated in a file as its own default.
 
-Every relative path in either file, and every relative `--out`, is anchored on ROOT -- the
-repository root (one level above this `server/` package), not the current working
-directory. A server started from anywhere must still write into the same
-`captured_files/` folder the CLI uses.
+**Both files live in `server/`, beside the code that reads them, and so does
+`captured_files/`.** Nothing outside this package reads either one, so there are two
+anchors here rather than one, and which of them a path hangs off is the distinction to
+keep straight:
+
+    SERVER_DIR   this package. Both config files, and every relative path *inside* them
+                 (`output.dir`) -- so `"captured_files"` means `server/captured_files/`.
+                 `resolve` is that rule, and every relative `--out` goes through it.
+    ROOT         the repository root, one level up. Two things need it and neither is
+                 config: `api.UI_DIST` (`ui/dist`, which is not in this package) and
+                 `runs.capture`'s subprocess `cwd`, because `python -m server.capture.spin`
+                 has to be run from the folder that has `server/` on the path.
+
+Neither is the current working directory, which is the point: a server started from
+anywhere must still write into the same `server/captured_files/` folder the CLI uses.
 """
 
 from __future__ import annotations
@@ -56,10 +67,11 @@ from __future__ import annotations
 import json
 import os
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_CONFIG = os.path.join(ROOT, "config.json")
+SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SERVER_DIR)
+DEFAULT_CONFIG = os.path.join(SERVER_DIR, "config.json")
 GAME_CONFIG_NAME = "game_config.json"
-DEFAULT_GAME_CONFIG = os.path.join(ROOT, GAME_CONFIG_NAME)
+DEFAULT_GAME_CONFIG = os.path.join(SERVER_DIR, GAME_CONFIG_NAME)
 
 
 class ConfigError(ValueError):
@@ -107,10 +119,10 @@ def active_game(games_cfg: dict, path: str = DEFAULT_GAME_CONFIG) -> dict:
 def load_config(path: str | None = None, games_path: str | None = None) -> dict:
     """Read both config files and return them as one dict.
 
-    `path` may be None, meaning the `config.json` at the repository root. `games_path`
+    `path` may be None, meaning the `config.json` in this package. `games_path`
     defaults to `game_config.json` **beside whichever config.json was read**, so the two
     travel together: pointing `--config` at a folder of test settings picks up that
-    folder's games too, rather than silently reaching back to the repo root for them.
+    folder's games too, rather than silently reaching back to `server/` for them.
     """
     config_path = path or DEFAULT_CONFIG
     cfg = _read(config_path)
@@ -134,10 +146,16 @@ def load_config(path: str | None = None, games_path: str | None = None) -> dict:
 
 
 def resolve(path: str) -> str:
-    """An absolute path, with a relative one taken as relative to the repository root."""
-    return path if os.path.isabs(path) else os.path.join(ROOT, path)
+    """An absolute path, with a relative one taken as relative to `server/`.
+
+    Not the current working directory, and not the repository root: the config files that
+    hold these paths live in this package now, so a relative path in one of them reads
+    against the folder it was written in.
+    """
+    return path if os.path.isabs(path) else os.path.join(SERVER_DIR, path)
 
 
 def captures_dir(cfg: dict) -> str:
-    """The folder run folders are created in -- `output.dir`, default `captured_files/`."""
+    """The folder run folders are created in -- `output.dir`, default
+    `server/captured_files/`."""
     return resolve(cfg.get("output", {}).get("dir") or "captured_files")

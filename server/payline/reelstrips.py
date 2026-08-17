@@ -57,7 +57,10 @@ LOG = logging.getLogger("payline")
 
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
-DEFAULT_STRIPS = "server/assets/payline_excel.xlsx"
+# Relative to `server/`, which is what `settings.resolve` anchors on -- so this is
+# `server/assets/`, and it stays right whether the CLI was run from the repository root or
+# the server was started from somewhere else entirely.
+DEFAULT_STRIPS = "assets/payline_excel.xlsx"
 
 # The row the strips start on (row 1 is the "Reel Layout - 1" title, row 2 the R1..R5 header)
 # and the column the first reel is in. Position 0 is therefore B3.
@@ -206,7 +209,7 @@ def load_strips(path: str | None = None) -> ReelStrips:
     the `X` terminator, so the strips are exactly as long as the sheet says and nothing
     invents a symbol past the end.
     """
-    # Anchored on the repository root, never on the CWD: a server started from somewhere else
+    # Anchored on `server/`, never on the CWD: a server started from somewhere else
     # has to find the same spreadsheet the CLI does. `settings_for` resolves the configured
     # path the same way, so this only matters for the default and for a direct call.
     target = resolve(path or DEFAULT_STRIPS)

@@ -65,7 +65,7 @@ GAMES = {
         "label": "fortuneox_portrait",
         "measured_on": "1080x1849",
         "notes":
-            "Measured off captured_files/2026-08-12_124528/spin_result.png rather than "
+            "Measured off server/captured_files/2026-08-12_124528/spin_result.png rather than "
             "converted from the POC's hardcoded pixels, which were taken on a 1073x1852 "
             "capture and sit ~7 px left of the reels here (and include a slice of the red "
             "frame). The reel background is a flat purple that no other part of the screen "

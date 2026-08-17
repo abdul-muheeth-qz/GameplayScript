@@ -63,7 +63,7 @@ import sys
 import time
 from datetime import datetime
 
-from ..settings import ROOT
+from ..settings import resolve
 
 from . import actions, gamelog, ideck, spin, winfocus
 from .obs_client import ObsError
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="one frame at each end of a round instead of one per milestone")
     parser.add_argument("--out", help="base folder that run folders are created in")
     parser.add_argument("--config", default=None,
-                        help="path to config.json (default: the one at the repo root)")
+                        help="path to config.json (default: server/config.json)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="debug logging (always written to run.log regardless)")
     return parser
@@ -584,9 +584,9 @@ def run(args) -> int:
     scene = capture_cfg.get("scene", "Scene")
     source = capture_cfg.get("source", "Window Capture")
     img_format = capture_cfg.get("format", "png")
-    base_out = args.out or cfg.get("output", {}).get("dir", "captures")
-    if not os.path.isabs(base_out):
-        base_out = os.path.join(ROOT, base_out)
+    # `resolve` anchors a relative --out on `server/`, where the config files and
+    # captured_files/ live, rather than on wherever this was started from.
+    base_out = resolve(args.out or cfg.get("output", {}).get("dir", "captures"))
 
     suffix = "_dryrun" if args.dry_run else ""
     run_dir = os.path.join(base_out,
