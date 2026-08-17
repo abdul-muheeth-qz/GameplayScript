@@ -50,18 +50,12 @@ def record_path(run_dir: str, name: str) -> str:
     return os.path.join(extract_dir(run_dir), f"{name}.json")
 
 
-def extract_frames(run_dir: str, cfg: dict | None = None, roi_method=None) -> dict:
+def extract_frames(run_dir: str, cfg: dict | None = None) -> dict:
     """OCR every frame this run captured, write their records, and return them all.
 
     The frames are independent, so they are OCR'd on a thread each -- Tesseract is an
     external process and pytesseract releases the GIL waiting on it, so this really is
     about a third of the wall clock of doing three in turn.
-
-    `roi_method` is passed straight through to `process_image` and so to
-    `slotocr.roi.locate_meter_roi`; None means whatever `roi_config.ROI_METHOD` says.
-    Every frame gets the same method -- one read from a band and another read from a
-    configured box would be two different measurements, and validate compares them
-    against each other.
     """
     cfg = cfg or {}
     tesseract.configure(cfg)
@@ -84,8 +78,7 @@ def extract_frames(run_dir: str, cfg: dict | None = None, roi_method=None) -> di
     with ThreadPoolExecutor(max_workers=len(present)) as pool:
         records = dict(zip(present, pool.map(
             lambda name: process_image(frames.find(run_dir, name),
-                                       roi_dir=out_dir if save_crops else None,
-                                       roi_method=roi_method),
+                                       roi_dir=out_dir if save_crops else None),
             present)))
 
     for name, record in records.items():

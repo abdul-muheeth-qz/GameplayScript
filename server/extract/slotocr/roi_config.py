@@ -1,43 +1,23 @@
 """
-Which ROI cropping method runs, and the hand-tuned numbers each one needs.
+The hand-tuned numbers that say where the CASH/WIN/BET meter strip is.
 
-`ROI_METHOD` will eventually come from config.json and the UI. It is a plain
-constant for now so that there is exactly one place to change it, and so the
-three methods can be compared from the command line:
+This is the only file a person edits to change the crop; `config.py` is the
+constants for *reading* it once cropped. Adding a game layout is an entry in
+`CONFIGURED_BOXES` and nothing else -- no code changes.
 
-    python -m server.extract.cli server/extract/Images --roi-method bands
+There used to be two other ways to crop the strip, selected by a `ROI_METHOD`
+constant: equal horizontal bands of the frame, and OpenCV dark-panel detection.
+Both are gone, and the box list is the one method. What is worth keeping from
+them is the rule that survived: **tune a crop on the values it reads, never on
+how many fields it resolved.** Sweeping six band geometries over this cabinet's
+five frames, the geometry that scored the *most* fields was the worst of them --
+it read a $1,089.00 balance as 108900.00 and invented a win of 89.00 out of the
+fragment ",089.00". Three confident fields, two of them fabricated. A crop that
+misses the meter bar should come back blank, which is the failure you want.
 """
-from enum import Enum
-
-
-class RoiMethod(str, Enum):
-    """The three ways to crop the meter strip out of a frame.
-
-    A `str` Enum so the value doubles as the CLI argument and the string that
-    would come out of config.json, and so `RoiMethod("bands")` accepts either
-    form without a lookup table.
-    """
-    BANDS = "bands"
-    CONFIGURED = "configured"
-    DYNAMIC = "dynamic"
-
-
-ROI_METHOD = RoiMethod.CONFIGURED
-
 
 # ---------------------------------------------------------------------------
-# Method 1 -- horizontal bands
-# ---------------------------------------------------------------------------
-# Slice the frame into BAND_COUNT equal horizontal strips numbered 1..N from
-# the TOP, and crop the ones BANDS names. Every band is full width, because a
-# horizontal band is a slice of the height: only y moves.
-
-BAND_COUNT = 24
-BANDS = 19
-
-
-# ---------------------------------------------------------------------------
-# Method 2 -- configured boxes
+# Configured boxes
 # ---------------------------------------------------------------------------
 # Each box is normalized [x0, y0, x1, y1] -- fractions (0.0-1.0) of the
 # image's width and height.
@@ -46,8 +26,8 @@ BANDS = 19
 # meter bar in different places (just above the SERVICE/COLLECT row vs. just
 # below the top jackpot ribbon). They are all tried against the screenshot and
 # the one that READS BEST wins, not the first that resolved anything -- see
-# roi._locate_meter_roi_from_config, where that rule and the `notes` below
-# were each bought with a wrong reading.
+# roi.locate_meter_roi, where that rule and the `notes` below were each bought
+# with a wrong reading.
 #
 # To support a new game layout: crop a sample screenshot to find the meter
 # bar's pixel box, divide the x's by the image width and the y's by the image
@@ -85,8 +65,3 @@ CONFIGURED_BOXES = [
 # another game's layout lands somewhere unrelated and scrapes a single plausible number
 # out of it. Two fields in one crop is a meter bar.
 CONFIDENT_FIELDS = 2
-
-
-DYNAMIC_PAD_FRAC_X = 0.03
-DYNAMIC_PAD_FRAC_Y = 0.6
-DYNAMIC_MIN_PAD_Y = 40

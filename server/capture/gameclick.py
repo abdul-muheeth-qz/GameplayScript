@@ -79,7 +79,7 @@ Two things differ from the i-Deck, and both are the reason this is a separate mo
 
     So `post` is kept, selectable and **known not to work here**, because a method that silently
     does nothing is worth being able to name; `sendinput` is what ships. There is **no fallback
-    between them** -- the rule `extract`'s `ROI_METHOD` follows, for the same reason: with a
+    between them** -- the rule `extract`'s ROI crop follows, for the same reason: with a
     fallback, "what actually delivered this click?" stops being answerable after the fact.
 
     `sendinput` is not a contradiction of the i-Deck's ban on it. That ban exists because the
@@ -156,7 +156,7 @@ def targets_for(game_cfg: dict, process: str) -> dict:
     **`game.games` and `game.targets` are two shapes, not a fallback pair.** Which one is in use
     is decided by whether `game.games` exists at all; a config that has it but has no block for
     the running game is an *error*, never a quiet reuse of some other game's points. That is
-    `extract`'s `ROI_METHOD` rule for the same reason: a wrong coordinate is a click into dead
+    `extract`'s no-fallback ROI rule for the same reason: a wrong coordinate is a click into dead
     space that costs a whole run to find, and silently substituting one leaves "what was this
     click aimed at?" unanswerable afterwards. The flat shape stays valid, because a checkout that
     only ever sees one game has no reason to name it twice.

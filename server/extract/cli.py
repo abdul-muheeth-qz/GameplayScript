@@ -3,7 +3,6 @@ r"""Read the slot meters off one or more screenshots.
     python -m server.extract.cli captured_files/2026-08-07_141726   # a capture run folder
     python -m server.extract.cli server/extract/Images/after.png    # one image
     python -m server.extract.cli some/folder/ --out results/        # a folder of images
-    python -m server.extract.cli server/extract/Images --roi-method bands   # one crop method
 
 Given a **capture run folder** -- one holding pre_spin and spin_result, and win_collected
 too if the spin won -- this does the real step 2: it writes one record per frame into
@@ -28,7 +27,7 @@ from ..settings import load_config
 
 from . import tesseract
 from .runner import extract_frames
-from .slotocr import RoiMethod, process_image
+from .slotocr import process_image
 
 LOG = logging.getLogger("extract")
 
@@ -93,13 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
                              "alongside them (default for loose images: print only)")
     parser.add_argument("--config", default=None,
                         help="path to config.json (default: the one at the repo root)")
-    parser.add_argument("--roi-method", choices=[m.value for m in RoiMethod], default=None,
-                        help="how to crop the meter strip out of each frame, overriding "
-                             "roi_config.ROI_METHOD for this run: 'bands' (the configured "
-                             "horizontal band(s)), 'configured' (the normalized boxes) or "
-                             "'dynamic' (OpenCV dark-panel detection). No method falls "
-                             "back to another, so this is how the three are compared "
-                             "against Images/")
     parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
@@ -129,7 +121,7 @@ def main(argv=None) -> int:
         failed = False
         for folder in run_folders:
             try:
-                records = extract_frames(folder, cfg, roi_method=args.roi_method)
+                records = extract_frames(folder, cfg)
             except Exception as exc:
                 LOG.error("error: %s: %s", folder, exc)
                 failed = True
@@ -153,7 +145,7 @@ def main(argv=None) -> int:
     results = []
     for path in image_paths:
         try:
-            record = process_image(path, roi_dir=args.out, roi_method=args.roi_method)
+            record = process_image(path, roi_dir=args.out)
         except Exception as exc:
             LOG.exception("error processing %s", path)
             record = {"image": os.path.basename(path), "error": str(exc)}

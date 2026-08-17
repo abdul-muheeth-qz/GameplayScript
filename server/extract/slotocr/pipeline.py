@@ -1,5 +1,5 @@
 """
-The full per-image pipeline: locate the meter-bar ROI, run both extraction
+The full per-image pipeline: crop to the meter-bar ROI, run both extraction
 methods on it, run the elimination pass, and fall back to a whole-image
 method only if nothing else worked.
 """
@@ -46,32 +46,25 @@ def save_roi_crop(image_path, roi_image, roi_dir):
         return None
 
 
-def process_image(image_path, roi_dir=None, roi_method=None):
-    """Read the meters off one screenshot.
-
-    `roi_method` picks how the meter strip is cropped out (a roi_config.RoiMethod
-    or its string value); None uses roi_config.ROI_METHOD. It is a parameter and
-    not just a constant read inside roi.py so the choice can come down from the
-    CLI today and from config.json / the UI later.
-    """
+def process_image(image_path, roi_dir=None):
+    """Read the meters off one screenshot."""
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {image_path}")
 
     # ---- (0) Locate the meter-bar ROI and crop to it FIRST ----
-    # One of three cropping methods runs, whichever roi_config selected; none of
-    # them backs up another. Whatever it hands back, we crop down to just that
-    # region and hand ONLY this small crop to Tesseract for every OCR call from
-    # here on — never the full, visually busy screenshot. This is faster and
-    # avoids background artwork confusing the OCR engine.
-    roi = locate_meter_roi(image, roi_method)
+    # The best-reading box in roi_config.CONFIGURED_BOXES; nothing backs it up.
+    # Whatever it hands back, we crop down to just that region and hand ONLY this
+    # small crop to Tesseract for every OCR call from here on — never the full,
+    # visually busy screenshot. This is faster and avoids background artwork
+    # confusing the OCR engine.
+    roi = locate_meter_roi(image)
     roi_image = roi.image
     img_h, img_w = roi_image.shape[:2]
 
-    # Which method ran and what it cropped to -- "bands:<first>[-<last>]/<count>",
-    # "config:<label>", "dynamic", or "dynamic:whole-image". It rides out in the
-    # record rather than only being logged, because it is the fastest way to tell a
-    # mis-tuned ROI from a bad OCR read when a value comes back wrong.
+    # Which box it cropped to -- "config:<label>". It rides out in the record rather
+    # than only being logged, because it is the fastest way to tell a mis-tuned ROI
+    # from a bad OCR read when a value comes back wrong.
     LOG.info("%s: ROI located via %s", os.path.basename(image_path), roi.source)
     roi_path = save_roi_crop(image_path, roi_image, roi_dir)
     if roi_path:
@@ -94,9 +87,9 @@ def process_image(image_path, roi_dir=None, roi_method=None):
     # fields the primary method missed. Works well when each meter is drawn as
     # its own small, cleanly-separated panel.
     #
-    # When the ROI was chosen by validating a configured box, locating it
-    # already ran both methods over these exact pixels — reuse that instead
-    # of OCR'ing the same crop a second time.
+    # Locating the ROI chose its box by validating it, which already ran both
+    # methods over these exact pixels — reuse that instead of OCR'ing the same
+    # crop a second time.
     if roi.extracted is not None:
         panel_cell_results, panel_word_results, panel_currency_tokens = roi.extracted
     else:

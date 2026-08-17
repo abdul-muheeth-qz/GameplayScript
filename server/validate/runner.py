@@ -23,9 +23,9 @@ means a third OCR pass over a meter `spin_result` had already read, and on run
 2026-08-11_204202 that pass fails. `extract/win_collected.json` there has `win` and `bet`
 both null, so the win is taken as 0.00 and the run reports Fail with a difference of exactly
 -24.00. That is an `extract` bug and should be fixed there rather than by moving where this
-reads the win: the ROI crop for that frame is clean and legible, and the three ROI methods
-each read a different subset of it -- `configured` gets cash (at confidence 0.0) and nothing
-else, `bands` gets win 24.00 at 95 and bet 1.00 at 93 but no cash, `dynamic` gets nothing.
+reads the win: the ROI crop for that frame is clean and legible, and the box reads only cash,
+at confidence 0.0. That the pixels are legible was measured while extract's since-removed band
+crop was still in the tree -- over the same frame it read win 24.00 at 95 and bet 1.00 at 93.
 
 The verdict, and every number under it, comes from `ledger.judge` -- exact `Decimal`
 arithmetic in Python. The result is written to `validate.json` beside the frames it judged,

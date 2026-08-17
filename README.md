@@ -365,7 +365,7 @@ its DEMO label, 30 px above GAMBLE and 100 above TAKE WIN:
 Run `2026-08-12_131459` is that failure: the click was delivered, landed on nothing, and the
 capture died with the win still standing on the offer and no `win_collected.png`. So a config
 that has `game.games` but no block for the running game is an **error naming the process**, never
-a quiet reuse of another game's points — `ROI_METHOD`'s rule, for `ROI_METHOD`'s reason. The flat
+a quiet reuse of another game's points — the ROI crop's no-fallback rule, for its reason. The flat
 `game.targets` shape stays valid for a checkout that only ever sees one game.
 
 Every click is confirmed the way a deck press is. `touch` is the glass specifically — verified,
@@ -628,48 +628,42 @@ a row already trusted.
 
 ### It never assumes a pixel coordinate
 
-Everything is either a fraction of the image or derived from it at runtime. There are three ways to
-crop the meter strip out of a frame, and `slotocr/roi_config.py` — the one file you edit to change
-the crop — selects exactly one of them with `ROI_METHOD`:
+Everything is either a fraction of the image or derived from it at runtime. The meter strip is
+cropped out by a **normalized `[x0, y0, x1, y1]` box per game layout**, listed in
+`CONFIGURED_BOXES` in `slotocr/roi_config.py` — the one file you edit to change the crop. Adding a
+layout is one entry in that list and no code.
 
-1. **Horizontal bands** (`RoiMethod.BANDS`) — the frame cut into `BAND_COUNT` equal, full-width
-   strips numbered from the top, keeping the ones `BANDS` names: either a single band (`19`) or an
-   inclusive range (`(19, 22)`), cropped as one taller strip so the labels and their values still
-   reach Tesseract together. The default `24`/`19` is this cabinet.
-2. **A configured box** (`RoiMethod.CONFIGURED`) — a normalized `[x0, y0, x1, y1]` in
-   `CONFIGURED_BOXES`, one per known game layout. Adding a layout is one entry in that list and no
-   code.
-3. **Dark-panel detection** (`RoiMethod.DYNAMIC`) — an HSV mask for the flat, dark UI panels a
-   meter bar is drawn on, grouped into rows, scored by how many fields each row actually resolved.
+**Nothing backs it up.** The box either finds the meter bar or the record comes back with null
+meters saying it didn't. An earlier version ran the boxes and then raced the winner against
+dark-panel detection, which read well but meant "which pixels was this number read from?" could
+only be answered afterwards, and charged every frame for the methods that lost.
 
-**No method falls back to another.** The selected one either finds the meter bar or the record comes
-back with null meters saying it didn't. An earlier version ran the boxes and then raced the winner
-against dark-panel detection, which read well but meant "which pixels was this number read from?"
-could only be answered afterwards, and charged every frame for the methods that lost.
+`roi_source` in each record names the box that was cropped to — `config:hnpl_portrait` — and it is
+the first thing to read when a value comes out wrong.
 
-`roi_source` in each record names what ran and what it picked — `bands:19/24`,
-`config:hnpl_portrait`, `dynamic`, or `dynamic:whole-image` when detection found no row to crop to —
-and it is the first thing to read when a value comes out wrong. Compare the three over the samples
-with `--roi-method`:
+A box is "validated" by running the real extraction on it, which is why the winner's results ride
+along on the `MeterROI` instead of being thrown away and recomputed. That costs ~8 s a frame.
 
-```powershell
-python -m server.extract.cli server/extract/Images --roi-method bands
-```
+The race is split in two, and the halves live in different places. **Choosing** between boxes is
+`crop_best_box(image, boxes, score)` in [`server/utils/roi_crop.py`](server/utils/roi_crop.py) —
+generic, knowing nothing about meters, taking the scorer as an argument. **Scoring** a crop is
+`roi.score_crop`, which is entirely this stage's business: run the extraction, count the fields.
+The reason to split it is that the selection rules below are then pure logic over a callable, so
+they can be checked without Tesseract, a screenshot or a cabinet.
 
-Bands is the cheapest of the three (~4 s a frame against ~8 s and up to 30 s), because it is the
-only one that runs no OCR to decide anything: the band was named by hand, so it is believed. A box
-is "validated" by running the real extraction on it, which is why the winner's results ride along
-on the `MeterROI` instead of being thrown away and recomputed.
-
-**Tune a crop by reading the values, not by counting how many fields came back.** Sweeping six band
-geometries over this cabinet's five sample frames, `(32, 25)` resolved the *most* fields — 10
-against `(24, 19)`'s 7 — and was the worst of them: on `image1.png` it reported cash as
-**108900.00** where the balance is $1,089.00, and invented a win of **89.00** out of the fragment
-`",089.00"`. Three confident fields, two of them fabricated. The shipped `24/19` never disagrees
-with the configured box on any frame, and where it cannot read a meter it returns blank — which is
-the failure mode you want. A band also describes exactly *one* layout: `24/19` reads 7 of the 42
-fields across all fourteen samples where the boxes read 26, because nine of those samples are the
-`bottom_bar` layout whose meter sits in band 21.
+**Two other methods used to live here and are gone**: equal horizontal bands of the frame, and the
+dark-panel detection above, selected by a `ROI_METHOD` constant. What is worth keeping is the rule
+that killed the bands — **tune a crop by reading the values, not by counting how many fields came
+back.** Sweeping six band geometries over this cabinet's five sample frames, `(32, 25)` resolved
+the *most* fields — 10 against `(24, 19)`'s 7 — and was the worst of them: on `image1.png` it
+reported cash as **108900.00** where the balance is $1,089.00, and invented a win of **89.00** out
+of the fragment `",089.00"`. Three confident fields, two of them fabricated. A band also describes
+exactly *one* layout: `24/19` read 7 of the 42 fields across all fourteen samples where the boxes
+read 26, because nine of those samples are the `bottom_bar` layout whose meter sits in band 21. And
+on this cabinet's window size the shipped band was reading numbers that were not there — over the
+three frames of run `2026-08-11_204202`, `bands:19/24` lost cash on two of them and read
+`spin_result`'s cash as **24.00**, which is that frame's *win* value. The boxes read all three
+correctly (`2892.70 / 0.15 / 1.00`, `2891.70 / 24.00 / 1.00`, `2915.70`).
 
 Two rules inside the box method were each bought with a wrong reading, and both matter if you add a
 box:
@@ -687,16 +681,7 @@ This cabinet's box, `hnpl_portrait`, has its bottom edge at 752 px of 961 and de
 754. The meter strip is ~26 px tall; two more rows of pixels pull the bright COLLECT row into the
 crop, which moves the Otsu threshold far enough to lose the BET value entirely. Swept over
 y 722–727 × 750–756 against both frames of a real run, every combination but y1=754 reads cash and
-bet on both. Band `19/24` runs to 761 px, which is the same 9 pixels of COLLECT row, and it is why
-that band loses BET on the pre-spin frame where the box does not.
-
-**`roi_config.ROI_METHOD` is currently `BANDS`, and on this cabinet's present window size it is
-reading numbers that are not there.** Over the three frames of run `2026-08-11_204202`,
-`bands:19/24` lost cash on two of them and read `spin_result`'s cash as **24.00** — which is that
-frame's *win* value, a confident wrong number of exactly the kind the "tune on the values, never on
-the field count" rule above exists to catch. `configured` reads all three correctly
-(`2892.70 / 0.15 / 1.00`, `2891.70 / 24.00 / 1.00`, `2915.70`), and `dynamic` gets two of three.
-Compare with `--roi-method configured` before trusting any ledger from a fresh run.
+bet on both.
 
 ### Never take a suffix of a malformed number
 
@@ -802,9 +787,9 @@ python -m server.extract.cli server/extract/Images
 ```
 
 Read `roi_source` and the values for each. The ROI crops it saves — the exact pixels handed to
-Tesseract — are the fastest way to see why a value was wrong. Run it once per `--roi-method` after
-changing anything in `roi_config.py`: with no fallback left, a method that crops badly no longer
-gets covered for by one that doesn't.
+Tesseract — are the fastest way to see why a value was wrong. Run it after changing anything in
+`roi_config.py`: with no fallback behind the boxes, a box that crops badly is not covered for by
+anything else.
 
 ## Deciding whether it adds up — `validate`
 
@@ -900,17 +885,15 @@ run reports **Fail** with `difference` of exactly `-24.00`.
 
 That is an `extract` bug, not a crop or a game behaviour — worth knowing before chasing it in the
 wrong stage. The ROI crop for that frame is textbook (`CASH $2,915.70 | WIN $24.00 | BET $1.00`,
-tight and legible), and the three ROI methods each read a *different* subset of it:
+tight and legible), and the box reads only `2915.70`, at confidence **0.0**, with WIN and BET both
+null. That the pixels are legible was established while the two since-removed crop methods were
+still in the tree: the horizontal band over the same frame read WIN as `24.00` at confidence 95 and
+BET as `1.00` at 93, on a crop that lost cash. Between the two, every value on that frame is
+readable — so nothing about those pixels explains the nulls.
 
-| method on `204202/win_collected.png` | CASH | WIN | BET |
-|---|---|---|---|
-| `configured` — what the run used | 2915.70, at confidence **0.0** | **null** | **null** |
-| `bands` | null | **24.00** at 95 | **1.00** at 93 |
-| `dynamic` | null | null | null |
-
-No method reads all three, and between the first two every value is legible. Until that is fixed in
-stage 2, a winning run whose `extract/win_collected.json` has a null `win` will report Fail; the
-`inferred: ["win"]` badge on the ledger's `+` row is what makes it visible rather than silent.
+Until that is fixed in stage 2, a winning run whose `extract/win_collected.json` has a null `win`
+will report Fail; the `inferred: ["win"]` badge on the ledger's `+` row is what makes it visible
+rather than silent.
 
 Old two-frame folders (`extract/before.json`) and the `before_spin.json`/`after_spin.json` sample
 pair are no longer read; only the three-frame layout is.
@@ -1244,6 +1227,7 @@ never the current working directory, so a server started from anywhere writes in
 |---|---|
 | [server/settings.py](server/settings.py) | the one config loader, and the root every relative path anchors on |
 | [server/geometry.py](server/geometry.py) | normalized boxes, and the one rule for turning them into pixels |
+| [server/utils/roi_crop.py](server/utils/roi_crop.py) | crop to the best-reading of a list of boxes; the scorer is an argument |
 | [server/api.py](server/api.py) | the endpoints, health, and the files the page shows |
 | [server/runs.py](server/runs.py) | the run folder as state, and the capture lock |
 | [server/__main__.py](server/__main__.py) | `python -m server` |

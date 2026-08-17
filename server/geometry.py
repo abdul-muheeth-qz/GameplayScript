@@ -30,8 +30,8 @@ def pixel_box(box, width: int, height: int) -> tuple[int, int, int, int] | None:
     trimmed to fit and reads as a bad crop rather than as the typo it is.
 
     The edges come from the fractions independently, which is what lets two boxes sharing
-    an edge round to exactly the same pixel -- `roi.crop_horizontal_bands` depends on
-    that to keep band N's top edge on band N-1's bottom edge.
+    an edge round to exactly the same pixel -- so a strip cut into adjacent boxes has no
+    gap or overlap at the seams, whatever the image size.
     """
     x0f, y0f, x1f, y1f = box
     x0 = max(0, min(width, int(round(x0f * width))))

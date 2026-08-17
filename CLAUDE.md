@@ -21,7 +21,7 @@ both, the payline audit needs a geometry block per game and currently has Fortun
   session-capture work to come.
 - **`server/extract/`** — crops each frame to the CASH/WIN/BET meter strip with OpenCV and reads it with
   Tesseract, writing one record per frame. No fixed pixel coordinates: a normalized ROI box per
-  known layout, and dark-panel detection when none of them fits.
+  known layout, and nothing behind it if none of them fits.
 - **`server/validate/`** — checks whether the cash meter after the spin follows from the meters
   before it, `current cash = previous cash - bet + win`. Exact `Decimal` arithmetic in Python,
   within a configurable tolerance. Writes a verdict of pass, fail or error.
@@ -134,6 +134,9 @@ server/
                        stage can import it
   geometry.py         normalized boxes -> pixels, one rule. Imported by extract (the meter strip)
                        and payline (the reel window). No dependencies, same reason as frames.py
+  utils/              stage-agnostic helpers built on those. Arguments only, no config
+    roi_crop.py       crop_best_box(image, boxes, score) -- the best-box-wins rule, ties to the
+                       earlier box, early exit on `confident`. Pure logic, so it is testable
   runs.py              the run folder as state: name it, fill it, read it back. The capture lock
   api.py               the three endpoints, /api/health, and the files the UI shows
   __main__.py          `python -m server`
@@ -156,9 +159,10 @@ server/
     runner.py         the before/after pair -> two JSON records in the run folder
     cli.py            a run folder, or loose images
     tesseract.py      find the engine binary: config, then env, then the Windows default
-    slotocr/          roi.py locates the meter strip; extraction.py + matching.py read it;
-                      panel_detection.py and ocr_utils.py are the OpenCV underneath;
-                      config.py holds FIELD_LABELS and the normalized ROI boxes
+    slotocr/          roi.py crops to the meter strip -- it owns *how a crop is scored* and
+                      hands the choosing to utils.crop_best_box; extraction.py + matching.py
+                      read the crop; panel_detection.py and ocr_utils.py are the OpenCV
+                      underneath; config.py holds FIELD_LABELS, roi_config.py the boxes
 
   validate/           STAGE 3 -- decide whether the money adds up
     records.py        read the two records as exact Decimals; a blank WIN meter means 0.00
@@ -432,7 +436,7 @@ Three things there invert the i-Deck's rules, and each was measured rather than 
   injection landing is what makes the two silences conclusive (the point is live, so it was the
   method). Unity reads Raw Input; SDL reads its message queue. **`post` stays selectable and
   documented as not working here** — a method that silently does nothing is worth being able to
-  name — and there is no fallback between them, for `ROI_METHOD`'s reason.
+  name — and there is no fallback between them, for the ROI crop's reason.
 - **The game must be topmost**, because injected input follows the cursor rather than an HWND.
   `winfocus.bring_to_front` is the one thing in the package that takes the foreground and must
   never be called from the capture path. `click` refuses to inject when another window is under
@@ -448,7 +452,7 @@ Three things there invert the i-Deck's rules, and each was measured rather than 
   its TAKE WIN. Run `2026-08-12_131459` is that mistake: click delivered, landed on nothing,
   capture dead with the win still on the offer. So `game.games` with no block for the running game
   **raises and names the process**; it must never fall back to `game.targets` or to another game's
-  point, for `ROI_METHOD`'s reason. The flat `game.targets` shape is still honoured when
+  point, for the ROI crop's reason. The flat `game.targets` shape is still honoured when
   `game.games` is absent. `--calibrate` measures one from a
   real click and refuses to print a point the log did not confirm.
 
@@ -509,10 +513,10 @@ one rule serve both cases.
 The cost of that choice is a third OCR pass over a meter `spin_result` already read, and on this
 very run it fails: `extract/win_collected.json` has `win` and `bet` both `null`, so validate takes
 the win as 0.00 and reports Fail with a `difference` of exactly −24.00. **That is an `extract` bug,
-not a crop and not a game behaviour** — the ROI crop is textbook, and the three ROI methods each
-read a different subset of it (`configured` gets cash at confidence 0.0 and nothing else; `bands`
-gets win 24.00 at 95 and bet 1.00 at 93 but no cash; `dynamic` gets nothing). Fix it in stage 2,
-not by moving where validate reads the win.
+not a crop and not a game behaviour** — the ROI crop is textbook, and the box reads only cash, at
+confidence 0.0. That the pixels are legible was measured while the since-removed band method was
+still in the tree: over the same frame it read win 24.00 at 95 and bet 1.00 at 93. Fix it in stage
+2, not by moving where validate reads the win.
 
 Old two-frame folders (`extract/before.json`) and the `before_spin.json` sample pair are no longer
 read at all; `Sources.legacy`, `legacy_stale_win` and `collected_separately` are gone with them.
@@ -584,7 +588,8 @@ one. Rows have no gutter at all, so their even three-way split is the layout rat
 
 `server/geometry.py` owns the fraction→pixel rule and is shared with `extract`, which crops the meter
 strip by the same one. Verified equivalent to the definition it replaced over 200,000 random
-(image size, box) pairs, so `crop_horizontal_bands`' shared-edge guarantee is untouched.
+(image size, box) pairs, so the shared-edge guarantee — two boxes sharing an edge round to the same
+pixel, at any image size — is untouched.
 
 ### Keyed by `target.process`, and it must never fall back
 
@@ -812,53 +817,59 @@ the two halves disagreed before they were joined. Renaming a key here is the sin
 change, because everything downstream iterates that dict. The lists beside the keys are OCR
 *synonyms* — what Tesseract might have read off the screen — so `BALANCE` stays in the list.
 
-### Three ways to crop the ROI, one selected, no fallback
+### One way to crop the ROI: the configured box, and no fallback
 
 Everything about *locating* the meter strip is in `slotocr/roi_config.py` — that file is the only
 one a person edits to change the crop, and `slotocr/config.py` is the constants for *reading* it.
-`ROI_METHOD` names one of three methods and that is the one that runs:
+`roi.locate_meter_roi(image)` crops to the best of the normalized `[x0, y0, x1, y1]` boxes in
+`CONFIGURED_BOXES`, one per game layout, at ~8 s a frame because each candidate costs a full
+extraction to validate. `roi_source` in each record is `config:<label>`.
 
-| `RoiMethod` | What it crops | Cost per frame |
-|---|---|---|
-| `BANDS` | the frame cut into `BAND_COUNT` full-width horizontal strips, keeping `BANDS` (an int, or an inclusive `(first, last)` pair) | ~4 s — no OCR to decide anything |
-| `CONFIGURED` | the best of the normalized `[x0, y0, x1, y1]` boxes in `CONFIGURED_BOXES`, one per game layout | ~8 s — each candidate costs a full extraction to validate |
-| `DYNAMIC` | whatever OpenCV dark-panel detection finds, with both extraction methods voting on which row is the meter bar | up to 30 s — one extraction over the whole screenshot on top of the crop's |
+**There is no fallback behind it**, and that is the point. A crop that misses the meter bar shows
+up as null meters. The multi-box race *inside* the method is not a fallback and stays — those boxes
+are alternative layouts of the same thing, and choosing between them is what the method *is*.
 
-**There is no fallback between them**, and that is the point: the earlier version tried the boxes
-and then raced the winner against dynamic detection, which made "which pixels was this number read
-from?" a question only `roi_source` could answer afterwards, and charged every frame for the losing
-methods. A crop that misses the meter bar now shows up as null meters. The multi-box race *inside*
-`CONFIGURED` is not a fallback and stays — those boxes are alternative layouts of the same thing,
-and choosing between them is what that method *is*.
+**The race itself is `server/utils/roi_crop.py`, and the split is deliberate.** `crop_best_box`
+holds the part that has nothing to do with meters — walk the boxes, crop each, keep the best-ranked
+— and takes the scorer as an argument. `roi.score_crop` is the half that is this stage's: run
+`extract_all` over the crop and rank it by `_fields_resolved`. The point of the split is that the
+selection rules are now pure logic over a callable, so they are unit-testable without Tesseract,
+a screenshot or a cabinet, which nothing in `extract` was before. Keep the scorer out of `utils/`
+— a helper there that imported `extraction` would make a shared module depend on one stage's OCR.
 
-`locate_meter_roi(image, method=None)` dispatches through `roi._METHODS`, which is keyed by every
-`RoiMethod` member; `process_image`/`extract_frames` take `roi_method` so the CLI can override it
-(`--roi-method bands`) and so config.json and the UI can later. `roi_source` in each record names
-what ran and what it chose: `bands:19/24`, `config:hnpl_portrait`, `dynamic`, or
-`dynamic:whole-image` (dynamic detection found no row to crop to — that name replaced a bare
-`"none"`, which said nothing about why).
+**Two other methods were removed on request** — `BANDS` (the frame cut into `BAND_COUNT` full-width
+horizontal strips) and `DYNAMIC` (OpenCV dark-panel detection, with both extraction methods voting
+on which row is the meter bar) — along with the `RoiMethod` enum, the `ROI_METHOD` constant, the
+`roi._METHODS` dispatch, the `roi_method` parameter threaded through
+`process_image`/`extract_frames`, and the CLI's `--roi-method`. Verified against the fourteen
+fixtures in `Images/`: byte-identical records before and after. Don't reintroduce the dispatch for
+a third method without also reintroducing the rule that an even earlier version broke — it tried
+the boxes and then raced the winner against dynamic detection, which made "which pixels was this
+number read from?" a question only `roi_source` could answer afterwards, and charged every frame
+for the losing methods.
 
-**Tune a crop on the values, never on how many fields it resolved.** Sweeping six band geometries
-over this cabinet's five frames in `Images/`, `(32, 25)` scored the *most* fields — 10 against
-`(24, 19)`'s 7 — and was the worst of them: on `image1.png` it read cash as **108900.00** where the
-balance is $1,089.00, and invented a win of **89.00** out of the fragment `",089.00"`. Three
-confident fields, two fabricated. The shipped `24/19` never disagrees with the configured box on
-any frame; where it can't read a meter it comes back blank, which is the failure you want. Note
-also that a band is right for *one* layout — `24/19` scores 7 of 42 across all fourteen samples
-against the boxes' 26, because nine of them are the `bottom_bar` layout whose meter is band 21.
+**Tune a crop on the values, never on how many fields it resolved.** That rule is what killed the
+bands. Sweeping six band geometries over this cabinet's five frames in `Images/`, `(32, 25)` scored
+the *most* fields — 10 against `(24, 19)`'s 7 — and was the worst of them: on `image1.png` it read
+cash as **108900.00** where the balance is $1,089.00, and invented a win of **89.00** out of the
+fragment `",089.00"`. Three confident fields, two fabricated. A band was also right for *one*
+layout — `24/19` scored 7 of 42 across all fourteen samples against the boxes' 26, because nine of
+them are the `bottom_bar` layout whose meter is band 21.
 
-Two rules inside `CONFIGURED` were each bought with a wrong reading:
+Two rules inside the box race were each bought with a wrong reading, and both now live in
+`utils.crop_best_box`:
 
-- **The best box wins, not the first that resolved anything** (`roi._locate_meter_roi_from_config`).
+- **The best box wins, not the first that resolved anything.**
   A box aimed at another layout can land somewhere unrelated on this screenshot and still scrape
   one plausible number out of it. Under the original first-past-the-post rule, adding a box for
   this cabinet silently degraded four of the sample images that were fine before it.
-- **`best_score` starts at −1, not 0**, so the first usable box always becomes the winner. With
+- **`best_rank` starts at −1, not 0**, so the first usable box always becomes the winner. With
   nothing behind this method any more, a frame where no box resolved a single field still has to
-  return pixels; it returns the head of the preference order and warns, rather than reporting a
-  whole-image read nobody asked for.
+  return pixels; it returns the head of the preference order and `roi.locate_meter_roi` warns on
+  `rank == 0`, rather than reporting a whole-image read nobody asked for.
 
-`CONFIDENT_FIELDS` is **2**, not 3, and that is a performance decision as much as a correctness
+`CONFIDENT_FIELDS` is **2**, not 3 — `crop_best_box`'s `confident` argument — and that is a
+performance decision as much as a correctness
 one. WIN is genuinely blank on most before-frames, so a box that found the meter bar perfectly
 still comes back with two fields; requiring three meant every ordinary frame went on to try every
 remaining box as well, and the `/api/extract` call took **27 s** a pair instead of ~2 s. Two is
@@ -868,17 +879,9 @@ also the right line on correctness, because one is exactly what a *wrong* box lo
 754: the meter strip is only ~26 px tall, and two more rows of pixels pull the bright COLLECT row
 into the crop, which moves the Otsu threshold far enough to lose the BET value entirely. It was
 swept over y 722–727 × 750–756 against both frames of a real run; every combination but y1=754
-reads cash and bet on both. (That same edge is why band `19/24`, which runs to 761 px, loses BET on
-`before.png`.) Re-run `python -m server.extract.cli server/extract/Images` after touching any of
-this — the fourteen samples there are the regression suite — and re-run it once per method, because
-no method covers for another any more.
-
-Band edges come from the *fractions*, not from a per-band pixel height (`roi.crop_horizontal_bands`
-builds a normalized box and hands it to the same `crop_normalized_box` a configured box uses). That
-is what keeps band N's top edge exactly on band N−1's bottom edge when the count doesn't divide the
-height evenly: 24 bands over 961 px are 40 and 41 px tall and sum to exactly 961. A band outside
-`1..BAND_COUNT` raises and names the constant to fix, because `crop_normalized_box` clamps — `BANDS
-= 25` of 24 would otherwise quietly crop the bottom row of pixels and read every meter blank.
+reads cash and bet on both. Re-run `python -m server.extract.cli server/extract/Images` after
+touching any of this — the fourteen samples there are the regression suite, and with nothing behind
+the boxes a bad crop is not covered for by anything else.
 
 ### A value is never to the left of its label, and that is a rejection
 
@@ -916,7 +919,7 @@ Three things are load-bearing:
   above safe to enable at all. They were part of the same dead code, so switching them on is new
   behaviour rather than a restoration, and unguarded they invented `win = 200.0` on three of the
   fourteen fixtures: the bet-level buttons (100/200/300/500/800) nine label-heights below the WIN
-  label in a full-screen `dynamic` crop. **Bounding the vertical distance instead does not work** —
+  label in a full-screen crop. **Bounding the vertical distance instead does not work** —
   one of those pairings measures a gap of 0.03 label heights, because tesseract's box for that
   `win` swallowed the panel divider and came back 173 px tall against the value's 56. A bare
   integer that is not even on its label's row is a decoy every time; the same integer *on* the row

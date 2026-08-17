@@ -20,7 +20,7 @@ export type MeterField = {
 
 export type FrameRecord = {
   image: string
-  /** "config:<label>", "dynamic" or "none" -- how the meter bar was found. */
+  /** "config:<label>" -- which roi_config box the meter bar was cropped from. */
   roi_source: string | null
   roi_crop: string | null
   cash: MeterField
