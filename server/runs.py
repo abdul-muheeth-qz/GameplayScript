@@ -17,8 +17,8 @@ A winning spin has three frames, because a win is not in the cash meter until it
 collected -- see `server.frames`, which owns those names.
 
 The two audits are independent tenants of the same folder: the meter one reads all the
-frames and asks a model whether the money adds up, the payline one reads `spin_result`'s
-pixels and walks the lines. Either can be run without the other, in either order, and
+frames and adds the money up, the payline one reads `spin_result`'s pixels and walks the
+lines. Either can be run without the other, in either order, and
 `state` returns both so one page can show them side by side.
 """
 

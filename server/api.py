@@ -374,14 +374,14 @@ async def health():
         checks["tesseract"] = {"ok": False, "detail": str(exc)}
 
     # There is no check for the validate stage: it is exact Decimal arithmetic over the
-    # records extract wrote (see server/validate/ledger.py), so it has nothing to be up.
-    # An LM Studio probe lived here while a model owned that sum, and it gated the page.
+    # records extract wrote (see server/validate/ledger.py), so it has nothing to be up,
+    # and a check that can never fail would only gate the meter page for no reason.
 
     def check_payline():
         """Is there reel geometry for the running game, and can its backend run.
 
         Checked here rather than only at the endpoint so the page can say "no geometry for
-        this game" before a button is pressed. The backend probe is an import, not a model
+        this game" before a button is pressed. The backend probe is an import, not a weight
         load -- loading CLIP to answer a health check would cost seconds per page view.
         """
         geometry = geometry_for(cfg)

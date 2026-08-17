@@ -3,7 +3,7 @@
 The check is `current cash = previous cash - bet + win`: the cash meter after a spin should
 be the cash before it, less the bet that was placed, plus the win this spin paid. The sum is
 worked out in exact `Decimal` arithmetic (`ledger.judge`) and compared against the meter
-within `validate.tolerance`. This used to be one call to a local LLM; see `ledger.py`.
+within `validate.tolerance`.
 
     python -m server.validate.cli captured_files/<run_id>
     python -m server.validate.cli captured_files/<run_id> --json

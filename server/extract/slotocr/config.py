@@ -6,7 +6,8 @@ import re
 # Label synonyms for each logical meter field we want to extract.
 #
 # The keys are the field names that come out the other end, and they are what
-# the validate stage reads (validate/agent.py's FIELDS). The cash meter's key is
+# the validate stage reads (validate/records.py's PREVIOUS_FIELDS and
+# CURRENT_FIELDS). The cash meter's key is
 # "cash" rather than "balance" for exactly that reason -- the two halves used to
 # disagree, and a rename here is the single point of change, because everything
 # downstream iterates this dict. The synonyms are what Tesseract might have read

@@ -24,7 +24,7 @@
     "stop_wait_s": 20.0
   },
   "target": {
-    "process": "FortuneOx.exe",
+    "process": "HuffNPuffLink.exe",
     "window_class": "UnityWndClass"
   },
   "spin": {
@@ -35,7 +35,7 @@
     "collect_timeout_s": 60.0
   },
   "gamelog": {
-    "path": "C:\\logs\\Game\\FortuneOx\\Logs\\FortuneOx_Client.log",
+    "path": "C:\\logs\\Game\\HuffNPuffLink\\Logs\\HuffNPuffLink_Theme.log",
     "idle_timeout_s": 8.0
   },
   "watch": {
@@ -115,9 +115,9 @@
     "save_embeddings": true,
     "image": null,
     "symbol_library": null,
-    "reel_stops": {
+    "c": {
       "enabled": true,
-      "telemetry_dir": "C:/logs/Telemetry/Data/FortuneOx",
+      "telemetry_dir": "C:/logs/Telemetry/Data/HuffNPuffLink",
       "strips": "server/assets/payline_excel.xlsx",
       "band": [
         0.7,
@@ -127,11 +127,7 @@
     }
   },
   "validate": {
-    "base_url": "http://localhost:1234/v1",
-    "model": "qwen2.5-7b-instruct-1m",
-    "api_key_env": "LMSTUDIO_API_KEY",
-    "tolerance": "0.005",
-    "timeout_s": 120
+    "tolerance": "0.005"
   },
   "server": {
     "host": "127.0.0.1",

@@ -1,4 +1,4 @@
-"""The payline rule, checked without images, a model or a cabinet.
+"""The payline rule, checked without images or a cabinet.
 
     python -m server.payline.test_paylines          (or: python -m pytest server/payline)
 
@@ -7,8 +7,9 @@ where each cell holds a scalar instead of an embedding. That is the point: `payl
 takes a matcher, so a matcher over numbers proves the five lines are walked correctly
 independently of whether the vision layer works.
 
-This is the only part of this repository that *can* be unit tested -- capture talks to live
-Windows APIs and a running game, extract needs Tesseract and pixels, validate needs a model.
+This and `test_reelstrips.py` are the only parts of this repository that *can* be unit
+tested -- capture talks to live Windows APIs and a running game, extract needs Tesseract
+and pixels, and validate is exercised by re-running it over the folders already on disk.
 So it carries its own runner rather than depending on pytest, which is not installed here,
 and prints a pass/fail line each so a failure names itself.
 """

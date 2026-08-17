@@ -106,14 +106,7 @@ the capture core, because every module there talks to live Windows APIs, a runni
 `extract` runs offline against the fixtures in `server/extract/Images/` and should be checked there
 after any change. `validate` needs nothing running at all, so it is checked by re-running it over
 the run folders already in `captured_files/` — there are winning and losing ones on disk, and both
-paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
-with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures —
-the one genuinely unit-testable thing in the repo) and by re-running `payline.cli` over the
-FortuneOx run folders on disk, then **looking at `payline/tiles/contact_sheet.png`**, which is the
-only thing that shows whether the crop is right.
-after any change. `validate` needs LM Studio up but no cabinet, so it is checked by re-running it
-over the run folders already in `captured_files/` — there are winning and losing ones on disk, and
-both paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
+paths through `Sources` need covering. `payline` needs no cabinet either: check it
 with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures)
 and `python -m server.payline.test_reelstrips` (the reel-stop checkpoint, against two real spins'
 stops) — between them the only genuinely unit-testable things in the repo — and by re-running
@@ -1098,24 +1091,10 @@ the tolerance included, is a `Decimal`, so the boundary sits exactly on half a c
 wherever binary float lands. `working` is that sum written out as a sentence, which is what the CLI
 prints and what the UI falls back to when the meters could not be read as numbers.
 
-**This was one call to a local LLM** (LM Studio, qwen2.5-7b, `ChatOpenAI(...)
-.with_structured_output(Verdict, method="json_schema")`) and the model owned every number. Removed
-on request. What is worth keeping from it:
-
-- The reply *shape* is unchanged — `Verdict` still has `working`, `computed_cash`, `difference`,
-  `verdict` in that order — so `runner`, `validate.json`, the CLI and the UI ledger did not move.
-  The only field dropped is `model`.
-- `git log` holds the model version and the eight-record table that measured its schema (`working`
-  declared before the numbers was worth 6 of 8 verdicts; amounts typed `float` rather than `str`
-  was worth 8 of 8 sums; a JSON Schema `pattern` makes LM Studio answer 400). Go there before
-  reintroducing a model, and re-measure — none of those numbers transfer across a model change.
-- Re-running the 14 folders on disk that hold a `validate.json`, **11 agree** and all three
-  disagreements are the model having been wrong: `2026-08-12_144541` (model: fail, computed 1075.41
-  — actually `1075.49 - 0.88 + 0.20` = 1074.81, exact), `2026-08-12_162510` (model: fail, computed
-  999.94 — actually 998.94, exact) and `2026-08-12_130905` (model: `Connection error.`). Two real
-  spins were reported out by 60c and by a dollar because the model mis-added three two-place
-  numbers it had itself written out correctly one line above. Across all 22 folders: 15 pass,
-  0 fail, 7 error, every error a `pre_spin` record `extract` could not read.
+**`Verdict` is `working`, `computed_cash`, `difference`, `verdict`, in that order**, and that
+shape is what `runner`, `validate.json`, the CLI and the UI ledger all read — changing it moves
+four things. Across the 22 folders on disk the stage reports 15 pass, 0 fail, 7 error, every error
+a `pre_spin` record `extract` could not read, which is the only way this stage reaches no verdict.
 
 Which frame each number comes from is the correctness question in this stage — it always was, the
 arithmetic never being in doubt — and it is one rule:
@@ -1134,9 +1113,9 @@ cannot be added into the sum by mistake. Verified on run `2026-08-11_212236`:
 Only the three-frame layout is read; the old `before.json`/`after.json` folders and the
 `before_spin.json` sample pair were dropped when this was simplified.
 
-Nothing outside this stage needs to be up for it to run — no cabinet, no OBS, no model — and
-`/api/health` has no check for it, deliberately: there is nothing that could be down. The LM Studio
-probe that used to sit there gated the whole meter page on a server that has no part in it any more.
+Nothing outside this stage needs to be up for it to run — no cabinet, no OBS, nothing over the
+network — and `/api/health` has no check for it, deliberately: there is nothing that could be
+down, and a check that can never fail would only gate the meter page for no reason.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 

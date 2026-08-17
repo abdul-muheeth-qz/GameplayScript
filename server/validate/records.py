@@ -24,13 +24,13 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 # What is read from each frame. The extract step's slotocr.config.FIELD_LABELS emits
-# exactly these keys, and agent.py renders the two groups under these names.
+# exactly these keys.
 #
 # `win` is deliberately absent from PREVIOUS_FIELDS. `pre_spin`'s WIN meter holds the
 # *previous* spin's win -- the game leaves a paid win on display until the next spin clears
-# it -- so it is not merely unused here, it is a decoy: sending it and telling the model to
-# ignore it was measured to be worse than not sending it, because the model reached for it
-# anyway. The frame it is read from instead is the one whose WIN meter means this spin.
+# it -- so reading it here would double-count. A field nothing reads cannot be added into
+# the sum by mistake. The frame the win comes from instead is the one whose WIN meter means
+# this spin: the last frame there is (`runner.find_records`).
 PREVIOUS_FIELDS = ("cash", "bet")
 CURRENT_FIELDS = ("cash", "win")
 

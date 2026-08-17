@@ -845,30 +845,14 @@ The terms, the sum, the difference and the tolerance are all `Decimal`, so the b
 exactly on half a cent rather than wherever binary float lands, and `working` — the sentence the
 CLI prints and `validate.json` keeps — is that sum written out.
 
-**This stage used to be one call to a local LLM** (LM Studio, `qwen2.5-7b`, `ChatOpenAI(...)
-.with_structured_output(Verdict, method="json_schema")`), and the model owned every number. The
-schema it answered with was measured at length — `working` declared before the numbers, amounts
-typed `float` rather than `str` — because the shape was what kept a 7B honest; all of that, and
-the eight-record table behind it, is in `git log` if a model is ever wanted back.
+Nothing in this stage goes over the network or asks anything to add up on its behalf. Across the
+22 run folders on disk it reports 15 pass, 0 fail and 7 errors, every error being a `pre_spin`
+record whose cash or bet `extract` could not read — a stage-2 failure, and the only way this
+stage reaches no verdict.
 
-Re-running the 14 run folders on disk that hold a `validate.json` is what the change was checked
-against: **11 of 14 agree** and every disagreement is the model having been wrong.
-
-| run | the model wrote | the arithmetic |
-|---|---|---|
-| `2026-08-12_144541` | **fail**, `computed_cash` 1075.41, out by 0.60 | `1075.49 - 0.88 + 0.20` = **1074.81** — pass, exact |
-| `2026-08-12_162510` | **fail**, `computed_cash` 999.94, out by 1.00 | `999.12 - 0.88 + 0.70` = **998.94** — pass, exact |
-| `2026-08-12_130905` | **error**, `Connection error.` | `853.61 - 100.00 + 0.00` = **753.61** — pass, exact |
-
-Both Fails were the model mis-adding three two-place numbers it had itself written out correctly
-one line above, and reporting a real cabinet as out by 60c and by a dollar. Across all 22 folders
-the stage now reports 15 pass, 0 fail and 7 errors, every error being a `pre_spin` record whose
-cash or bet `extract` could not read — a stage-2 failure, unchanged by this.
-
-What did **not** change is the reply's shape: `working`, `computed_cash`, `difference`, `verdict`,
-in that order, so `validate.json`, the CLI and the UI ledger read exactly as before minus the
-`model` field. Nor did the two rules below, which were always the correctness question here — the
-arithmetic never was.
+The verdict object is `working`, `computed_cash`, `difference`, `verdict`, in that order, which is
+what `validate.json`, the CLI and the UI ledger read. The two rules below are the correctness
+question here — the arithmetic never was.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 
@@ -933,8 +917,9 @@ pair are no longer read; only the three-frame layout is.
 
 ### Running it
 
-Needs nothing running: no cabinet, no OBS, no model. The only thing read from `config.json` is
-`validate.tolerance`, which defaults to half a cent, so a checkout with no config still validates.
+Needs nothing running: no cabinet, no OBS, nothing over the network. The only thing read from
+`config.json` is `validate.tolerance`, which defaults to half a cent, so a checkout with no
+config still validates.
 
 ```powershell
 python -m server.validate.cli captured_files/<run>          # Pass or Fail, with the working
@@ -1242,9 +1227,8 @@ drops the SDK's plaintext-password line exists for exactly that.
 | | `thresholds` `{pixel: 0.90, clip: 0.93}`, `cluster_distance` `{pixel: 0.10, clip: 0.07}` | per backend, because CLIP and pixel similarities are not on the same scale. The pixel number is measured on this cabinet; the clip one is not |
 | | `cross_check` true, `annotate` true, `save_tiles` true, `save_embeddings` true | the agreement check and the artefacts. Tiles and embeddings on disk are what let a reading be re-judged without re-embedding |
 | | `image` null, `symbol_library` null | `image` **overrides** the captured frame whenever it is set, so a supplied screenshot can be validated with captures on disk -- see [which image gets validated](#which-image-gets-validated). `symbol_library` is the reference art `method: "library"` needs, which the POC does not ship |
-| `validate` | `tolerance` "0.005" | how far the cash meter may be out and still pass — half a cent. The only key this stage reads; the LM Studio endpoint that used to live here (`base_url`, `model`, `api_key_env`, `timeout_s`) is gone with the model, and is ignored if left in the file |
+| `validate` | `tolerance` "0.005" | how far the cash meter may be out and still pass — half a cent. The only key this stage reads, and it has a default, so the whole block may be left out |
 | | `reel_stops.enabled` true, `telemetry_dir` null, `strips` `"server/assets/payline_excel.xlsx"`, `band` null, `tolerance_s` 900, `allow_latest_fallback` false | the reel-stop checkpoint -- see [the same symbol at a low cosine](#the-reel-stop-checkpoint-the-same-symbol-at-a-low-cosine). `telemetry_dir: null` derives the folder from `target.process` (`FortuneOx.exe` -> `C:\logs\Telemetry\Data\FortuneOx`); `band: null` runs from 0.70 up to whatever `thresholds` says, so the two cannot drift apart; `allow_latest_fallback` lets it use the newest stops in the file for a frame it cannot identify, which is right only for the spin you have just made |
-| `validate` | `base_url`, `model`, `api_key_env`, `tolerance` "0.005", `timeout_s` 120 | the LM Studio endpoint. `LMSTUDIO_BASE_URL` and `LMSTUDIO_MODEL` override the file |
 | `server` | `host` 127.0.0.1, `port` 8000 | `python -m server --host/--port` override these |
 
 `ideck.actions` maps a role to a hardware button, which is what lets `"button": "spin"` mean
@@ -1291,7 +1275,7 @@ never the current working directory, so a server started from anywhere writes in
 | [server/payline/cli.py](server/payline/cli.py) | pays / error / no pay |
 | [server/payline/test_paylines.py](server/payline/test_paylines.py) | the rule checked against the spreadsheet's own fixtures |
 | **server/validate** | |
-| [server/validate/ledger.py](server/validate/ledger.py) | the sum, the tolerance, and the verdict — exact `Decimal`, no model |
+| [server/validate/ledger.py](server/validate/ledger.py) | the sum, the tolerance, and the verdict — exact `Decimal` |
 | [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
 | [server/validate/runner.py](server/validate/runner.py) | the verdict object |
 | [server/validate/cli.py](server/validate/cli.py) | Pass / Fail / no verdict |
@@ -1326,7 +1310,7 @@ never the current working directory, so a server started from anywhere writes in
 | `cannot run tesseract at ...` | the OCR engine isn't installed or isn't where it was looked for; set `extract.tesseract_cmd` to the full path of `tesseract.exe` |
 | `<run> has no before or after frame` | the capture step hasn't run over that folder, or `capture.format` doesn't match what is on disk |
 | `<file>: cash value is not a number: None` | the OCR read that meter blank. Open the `_roi.png` beside it: a crop showing most of the screen means the configured box missed and detection took over |
-| a `Pass` or `Fail` you don't believe | the sum is Python's and `message` holds it written out, so the arithmetic can be checked by eye. If it is right and the verdict still looks wrong, the meters it was given are wrong — read `extract/*.json`, not this stage. (Older `validate.json` files were written by a model that owned every number; two of them are wrong, see [the sum](#the-sum-is-done-in-python-in-exact-decimal)) |
+| a `Pass` or `Fail` you don't believe | the sum is Python's and `message` holds it written out, so the arithmetic can be checked by eye. If it is right and the verdict still looks wrong, the meters it was given are wrong — read `extract/*.json`, not this stage |
 | a win that reports `Fail` with `computed_cash` short by exactly the win | extract missed the WIN meter on `win_collected.png`. Check `extract/win_collected.json` — if `win` is `null` there and `spin_result` read it fine, this is the known cost described [above](#two-records-and-which-frame-each-comes-from-is-the-correctness-question) |
 | `a spin is already running` | one at a time: they would share one OBS instance, one record directory and one cursor |
 | `no run called <id>` | the folder was deleted, or the capture failed before writing anything — `prune_empty` removes a run folder that captured nothing |
