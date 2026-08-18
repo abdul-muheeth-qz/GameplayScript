@@ -1,13 +1,8 @@
-"""
-Dynamic UI-panel detection (content-based, NOT fixed coordinates).
+"""Content-based UI-panel detection, never a fixed coordinate.
 
-Slot-game meter values are almost always shown inside a flat-colored
-(usually near-black) rounded panel/badge with bright text on top — visually
-distinct from the busy, colorful artwork behind it. We detect these panels
-by their COLOR PROPERTIES (dark AND low-saturation, i.e. "true black/grey",
-which excludes warm-colored dark shadows in the artwork), never by assuming
-a screen position. This works across different screenshots/resolutions/
-layouts because it reacts to what's actually drawn on screen.
+A meter value sits inside a flat, near-black panel with bright text on it. Panels are found by
+colour -- dark AND low-saturation, which excludes the warm dark shadows in the artwork -- so this
+reacts to what is drawn rather than to where it is, and survives a change of resolution or layout.
 """
 import statistics
 
@@ -31,7 +26,7 @@ def detect_dark_panels(image, min_area_frac=0.0008):
         x, y, cw, ch = cv2.boundingRect(c)
         if cw * ch < min_area_frac * w * h:
             continue
-        # skip absurd aspect ratios (thin lines/borders, not panels)
+        # thin lines and borders, not panels
         if cw < 15 or ch < 10:
             continue
         boxes.append((x, y, cw, ch))
@@ -39,12 +34,11 @@ def detect_dark_panels(image, min_area_frac=0.0008):
 
 
 def group_panels_into_rows(boxes, y_tol_frac=0.5, height_ratio_max=2.2, width_ratio_max=2.3):
-    """Group panels that likely belong to the same meter bar: similar
-    vertical center, similar height, AND similar width. Meter cells in a
-    bar (CASH/WIN/BET, or jackpot badges) tend to be comparably wide bars;
-    unrelated small UI elements (buttons, denomination badges) are much
-    narrower and would otherwise sneak into the group and skew the row's
-    shared baseline statistics."""
+    """Group panels likely belonging to one meter bar: similar vertical centre, height AND width.
+
+    Width matters because meter cells are comparably wide, while unrelated small elements (buttons,
+    denomination badges) are much narrower and would skew the row's shared baseline statistics.
+    """
     if not boxes:
         return []
     boxes_sorted = sorted(boxes, key=lambda b: b[1])

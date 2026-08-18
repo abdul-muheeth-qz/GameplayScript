@@ -1,6 +1,4 @@
-"""STEP 2b - the payline logic, exactly as specified in Payline.xlsx.
-
-Rule (identical for all five sheets):
+"""The payline logic, exactly as specified in Payline.xlsx.
 
     COMPARE cell1 & cell2
         IF NO  -> STOP                                  (line does not pay)
@@ -10,14 +8,12 @@ Rule (identical for all five sheets):
         IF NO  -> DISPLAY "LINE n PAYS {PAY_COUNTER_VALUE}"   and stop
     DISPLAY "LINE n PAYS {PAY_COUNTER_VALUE}"
 
-Left to right, adjacent pairs only, no skipping.  The counter is therefore the
-length of the matching run starting at reel 1.
+Left to right, adjacent pairs only, no skipping, so the counter is the length of the matching run
+starting at reel 1.
 
-This module is pure logic - it takes a matcher and knows nothing about images,
-which is what lets test_paylines.py verify it without any pixels. It is carried over from
-the POC unchanged for that reason: it is the one part of this stage with no dependency on a
-cabinet, a screen size or a model, and the rule it implements is the thing that was checked
-against `run_all.py`. Change the vision layer freely; leave this alone.
+**Pure logic over a matcher, knowing nothing about images** -- which is what lets
+test_paylines.py verify it without any pixels, and makes it the one genuinely unit-testable module
+here. Change the vision layer freely; leave this alone.
 """
 
 from dataclasses import dataclass, field

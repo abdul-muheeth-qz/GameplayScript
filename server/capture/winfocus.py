@@ -3,25 +3,17 @@
 Matching is done on executable name + window class, never on the title: Unity window
 titles change (build labels, FPS counters), the class `UnityWndClass` does not.
 
-Nothing here takes the foreground. A minimised window has to be restored, because it produces
-no frames for OBS to capture, but stealing focus is a separate and more disruptive thing --
-and clicking by posted message doesn't need it.
+Nothing here takes the foreground except `bring_to_front`. A minimised window is restored, because
+it produces no frames for OBS, but stealing focus is a separate and more disruptive thing.
 
-The bottom of this file holds the input primitives -- `input_blocked`, `cursor_parked`,
-`post_message` and `inject_click` -- shared by every module that clicks something: `ideck` for
-the OLED button panel and `gameclick` for the game's own window. They live here rather than in
-either caller because there must be exactly one definition of each; the DPI rule below is the
-reason that matters more than tidiness.
+The bottom of the file holds the input primitives -- `input_blocked`, `cursor_parked`,
+`post_message`, `inject_click` -- shared by `ideck` and `gameclick`, so there is exactly one
+definition of each.
 
-**This process must stay DPI-unaware.** Never call `SetProcessDpiAwareness`, add a DPI
-manifest, or do DPI arithmetic anywhere. Windows divides the coordinates in a message posted
-from a DPI-aware process to a DPI-unaware window -- by 1.25 on this cabinet, which lands an
-i-Deck click a whole column to the left. Staying unaware keeps the panel layout file, posted
-messages, `SetCursorPos` and `GetCursorPos` in one coordinate space, with no conversion
-anywhere. A second caller in `gameclick` does not change this; it doubles the cost of
-breaking it.
-
-Also holds `process_running`, used to check whether OBS is up before launching it.
+**This process must stay DPI-unaware.** Never call `SetProcessDpiAwareness`, add a DPI manifest, or
+do DPI arithmetic: Windows divides coordinates in a message posted from a DPI-aware process to a
+DPI-unaware window, by 1.25 here, which lands an i-Deck click a whole column to the left. Staying
+unaware keeps the layout file, posted messages and `SetCursorPos` in one coordinate space.
 """
 
 from __future__ import annotations
@@ -219,11 +211,37 @@ def find_window(process: str, window_class: str) -> Window:
     if not matches:
         raise WindowNotFound(
             f"no visible window matching process {process!r} and class {window_class!r}. "
-            "Is it running? If the executable or window class differs, update config.json."
+            f"Is it running? Check \"active\" in game_config.json, and that game's "
+            f"\"window_class\", if the executable or window class differ."
         )
     if len(matches) > 1:
         LOG.debug("%d windows matched, picking the largest: %r", len(matches), matches[0])
     return matches[0]
+
+
+def find_game_window(game_cfg: dict) -> Window:
+    """The active game's window, from its own block -- process and `window_class` together.
+
+    One reader for both keys, because they have to agree about which game is running and used to be
+    read separately at three call sites, each supplying its own literal `"UnityWndClass"` default.
+    Both shipped games are Unity, so that default was invisible rather than harmless: a game with no
+    `window_class` reported "no visible window matching class 'UnityWndClass'" -- a hunt for a
+    missing game -- instead of naming the key nobody had filled in.
+    """
+    game_cfg = game_cfg or {}
+    process = game_cfg.get("process")
+    window_class = game_cfg.get("window_class")
+    if not process:
+        raise WindowNotFound(
+            "there is no active game, so there is no window to match. Set \"active\" in "
+            "game_config.json to the running game's executable name.")
+    if not window_class:
+        raise WindowNotFound(
+            f"the \"{process}\" block in game_config.json has no \"window_class\", so its window "
+            f"cannot be matched -- windows are matched on process + class and never on the title, "
+            f"which Unity changes. Set games[\"{process}\"].window_class (it is "
+            f"\"UnityWndClass\" for a Unity client).")
+    return find_window(process, window_class)
 
 
 def client_size(window: Window) -> tuple[int, int]:
@@ -240,12 +258,7 @@ def client_origin(window: Window) -> tuple[int, int]:
 
 
 def ensure_restored(window: Window) -> None:
-    """Un-minimise `window` without taking the foreground.
-
-    A minimised window produces no frames for OBS to capture, so it has to be restored --
-    but stealing focus is a separate, more disruptive thing, and clicking the i-Deck by
-    posted message doesn't need it.
-    """
+    """Un-minimise `window` without taking the foreground -- OBS needs the frames, not the focus."""
     if user32.IsIconic(window.hwnd):
         LOG.debug("restoring minimised window %r", window.process)
         user32.ShowWindow(window.hwnd, SW_RESTORE)
@@ -254,17 +267,10 @@ def ensure_restored(window: Window) -> None:
 def bring_to_front(window: Window) -> bool:
     """Raise `window` and give it the keyboard focus. Returns whether it worked.
 
-    **The one thing in this package that takes the foreground, and it is opt-in for a reason.**
-    Nothing in the capture path may call it: OBS captures the client area whatever the z-order,
-    `ensure_restored` is all a screenshot needs, and a posted i-Deck click deliberately does not
-    disturb focus. It exists because injected input (`inject_click`) goes to whatever is topmost
-    under the cursor rather than to an HWND, so a probe that wants to test injection has no
-    alternative.
-
-    `SetForegroundWindow` is refused by Windows unless the calling process already owns the
-    foreground, so the caller's input queue is attached to the target's thread for the duration
-    -- the standard way round it, and the reason this returns a bool rather than trusting the
-    call.
+    **The one thing in this package that takes the foreground, and nothing in the capture path may
+    call it.** It exists only because injected input goes to whatever is topmost under the cursor
+    rather than to an HWND. `SetForegroundWindow` is refused unless the caller already owns the
+    foreground, hence the input-queue attach and the bool rather than trusting the call.
     """
     ensure_restored(window)
     target_thread = user32.GetWindowThreadProcessId(window.hwnd, None)
@@ -346,9 +352,8 @@ kernel32.Process32NextW.argtypes = (wintypes.HANDLE, ctypes.POINTER(_PROCESSENTR
 def process_running(exe_name: str) -> bool:
     """Whether a process with this executable name exists.
 
-    Used to avoid launching a second OBS: OBS detects the duplicate and puts up a
-    modal "already running" dialog, which would hang the run with no explanation.
-    A window search isn't enough here, because OBS can be minimised to the tray.
+    Used to avoid launching a second OBS, which puts up a modal "already running" dialog and would
+    hang the run. A window search is not enough, OBS being able to minimise to the tray.
     """
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if not snapshot or snapshot == INVALID_HANDLE_VALUE:
@@ -382,10 +387,9 @@ class InputError(RuntimeError):
 def input_blocked() -> str | None:
     """Why a click cannot be delivered right now, or None if it can.
 
-    A running screensaver owns the input desktop, so `SetCursorPos` is refused outright with
-    ERROR_ACCESS_DENIED and the click never happens. Measured here: policy sets a 10-minute
-    blank screensaver, and eight consecutive runs failed on it. Worth checking before a run
-    starts rather than after the first screenshot has been taken.
+    A running screensaver owns the input desktop, so `SetCursorPos` is refused with
+    ERROR_ACCESS_DENIED and the click never happens -- eight consecutive runs failed on the
+    10-minute policy screensaver. Checked before a run rather than after the first screenshot.
     """
     running = wintypes.BOOL()
     if user32.SystemParametersInfoW(SPI_GETSCREENSAVERRUNNING, 0, ctypes.byref(running), 0) \
@@ -400,9 +404,8 @@ def input_blocked() -> str | None:
 def cursor_parked(screen_xy: tuple[int, int], settle_ms: int = 20):
     """Put the real cursor on the target point for the duration, then put it back.
 
-    Load-bearing, not cosmetic: SDL re-reads `GetCursorPos` while a mouse button is held, which
-    overrides whatever position the posted message carried. Leave the cursor elsewhere and the
-    press lands wherever it happens to be.
+    Load-bearing, not cosmetic: SDL re-reads `GetCursorPos` while a button is held, which overrides
+    the position the posted message carried.
     """
     before = wintypes.POINT()
     restore = bool(user32.GetCursorPos(ctypes.byref(before)))
@@ -425,9 +428,8 @@ def post_message(hwnd, message: int, wparam: int, lparam: int, what: str,
                  hint: str = "Has the window closed?") -> None:
     """Post one message, or raise naming which one failed.
 
-    Posted rather than injected with `SendInput` for the i-Deck, because the game window
-    overlaps the panel and an injected click goes to whichever window is topmost. A posted
-    message reaches the target HWND whatever the z-order, and doesn't disturb the focus.
+    Posted rather than injected for the i-Deck, because the game window overlaps the panel and would
+    eat an injected click; a posted message reaches the HWND whatever the z-order.
     """
     if not user32.PostMessageW(hwnd, message, wparam, lparam):
         raise InputError(f"PostMessage({what}) failed "
@@ -484,16 +486,12 @@ user32.SendInput.restype = wintypes.UINT
 def inject_click(hold_ms: int = 80) -> None:
     """Press and release the left button as real hardware input, at the cursor's current point.
 
-    Deliberately carries **no coordinates**: the caller has already put the cursor where it
-    wants it with `cursor_parked`, so this only needs the button transitions. That is not
-    laziness -- `MOUSEEVENTF_ABSOLUTE` takes coordinates normalized to 0..65535 across the
-    primary monitor, which is a second coordinate space and a second chance to get DPI wrong.
-    Moving with `SetCursorPos` and clicking with no movement keeps everything in the one space
-    the rest of this file uses.
+    Deliberately carries **no coordinates**: `MOUSEEVENTF_ABSOLUTE` normalizes to 0..65535 across the
+    primary monitor, which is a second coordinate space and a second chance to get DPI wrong. Moving
+    with `SetCursorPos` and clicking without movement keeps one space.
 
-    Unlike `post_message` this lands on whatever window is topmost under the cursor, so callers
-    must check `window_at` first. It exists because a window that reads Raw Input rather than
-    its message queue cannot see a posted click at all.
+    Unlike `post_message` this lands on whatever is topmost under the cursor, so callers must check
+    `window_at` first. It exists because a window reading Raw Input cannot see a posted click.
     """
     down = _INPUT(type=INPUT_MOUSE, mi=_MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, None))
     up = _INPUT(type=INPUT_MOUSE, mi=_MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, None))

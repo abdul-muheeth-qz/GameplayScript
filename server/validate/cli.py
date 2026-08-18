@@ -1,13 +1,9 @@
-"""Validate one slot spin.
+"""Validate one slot spin. Prints Pass or Fail, with the working behind it on stderr.
 
-    python -m server.validate.cli captured_files/2026-08-11_212236
-    python -m server.validate.cli captured_files/2026-08-11_212236 --json
+    python -m server.validate.cli server/captured_files/2026-08-11_212236
+    python -m server.validate.cli server/captured_files/2026-08-11_212236 --json
 
-The argument is a capture run folder that the extract step has already been run over, so
-that it holds `extract/pre_spin.json`, `extract/spin_result.json` and -- if the spin won --
-`extract/win_collected.json`.
-
-Prints Pass or Fail, and the working behind it on stderr.
+The argument is a run folder the extract step has already been run over.
 """
 
 import argparse
@@ -15,12 +11,10 @@ import json
 import sys
 from pathlib import Path
 
-from ..settings import load_config
-
 from .runner import RESULT_FILE, find_records, validate_records, validate_run
 
-# A Fail is a verdict about the spin. An error means no verdict was reached at all --
-# keeping the two apart is what lets a test runner tell them apart.
+# A Fail is a verdict about the spin; an error means no verdict was reached at all. Keeping them
+# apart is the one distinction a test runner needs.
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_ERROR = 2
@@ -34,8 +28,6 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folder", type=Path,
                         help="a capture run folder the extract step has been run over")
-    parser.add_argument("--config", default=None,
-                        help="path to config.json (default: the one at the repo root)")
     parser.add_argument("--json", action="store_true",
                         help="print the whole verdict object instead of one word")
     parser.add_argument("--write", action="store_true",
@@ -50,23 +42,17 @@ def main(argv=None) -> int:
         print(f"Folder not found: {args.folder}", file=sys.stderr)
         return EXIT_ERROR
 
-    try:
-        cfg = load_config(args.config)
-    except (OSError, ValueError) as exc:
-        # The only thing read from config here is the tolerance, which has a default, so a
-        # missing config is a warning rather than the end of the run.
-        print(f"warning: could not read config ({exc}); using defaults", file=sys.stderr)
-        cfg = {}
-
+    # No config at all: the tolerance is `ledger.TOLERANCE`, so this runs against a checkout with
+    # no config.json.
     if args.write:
-        result = validate_run(str(args.folder), cfg)
+        result = validate_run(str(args.folder))
     else:
         try:
             sources = find_records(args.folder)
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return EXIT_ERROR
-        result = validate_records(sources, cfg)
+        result = validate_records(sources)
 
     if args.json:
         print(json.dumps(result, indent=2))

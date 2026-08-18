@@ -1,3 +1,5 @@
+# The run folders. They live in server/, beside the code and the config that make them; the
+# bare pattern matches at any depth, so a leftover captured_files/ at the root is covered too.
 captured_files/
 __pycache__/
 *.pyc
@@ -7,13 +9,6 @@ __pycache__/
 venv/
 env/
 ENV/
-
-# Left behind by running the OCR step against loose images.
-roi_crops/
-
-# The standalone validator stage 3 was ported from, kept on disk as reference. It is a
-# git repository of its own, so committing it here would nest one inside the other.
-spin-validator/
 
 # UI
 ui/node_modules/

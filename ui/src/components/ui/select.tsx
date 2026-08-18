@@ -5,11 +5,9 @@ import { Check, ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 /**
- * shadcn's Select over radix-ui's primitive, trimmed to the parts this app uses.
- *
- * It is a radix listbox rather than a native `<select>` because the popup has to be drawn in
- * the cabinet's own palette: the app sets no `color-scheme`, so a native dropdown renders its
- * option list in the platform's light chrome against a page sampled off a dark meter strip.
+ * shadcn's Select over radix-ui's primitive, trimmed to the parts this app uses. A radix listbox
+ * rather than a native `<select>`, whose option list renders in the platform's light chrome against
+ * a page sampled off a dark meter strip.
  */
 
 function Select({ ...props }: React.ComponentProps<typeof SelectPrimitive.Root>) {

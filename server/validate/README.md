@@ -8,17 +8,18 @@ current cash = previous cash - bet + win
 ```
 
 ```powershell
-python -m server.validate.cli captured_files/<run_id>          # Pass or Fail, with the working
-python -m server.validate.cli captured_files/<run_id> --json   # the full verdict object
-python -m server.validate.cli captured_files/<run_id> --write  # also write validate.json
+python -m server.validate.cli server/captured_files/<run_id>          # Pass or Fail, with the working
+python -m server.validate.cli server/captured_files/<run_id> --json   # the full verdict object
+python -m server.validate.cli server/captured_files/<run_id> --write  # also write validate.json
 ```
 
 The folder must be a capture run [extract](../extract/) has already been run over. Exit codes are
 `0` pass, `1` fail, `2` no verdict. A Fail is a judgement about the spin; an error means no
 judgement was reached, and keeping them apart is what lets a test runner tell them apart.
 
-Needs nothing running — no cabinet, no OBS, no model. The one key read from `config.json` is
-`validate.tolerance`, and it has a default.
+Needs nothing running — no cabinet, no OBS, nothing over the network — and reads no config file:
+this stage imports `settings` nowhere. The tolerance is `ledger.TOLERANCE`, half a cent, beside the
+comparison it governs.
 
 This was a standalone project (`spin-validator`) that read two files with fixed names and printed
 one word. It now reads what extract wrote into the run folder and writes a verdict object with the
@@ -29,12 +30,9 @@ Two things are decided for a measured reason, both written up in the root
 
 - **The sum is Python's, in exact `Decimal`.** `ledger.judge` works out
   `previous.cash - previous.bet + current.win`, subtracts the cash meter, and passes if what is
-  left is within the tolerance. It used to be one call to a local LLM that owned every number;
-  that model is in `git log`, along with the measurements of the reply schema that kept a 7B
-  honest. Re-run over the 14 folders on disk holding a `validate.json`, the two disagree in the
-  arithmetic's favour — the model reported two exactly-balancing spins as Fail, out by 60c and by
-  a dollar. The reply *shape* is unchanged (`working`, `computed_cash`, `difference`, `verdict`),
-  so nothing downstream moved.
+  left is within the tolerance. Every term and the tolerance are `Decimal`, so the boundary sits
+  exactly on half a cent. The verdict object is `working`, `computed_cash`, `difference`,
+  `verdict`, and `working` is that sum written out so it can be checked by eye.
 - **Which frame each value comes from.** cash and bet from `pre_spin`; cash and win from the *last*
   frame — `win_collected` on a win, `spin_result` on a loss. `pre_spin`'s WIN meter is not read at
   all: it holds the *previous* spin's win, so reading it there double-counts. That, and not the

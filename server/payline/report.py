@@ -1,4 +1,4 @@
-"""STEP 2c - what the reading leaves on disk, and what it prints.
+"""What the reading leaves on disk, and what it prints.
 
     payline.json                       the verdict, and every COMPARE behind it
     payline/line_details.csv           one row per COMPARE -- the audit trail
@@ -6,10 +6,8 @@
     payline/annotated_line{n}.png      one image per line, drawn on the reel window
     payline/annotated_summary.png      every paying line on one image
 
-The annotated images matter more here than they would elsewhere: this stage's verdict rests
-entirely on a crop being right, and the only honest way to show that is the pixels it read
-with the cells drawn on them. Captions go on a strip *below* the reels rather than over the
-symbols, so nothing the reader needs to check is covered by the annotation.
+The verdict rests entirely on the crop being right, so the annotated images are the honest way to
+show it. Captions go on a strip *below* the reels, never over the symbols the reader is checking.
 """
 
 from __future__ import annotations
@@ -47,11 +45,9 @@ def _font(size=20):
     return ImageFont.load_default()
 
 
-# Caption sizing. The canvas is as wide as the reel window, and that varies with the game
-# window: 984 px on the 1080x1849 captures the geometry was measured on, 375 px on a 412x720
-# one. A fixed font size therefore clips -- measured at 190-280 px of overflow on every one of
-# the five line images at 375 px wide, which is exactly the "hardcoded pixel against a
-# variable-size image" mistake the geometry itself avoids.
+# Caption sizing. The canvas is as wide as the reel window, which varies with the game window --
+# 984 px on the captures the geometry was measured on, 375 px on a smaller one. A fixed font size
+# clips, and did: 190-280 px of overflow on all five line images at the smaller size.
 CAPTION_PREFERRED = 22
 CAPTION_MINIMUM = 12   # below this it is unreadable, so wrap instead of shrinking further
 LEGEND_PREFERRED = 19
@@ -73,9 +69,8 @@ def _line_height(font) -> int:
 
 
 def _wrap(text, font, max_width) -> list[str]:
-    """Greedy word wrap. A single word wider than the line is left long rather than broken --
-    every caption here is words and cell names, so there is nothing to gain from hyphenating
-    and a mid-token break would make `E21` unreadable."""
+    """Greedy word wrap. A word wider than the line is left long rather than broken: these captions
+    are words and cell names, and a mid-token break would make `E21` unreadable."""
     lines, current = [], ""
     for word in text.split(" "):
         candidate = f"{current} {word}".strip()
@@ -92,10 +87,8 @@ def _wrap(text, font, max_width) -> list[str]:
 def _fit(text, max_width, preferred=CAPTION_PREFERRED, minimum=CAPTION_MINIMUM):
     """A font and the lines to draw so `text` fits inside `max_width`.
 
-    Shrink first, wrap only if shrinking to `minimum` still does not fit -- one line of
-    slightly smaller type reads better than two of full size, but type small enough to fit any
-    caption on any width would be illegible, so there is a floor and wrapping takes over below
-    it. Returns `(font, lines)`; the caller sizes its strip from `len(lines)`.
+    Shrink first, wrap only once `minimum` still does not fit -- there is a floor because type small
+    enough for any width would be illegible. The caller sizes its strip from `len(lines)`.
     """
     for size in range(preferred, minimum - 1, -1):
         font = _font(size)
@@ -105,9 +98,7 @@ def _fit(text, max_width, preferred=CAPTION_PREFERRED, minimum=CAPTION_MINIMUM):
     return font, _wrap(text, font, max_width)
 
 
-# ---------------------------------------------------------------------------
-# the record
-# ---------------------------------------------------------------------------
+# -- the record ------------------------------------------------------------
 
 def build_record(results, matcher, geometry, *, image, image_source, backend,
                  method, tiles_info, checks, agree) -> dict:
@@ -138,15 +129,14 @@ def build_record(results, matcher, geometry, *, image, image_source, backend,
                 "winning_cells": r.winning_cells,
                 "symbols": [labels[c] for c in r.winning_cells] if labels else [],
                 "message": r.message,
-                # The cell that ended the run, or null when the line ran to the end. This
-                # is what the annotated image outlines in red.
+                # The cell that ended the run, null when the line ran to the end. The annotated
+                # image outlines it in red.
                 "broken_at": (r.cells[r.stopped_at + 1] if r.stopped_at >= 0 else None),
                 "steps": [
                     {"compare": [s.a, s.b], "similarity": round(s.similarity, 6),
                      "match": s.match, "detail": s.detail,
-                     # Only the pairs the reel-stop checkpoint reached carry this, so a
-                     # reader can tell a verdict read off the pixels from one the game's own
-                     # reel stops settled. Null on every other pair.
+                     # Only on pairs the checkpoint reached, so a reader can tell a pixel verdict
+                     # from one the reel stops settled. Null on every other pair.
                      "checkpoint": s.checkpoint or None}
                     for s in r.steps
                 ],
@@ -171,8 +161,10 @@ def print_results(record: dict) -> None:
           f"   reels {record.get('reels_size') or '?'}"
           f"   tile {record.get('tile_size') or '?'}")
     geom = record["geometry"]
+    # Optional, so the clause is omitted rather than printing "measured on None".
+    measured = f", measured on {geom['measured_on']}" if geom.get("measured_on") else ""
     print(f"  Geometry   : {geom['label']} for {geom['process']}, "
-          f"{geom['grid']}, measured on {geom['measured_on']}")
+          f"{geom['grid']}{measured}")
     print(f"  Embedding  : {record['backend']}")
     print(f"  Matching   : {record['matcher']}")
 
@@ -180,7 +172,7 @@ def print_results(record: dict) -> None:
     if stops.get("status") == "on":
         print(f"  Reel stops : {stops.get('stops')}  from {stops.get('file')}"
               f" line {stops.get('line')}")
-        print(f"               {stops.get('timestamp')}, game {stops.get('game_id')}")
+        print(f"               {stops.get('timestamp')}")
         print(f"               chosen by {stops.get('matched_by')}")
         print(f"               band cos {stops['band'][0]:.2f}-{stops['band'][1]:.2f}, "
               f"{len(stops.get('adjudications') or [])} pair(s) reached, "
@@ -231,9 +223,9 @@ def print_results(record: dict) -> None:
     print(f"  TOTAL PAY  : {record['total_pay']}")
     print(bar)
 
-    # What the pixels alone would have paid, whenever the checkpoint changed anything. Printed
-    # because the cross-check table below reports the *vision* strategies, and without this line
-    # it looks like it contradicts the verdict above.
+    # What the pixels alone would have paid, whenever the checkpoint changed something -- the
+    # cross-check table below reports the *vision* strategies, so without this it looks like a
+    # contradiction of the verdict above.
     if stops.get("overrides"):
         before = stops.get("pays_without_checkpoint")
         print()
@@ -259,8 +251,8 @@ def print_results(record: dict) -> None:
         print(bar)
         print("CROSS-CHECK  (do the matching strategies agree?)")
         print(bar)
-        # Same label as the page carries, for the same reason: these are the pixel-only pays, so
-        # a line the checkpoint rescued reads 0 here while the summary above pays it.
+        # These are the pixel-only pays, so a line the checkpoint rescued reads 0 here while the
+        # summary above pays it. Same label the page carries.
         if stops.get("status") == "on":
             print("  the pixel readings only -- the reel-stop checkpoint is not one of these")
             if stops.get("overrides"):
@@ -282,9 +274,7 @@ def print_results(record: dict) -> None:
             print(f"  (cross-check {method!r} skipped: {check['skipped']})")
 
 
-# ---------------------------------------------------------------------------
-# the files
-# ---------------------------------------------------------------------------
+# -- the files -------------------------------------------------------------
 
 def write_line_csv(out_dir: str, record: dict) -> str:
     name = "line_details.csv"
@@ -313,8 +303,8 @@ def write_matrix_csv(out_dir: str, matcher) -> str:
 
 
 def _canvas(reels, strip_h):
-    """The reel window with a dark caption strip underneath, so no annotation covers a
-    symbol the reader is being asked to check."""
+    """The reel window with a dark caption strip underneath, so no annotation covers a symbol the
+    reader is being asked to check."""
     canvas = Image.new("RGB", (reels.width, reels.height + strip_h), (12, 12, 16))
     canvas.paste(reels, (0, 0))
     return canvas
@@ -352,8 +342,8 @@ def annotate(out_dir: str, record: dict, geometry) -> dict:
         caption = f"{line['message']}   ({line['name']}: {' - '.join(line['cells'])})"
         if line["symbols"]:
             caption += f"   [{', '.join(line['symbols'])}]"
-        # Fitted before the canvas is made, because the strip has to be tall enough for however
-        # many lines the caption needs -- sizing it first is what clipped the text.
+        # Fitted before the canvas is made: the strip has to be tall enough for however many lines
+        # the caption needs, and sizing the canvas first is what clipped the text.
         font, lines = _fit(caption, reels.width - margin * 2)
         step = _line_height(font)
         canvas = _canvas(reels, margin * 2 + step * len(lines))
@@ -375,17 +365,15 @@ def annotate(out_dir: str, record: dict, geometry) -> dict:
         canvas.save(os.path.join(out_dir, name))
         written[f"line{line['line']}"] = name
 
-    # The legend sits beside a colour swatch, so its usable width is the canvas less the swatch
-    # and both margins. One font for every row, chosen so the longest of them fits -- rows in
-    # mixed sizes would read as a ranking the lines do not have.
+    # One font for every row, chosen so the longest fits: rows in mixed sizes would read as a
+    # ranking the lines do not have.
     margin, swatch_w, gap = 12, 28, 12
     text_x = margin + swatch_w + gap
     usable = reels.width - text_x - margin
     captions = [f"{line['message']}   ({line['name']})" for line in record["lines"]]
     longest = max(captions, key=len)
     font, _ = _fit(longest, usable, LEGEND_PREFERRED, LEGEND_MINIMUM)
-    # Wrapping is applied per row with that shared font, so a row longer than the sample still
-    # fits rather than running off the edge.
+    # Per row with that shared font, so a row longer than the sample still fits.
     wrapped = [_wrap(caption, font, usable) for caption in captions]
 
     step = _line_height(font)

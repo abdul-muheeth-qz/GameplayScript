@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One app, one capture, **two audits** of it, on an ICE cabinet dev machine. Capture a spin, then
 either read the credit meters off the frames and check that the money adds up, or read the reel
-grid off the result frame and check that the paylines pay what they say. `config.json`'s
-`target.process` says which game (`HuffNPuffLink.exe`, `FortuneOx.exe`); the meter audit works on
-both, the payline audit needs a geometry block per game and currently has FortuneOx's.
+grid off the result frame and check that the paylines pay what they say.
+`server/game_config.json`'s `active` says which game (`HuffNPuffLink.exe`, `FortuneOx.exe`); the
+meter audit works on both, the payline audit needs a geometry block per game and currently has
+FortuneOx's.
 
 - **`server/capture/`** — `spin.py` **causes** one spin: opens OBS, finds the game and i-Deck windows,
   starts OBS recording into the run folder, screenshots, clicks Repeat Bet on the i-Deck, waits
@@ -21,7 +22,7 @@ both, the payline audit needs a geometry block per game and currently has Fortun
   session-capture work to come.
 - **`server/extract/`** — crops each frame to the CASH/WIN/BET meter strip with OpenCV and reads it with
   Tesseract, writing one record per frame. No fixed pixel coordinates: a normalized ROI box per
-  known layout, and dark-panel detection when none of them fits.
+  known layout, and nothing behind it if none of them fits.
 - **`server/validate/`** — checks whether the cash meter after the spin follows from the meters
   before it, `current cash = previous cash - bet + win`. Exact `Decimal` arithmetic in Python,
   within a configurable tolerance. Writes a verdict of pass, fail or error.
@@ -30,8 +31,8 @@ both, the payline audit needs a geometry block per game and currently has Fortun
   decides which cells hold the same symbol, and walks each payline left to right counting the
   matching run from reel 1. No OCR, no model, no cabinet. Writes `payline.json`. One COMPARE in the
   ambiguous 0.70-threshold band is settled not by pixels but by the game's own reel stops, read from
-  its telemetry log and mapped through `server/assets/payline_excel.xlsx` -- the reel-stop
-  checkpoint, which is the only oracle this audit has.
+  its log (the same one capture watches) and mapped through `server/assets/payline_excel.xlsx` --
+  the reel-stop checkpoint, which is the only oracle this audit has.
 - **`server/`** + **`ui/`** — a FastAPI app exposing those stages as endpoints, and a
   React/Vite/shadcn page with two tabs — Meter Validation and Payline Validation — over one run.
 
@@ -40,11 +41,31 @@ behaviour in this codebase is explained there and in module docstrings, with the
 justified it. Read the docstring of a module before changing it; nearly every odd-looking line is
 load-bearing and was arrived at by a failure.
 
+### Which document to read, and where to write a new rule
+
+Three pairs, and the root pair is the authority. **This file and [README.md](README.md) are the
+whole thing, both halves together**; each half then has its own pair scoped to working inside it:
+
+| | for |
+|---|---|
+| `CLAUDE.md`, `README.md` (here) | the app: the two audits, the cabinet, every measurement, and anything that crosses the server/ui line |
+| [server/CLAUDE.md](server/CLAUDE.md), [server/README.md](server/README.md) | the Python: the stages, the run folder, the config, the CLIs |
+| [ui/CLAUDE.md](ui/CLAUDE.md), [ui/README.md](ui/README.md) | the browser: the two pages, the shell, the API client, the build |
+
+**A measurement is written down once, and it is written here.** The per-folder files state the rule
+and link back for the number behind it, rather than repeating it — two copies of "44.8 s worst" is
+how one of them ends up stale and believed. So: a rule about how the Python is laid out goes in
+`server/`; a rule about how the pages behave goes in `ui/`; a number that came off the cabinet, and
+anything the two halves have to agree about (the run folder contract, the shape of `RunState`),
+goes here. When a change makes one of these wrong, fix that one and check the other two mention it.
+
 ## Commands
 
-One virtualenv (`server/.venv`) and one `server/requirements.txt` for all three stages. Every
+One virtualenv (`server/.venv`) and one `server/requirements.txt` for all four stages. Every
 Python entry point is a `-m` module and must be run **from the repository root** — that is what
-puts `server/` (and `server.settings`) on the path.
+puts `server/` (and `server.settings`) on the path. Note that the run folders it reads and writes
+are under `server/captured_files/`, so a path argument is `server/captured_files/<run>` even though
+the command is run one level above it.
 
 ```powershell
 python -m pip install -r server/requirements.txt
@@ -60,7 +81,7 @@ python -m server.capture.spin                 # the real run
 python -m server.capture.spin --no-record     # no video, just the frames
 python -m server.capture.spin -v              # debug to console (run.log always gets DEBUG)
 python -m server.capture.spin --run-dir <dir> # use exactly this folder (what the server passes)
-python -m server.capture.spin --out <dir> --config <path>
+python -m server.capture.spin --out <dir> --config <path>   # game_config.json is read from beside it
 
 python -m server.capture.spin --no-collect    # leave a win on the offer: 2 frames, unpaid cash
 python -m server.capture.spin --collect-first  # also clear a win something *else* left pending
@@ -76,20 +97,20 @@ python -m server.capture.watch                # watch a person play until Ctrl-C
 python -m server.capture.watch --duration 900 --max-rounds 40 --no-milestones
 
 # stage 2 -- extract
-python -m server.extract.cli captured_files/<run>   # writes extract/before.json and extract/after.json in it
+python -m server.extract.cli server/captured_files/<run>   # writes one record per frame into extract/
 python -m server.extract.cli server/extract/Images   # loose images, JSON list to stdout
 python -m server.extract.cli <img> --out <dir>
 
-# stage 3 -- validate
-python -m server.validate.cli captured_files/<run>          # Pass / Fail, exit 0 / 1 / 2
-python -m server.validate.cli captured_files/<run> --json   # the full verdict object
-python -m server.validate.cli captured_files/<run> --write  # also write validate.json
+# stage 3 -- validate  (no config at all: the tolerance is ledger.TOLERANCE)
+python -m server.validate.cli server/captured_files/<run>          # Pass / Fail, exit 0 / 1 / 2
+python -m server.validate.cli server/captured_files/<run> --json   # the full verdict object
+python -m server.validate.cli server/captured_files/<run> --write  # also write validate.json
 
 # the payline audit -- the other reading of the same capture
-python -m server.payline.cli captured_files/<run>               # the grid, every COMPARE, the pays
+python -m server.payline.cli server/captured_files/<run>               # the grid, every COMPARE, the pays
 python -m server.payline.cli                                    # ...over the newest usable capture
-python -m server.payline.cli captured_files/<run> --tiles-only  # crop and cut, then stop
-python -m server.payline.cli captured_files/<run> --json        # the whole record
+python -m server.payline.cli server/captured_files/<run> --tiles-only  # crop and cut, then stop
+python -m server.payline.cli server/captured_files/<run> --json        # the whole record
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.cli --profile <img> X0 Y0 X1 Y1        # measure a new game's reels
 python -m server.payline.test_paylines                          # the rule, no pixels needed
@@ -102,45 +123,116 @@ distinction a test runner needs; `payline.cli` is the same shape, `0` some line 
 pays. There is no build step or linter for the Python, and no meaningful way to add unit tests for
 the capture core, because every module there talks to live Windows APIs, a running game, a running
 `OledPanelSvc.exe`, and OBS. Verification is `--dry-run` followed by a real run, then reading
-`captured_files/<run>/run.log` and `spin.json`.
+`server/captured_files/<run>/run.log` and `spin.json`.
 `extract` runs offline against the fixtures in `server/extract/Images/` and should be checked there
 after any change. `validate` needs nothing running at all, so it is checked by re-running it over
-the run folders already in `captured_files/` — there are winning and losing ones on disk, and both
-paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
-with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures —
-the one genuinely unit-testable thing in the repo) and by re-running `payline.cli` over the
-FortuneOx run folders on disk, then **looking at `payline/tiles/contact_sheet.png`**, which is the
-only thing that shows whether the crop is right.
-after any change. `validate` needs LM Studio up but no cabinet, so it is checked by re-running it
-over the run folders already in `captured_files/` — there are winning and losing ones on disk, and
-both paths through `Sources` need covering. `payline` needs neither a cabinet nor a model: check it
+the run folders already in `server/captured_files/` — there are winning and losing ones on disk, and both
+paths through `Sources` need covering. `payline` needs no cabinet either: check it
 with `python -m server.payline.test_paylines` (the rule, against the spreadsheet's own fixtures)
 and `python -m server.payline.test_reelstrips` (the reel-stop checkpoint, against two real spins'
 stops) — between them the only genuinely unit-testable things in the repo — and by re-running
 `payline.cli` over the FortuneOx run folders on disk, then **looking at
 `payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop is right.
-The checkpoint needs the telemetry folder to exist but no cabinet: with it missing it reports
-`status: "unavailable"` and the audit still runs on the pixels.
+The checkpoint needs the game's log file to exist but no cabinet: with it missing, or holding no
+reel stops, it reports `status: "unavailable"` and the audit still runs on the pixels.
 
-`config.json` is git-ignored (it holds the obs-websocket password). A checkout has none — copy the
-table in the README's Configuration section to recreate it, or read the current password from OBS:
-Tools → WebSocket Server Settings → Show Connect Info. `OBS_WS_PASSWORD` overrides the file.
+**Two config files, split by what changes them, both in `server/`**, and `settings.load_config`
+returns them merged:
+
+- `server/config.json` — this cabinet: OBS, the i-Deck hardware, `output.dir`, the Tesseract path, the
+  server's host and port. It holds the obs-websocket password; `OBS_WS_PASSWORD` overrides it, and
+  `spin._ScrubSecrets` keeps it out of `run.log`. (It is **currently tracked in git**, password and
+  all — the README used to say otherwise. Worth deciding deliberately rather than by accident.)
+- `server/game_config.json` — the games: `active` names the running executable and `games` holds a
+  block per game (`window_class`, `log`, `targets`, `meter_roi`, `reel_strips`, `payline_geometry`).
+  No secret, so it
+  is committable. **Every per-game number is in this one block**, so adding a game is one file: the
+  payline reel fractions were a `GAMES` dict in `payline/geometry.py` until they moved here, which
+  meant a new game took a code edit and a config edit that had to agree — the same split
+  `settings.active_game` exists to close. `geometry.py` keeps the rule, not the numbers.
+
+  **A per-game value may not have a code-level default, and four did.** Each was invisible while
+  both shipped games happened to agree, and each would have gone wrong quietly rather than loudly:
+
+  | was | now |
+  |---|---|
+  | `gamelog.DEFAULT_LOG`, HuffNPuffLink's log path, reached by `game_cfg.get("log") or …` in `spin`, `watch` and `gameclick` | `gamelog.path_for(game_cfg)`, which raises. That file *exists* on this cabinet, so the fallback opened it and the stage read another game's terminal events, deck mode and pending-win carry while reporting success |
+  | `game_cfg.get("window_class", "UnityWndClass")` at four sites | `winfocus.find_game_window(game_cfg)`, one reader for process + class together |
+  | `reelstrips.DEFAULT_STRIPS` + a cabinet-level `payline.reel_stops.strips` | `games.<exe>.reel_strips`, so `active` moves the sheet with everything else — see the Payline section for the measured cross-game grid this produced |
+  | `reelstrips.PLACEHOLDERS`, the mystery-symbol names | `reel_strips.placeholders`, beside the sheet whose names they are |
+
+  The one deliberate exception is `tiles.DEFAULT_REEL_BACKGROUND`, and only because `--profile` is
+  what you run *before* a game has a block: requiring one would mean needing the config to measure
+  the config. It is safe there precisely because that function reports and never decides, and it
+  names which mask it used in `background_source`.
+
+**Both of them, and `captured_files/`, live inside `server/`** — beside the code that reads them,
+because nothing outside that package reads either. The repository root holds the two shared
+documents, `server/` and `ui/`, and nothing else. That is why `settings.py` has **two** anchors and
+picking the wrong one is a silent bug:
+
+- `SERVER_DIR` — this package. Both config files, and `settings.resolve`, so a relative path in a
+  config (`output.dir: "captured_files"`) or on the command line (`--out`, `--run-dir`) means
+  `server/…`. `games.<exe>.reel_strips.path` is resolved the same way, which is what lets the
+  shipped block say `assets/payline_excel.xlsx` and still be found by a server started elsewhere.
+- `ROOT` — the repository root, one level up. Exactly two readers, and neither is config:
+  `api.UI_DIST` (`ui/dist`, genuinely outside the package) and `runs.capture`'s subprocess `cwd`,
+  because `python -m server.capture.spin` resolves the module against the CWD and so has to run
+  from the folder that *contains* `server/`. Don't reach for `ROOT` for anything else — a path
+  anchored one level too high resolves to a folder that exists and is empty, which reads as a
+  missing file rather than as a wrong anchor.
+
+`load_config` resolves the active block onto **`cfg["game"]`** with `process` folded in, and
+`active` naming a game with no block **raises in the loader** (`settings.active_game`). That is the
+point of the split: the process name, the window class, the game log and the click targets all have
+to agree about which game is running, and they used to be four separate
+top-level keys (`target`, `gamelog`, `game.games`, `payline.reel_stops.telemetry_dir`) that a person
+had to change together — a half-done edit read as a working config and failed at the cabinet.
+`log` now feeds the payline checkpoint's reel stops as well as capture, which is what retired the
+last of those four.
+Read `cfg["game"]["process"]`, never a `target` key; `target`, `gamelog` and `game.games` are gone.
+
+**Nothing that is a measurement is configurable.** Every timing, threshold and tolerance now lives
+in the module beside the logic it governs — `spin.TIMEOUT_S` and its neighbours, `watch.IDLE_TIMEOUT_S`,
+`gamelog.IDLE_TIMEOUT_S`, `ideck.CLICK_HOLD_MS`, `gameclick.CLICK_METHOD`, `validate.ledger.TOLERANCE`,
+`payline.runner.DEFAULTS` — because a file that restates a default drifts from the measurement that
+justified it. Don't move one back into config.json to make it "tunable"; the docstring beside it says
+what has to be re-measured to change it. `config.json`'s remaining keys are all environment: paths,
+a password, a host and port, an OBS scene name.
+
+The `payline` block was removed because it duplicated `runner.DEFAULTS` key for key, and its
+`reel_stops` block was misspelled `"c"` in the shipped file — so it had never been read. `payline.*`
+overrides are still honoured if one is added back.
 
 ## Architecture
 
-Two top-level folders: `server/` (every line of Python) and `ui/`. Inside `server/`, one package
-per stage plus the API itself. No framework beyond FastAPI, which sequences and serves and owns no
-logic of its own.
+Two top-level folders: `server/` (every line of Python, both config files, and the captures) and
+`ui/`. Inside `server/`, one package per stage plus the API itself. No framework beyond FastAPI,
+which sequences and serves and owns no logic of its own. The repository root holds those two
+folders and the two shared documents, and nothing else.
 
 ```
 server/
-  settings.py         the one config loader, and ROOT (the repo root, one level up). Everything
-                       relative anchors here, not on CWD
+  config.json         this cabinet. Tracked in git, password and all
+  game_config.json    the games, and `active` naming the running one
+  captured_files/     one folder per run -- the contract between the stages. Not committed
+  requirements.txt    one venv (server/.venv) for all four stages
+  assets/             payline_excel.xlsx, the reel strips the checkpoint maps stops through
+
+  settings.py         the one loader for BOTH config files, and the two anchors: SERVER_DIR
+                       (this package -- both config files, and what `resolve` hangs a relative
+                       path off) and ROOT (one level up, for ui/dist and the capture subprocess's
+                       cwd, and nothing else). Resolves game_config.json's active game onto
+                       cfg["game"] and raises if there is no block for it. Never the CWD
   frames.py           the frame names a run folder holds (pre_spin, spin_result, win_collected),
                        and which part of the ledger each supplies. No dependencies, so every
                        stage can import it
-  geometry.py         normalized boxes -> pixels, one rule. Imported by extract (the meter strip)
-                       and payline (the reel window). No dependencies, same reason as frames.py
+  geometry.py         the DEFINITION: normalized box -> pixel edges, one rule. No dependencies,
+                       same reason as frames.py, and no opinion about what an image is
+  utils/              stage-agnostic helpers built on those. Arguments only, no config
+    roi_crop.py       crop_roi(image, box, what) -- one box in, that region out, on a numpy
+                       array or a PIL image alike. THE crop for both extract (the meter
+                       strip) and payline (the reel window). No list, no scoring, no choosing
   runs.py              the run folder as state: name it, fill it, read it back. The capture lock
   api.py               the three endpoints, /api/health, and the files the UI shows
   __main__.py          `python -m server`
@@ -163,9 +255,11 @@ server/
     runner.py         the before/after pair -> two JSON records in the run folder
     cli.py            a run folder, or loose images
     tesseract.py      find the engine binary: config, then env, then the Windows default
-    slotocr/          roi.py locates the meter strip; extraction.py + matching.py read it;
-                      panel_detection.py and ocr_utils.py are the OpenCV underneath;
-                      config.py holds FIELD_LABELS and the normalized ROI boxes
+    slotocr/          roi.py crops to the meter strip -- the ACTIVE game's meter_roi off
+                      cfg["game"], through utils.crop_roi, and nothing behind it;
+                      extraction.py + matching.py read the crop; panel_detection.py and
+                      ocr_utils.py are the OpenCV underneath; config.py holds FIELD_LABELS
+                      (the boxes are in game_config.json, not a slotocr file)
 
   validate/           STAGE 3 -- decide whether the money adds up
     records.py        read the two records as exact Decimals; a blank WIN meter means 0.00
@@ -174,13 +268,14 @@ server/
     cli.py            Pass / Fail / no verdict, with the exit codes to match
 
   payline/            THE OTHER AUDIT -- does the grid pay the lines it claims
-    geometry.py       where the reels are (normalized, per game) and what a payline is. The only
-                       file to edit for a new game, and it RAISES for a game it has no block for
+    geometry.py       what a valid reel geometry is (normalized, per game) and what a payline is.
+                       The numbers are game_config.json's games.<exe>.payline_geometry; this
+                       validates one and RAISES for a game that has no block
     tiles.py          the ROI crop, the 15 cells, the contact sheet, and --profile
     embeddings.py     one vector per cell: the pixel backend (default) and OpenCLIP
     matcher.py        COMPARE -> yes/no, three ways, the cross-check between them, and the
                        reel-stop CHECKPOINT that decides the ambiguous band on symbol names
-      telemetry.py    the game's own BaseGameReelStops, and *which* entry is this frame's spin
+      telemetry.py    the game log's own reelsStops, and *which* entry is this frame's spin
       reelstrips.py   payline_excel.xlsx -> a symbol name per cell. No openpyxl; stdlib zip+xml
     paylines.py       the rule itself. Pure logic over a matcher, no pixels -- do not touch
     report.py         payline.json, the CSV audit trail, the annotated images
@@ -214,7 +309,7 @@ There is no shared database, no session, and no in-memory state on the server. O
 run holds every stage's output, and its name is the run id:
 
 ```
-captured_files/<run_id>/
+server/captured_files/<run_id>/
     pre_spin.png  spin_result.png  spin.json  run.log  spin.mp4   capture
       (spin.json's `meters_settled_by` says which marker released the spin_result shot)
     win_collected.png                                             capture, wins only
@@ -294,11 +389,11 @@ holds the handle open, so the directory timestamp lies.
 
 - **No fixed delay may be added anywhere.** An ordinary spin is ~3.3 s; a Hold & Spin measured 53 s
   over 23 free spins.
-- `gamelog.idle_timeout_s` (8 s) is the real wait and **restarts on every event**. A flat total
+- `gamelog.IDLE_TIMEOUT_S` (8 s) is the real wait and **restarts on every event**. A flat total
   timeout was tried and cut a Hold & Spin off mid-feature.
-- `spin.timeout_s` (180 s) is only a backstop. `spin.after_delay_ms` (800) is the sole deliberate
+- `spin.TIMEOUT_S` (180 s) is only a backstop. `spin.AFTER_DELAY_MS` (800) is the sole deliberate
   sleep, letting the last frame settle before the after shot.
-- `spin.meter_settle_s` (90 s) is the **second** wait, and only after a `win` — see below. It is a
+- `spin.METER_SETTLE_S` (90 s) is the **second** wait, and only after a `win` — see below. It is a
   flat bound rather than a restarting idle timeout, and that is deliberate: it waits for one
   specific marker measured to arrive within 44.8 s, and the log went silent for 43.8 s inside one
   of those waits.
@@ -309,9 +404,9 @@ holds the handle open, so the directory timestamp lies.
   that missed the spin. It polls for the condition; it does not sleep a measured amount.
 
 `watch.py` has the same rule and four windows instead of one, because there the log going quiet
-means different things (`watch.idle_timeout_s` 35 s by default, `watch.quiet_s` 2 s only for a
-wager change with no outcome to wait for, `watch.long_wait_s` 90 s once the game has announced a
-bonus intro, and `watch.player_wait_s` 0 — unbounded — while the game waits for the *person*). 35 s
+means different things (`watch.IDLE_TIMEOUT_S` 35 s by default, `watch.QUIET_S` 2 s only for a
+wager change with no outcome to wait for, `watch.LONG_WAIT_S` 90 s once the game has announced a
+bonus intro, and `watch.PLAYER_WAIT_S` 0 — unbounded — while the game waits for the *person*). 35 s
 is not a typo: 93% of actions close on the game's own terminal event, so the timeout is a fallback,
 and the silences inside a feature run to 29 s. It
 also never *sleeps* for `after_delay_ms` — it schedules the after shot and keeps polling, because
@@ -439,7 +534,7 @@ Three things there invert the i-Deck's rules, and each was measured rather than 
   injection landing is what makes the two silences conclusive (the point is live, so it was the
   method). Unity reads Raw Input; SDL reads its message queue. **`post` stays selectable and
   documented as not working here** — a method that silently does nothing is worth being able to
-  name — and there is no fallback between them, for `ROI_METHOD`'s reason.
+  name — and there is no fallback between them, for the ROI crop's reason.
 - **The game must be topmost**, because injected input follows the cursor rather than an HWND.
   `winfocus.bring_to_front` is the one thing in the package that takes the foreground and must
   never be called from the capture path. `click` refuses to inject when another window is under
@@ -448,16 +543,16 @@ Three things there invert the i-Deck's rules, and each was measured rather than 
 - **Targets are normalized fractions**, because there is no `virtual_oled.xml` for Unity's UI and
   the client area moves: 612x961 when the ROI boxes were tuned, 638x1048 at the first probe,
   510x928 an hour later. `[0.124, 0.917]` landed at all of them.
-- **And they are keyed by `target.process`** (`game.games["FortuneOx.exe"]`, resolved by
-  `gameclick.targets_for`), because normalizing survives a *resize* and not a *different game*.
+- **And they are keyed by the game** (`game_config.json`'s `games["FortuneOx.exe"].targets`,
+  resolved onto `cfg["game"]` and read by `gameclick.targets_for`), because normalizing survives a
+  *resize* and not a *different game*.
   HuffNPuffLink's `take_win` is `[0.124, 0.917]` of 612x961; FortuneOx's is `[0.0713, 0.9724]` of
   1080x1849, and 0.917 of 1849 px is the empty row beside FortuneOx's DEMO label — 100 px above
   its TAKE WIN. Run `2026-08-12_131459` is that mistake: click delivered, landed on nothing,
-  capture dead with the win still on the offer. So `game.games` with no block for the running game
-  **raises and names the process**; it must never fall back to `game.targets` or to another game's
-  point, for `ROI_METHOD`'s reason. The flat `game.targets` shape is still honoured when
-  `game.games` is absent. `--calibrate` measures one from a
-  real click and refuses to print a point the log did not confirm.
+  capture dead with the win still on the offer. So an `active` game with no block **raises in
+  `settings.active_game`**, before OBS is even launched, and a block with no `targets` is refused
+  by `targets_for`; neither may ever fall back to another game's point, for the ROI crop's reason.
+  `--calibrate` measures one from a real click and refuses to print a point the log did not confirm.
 
 `touch` is the glass and only the glass — an i-Deck press logs `SpinButtonMsg` with no `TouchMsg`.
 But all 87 `TouchMsg` in HuffNPuffLink's log hit a live widget, so **nothing says what a touch on
@@ -478,7 +573,7 @@ that file's 80 `CreditMeterTouchMsg` lines. Any new game needs this checked, not
 `idle_state`, `gamble_state`, `spin_started` and `deck_changed` all fire, so the collect path
 works — but `bet_locked`, `reels_stopped` and `final_grid` come back **0**, because FortuneOx
 splits its logging into `FortuneOx_Client.log` and `FortuneOx_Server.log` and those three are in
-the *server* file, which `gamelog.path` does not point at. Consequences, neither of them fixed:
+the *server* file, which `games.<exe>.log` does not point at. Consequences, neither of them fixed:
 `classify()` reports `reel_stops`/`final_stops` as empty for this game, and `gameclick.verdict`'s
 closing ", and did not start a spin" rests on `bet_locked`, which for FortuneOx can never appear.
 That clause is only wrong if a click lands on a bet button and *also* collects — FortuneOx's
@@ -516,10 +611,10 @@ one rule serve both cases.
 The cost of that choice is a third OCR pass over a meter `spin_result` already read, and on this
 very run it fails: `extract/win_collected.json` has `win` and `bet` both `null`, so validate takes
 the win as 0.00 and reports Fail with a `difference` of exactly −24.00. **That is an `extract` bug,
-not a crop and not a game behaviour** — the ROI crop is textbook, and the three ROI methods each
-read a different subset of it (`configured` gets cash at confidence 0.0 and nothing else; `bands`
-gets win 24.00 at 95 and bet 1.00 at 93 but no cash; `dynamic` gets nothing). Fix it in stage 2,
-not by moving where validate reads the win.
+not a crop and not a game behaviour** — the ROI crop is textbook, and the box reads only cash, at
+confidence 0.0. That the pixels are legible was measured while the since-removed band method was
+still in the tree: over the same frame it read win 24.00 at 95 and bet 1.00 at 93. Fix it in stage
+2, not by moving where validate reads the win.
 
 Old two-frame folders (`extract/before.json`) and the `before_spin.json` sample pair are no longer
 read at all; `Sources.legacy`, `legacy_stale_win` and `collected_separately` are gone with them.
@@ -573,9 +668,20 @@ OBS's own profile names. Hence `obs_client.Recording`, and three rules in it:
 
 The POC this came from hardcoded pixels measured on a 1073x1852 screenshot. This cabinet captures at
 1080x1849, so those numbers were already ~7 px off, and on a bigger screen they are meaningless.
-`payline/geometry.py` is fractions at three nested levels, because the thing being located is nested:
+The geometry is fractions at three nested levels, because the thing being located is nested:
 `reels_roi` is a fraction of the **frame**, `reel_bounds`/`row_bounds` are fractions of that **ROI**,
 and `inner_margin_frac` is a fraction of each **cell**.
+
+**Those numbers live in `game_config.json`**, as `games.<exe>.payline_geometry` — `label`,
+`reels_roi`, `reel_bounds`, `row_bounds`, `inner_margin_frac` — beside the same game's `meter_roi`,
+`targets` and `log`, and `settings.active_game` folds the whole block onto `cfg["game"]`, so
+`geometry_for` reads it from exactly where `extract` reads `meter_roi`. `payline/geometry.py` holds
+the **rule**: what a valid block is (`Geometry._validate`, plus `REQUIRED_KEYS` and the coercion
+above it, because a hand-edited block fails at runtime where a Python literal failed while it was
+being written), what a payline is (`DEFAULT_PAYLINES`), and the refusal to guess. `measured_on` and
+`notes` are optional and the shipped block carries neither — the FortuneOx provenance is in
+`geometry.py`'s docstring and in the paragraph below, and `describe()` reports `measured_on: null`,
+which `report.print_results` and the UI both omit rather than print.
 
 **The margin is the one that matters most and is easiest to get wrong.** Left as the POC's flat 8 px
 it is a fifth of a cell at 0.6x and a fortieth at 3x. Verified by resampling one frame and re-reading
@@ -591,18 +697,37 @@ one. Rows have no gutter at all, so their even three-way split is the layout rat
 
 `server/geometry.py` owns the fraction→pixel rule and is shared with `extract`, which crops the meter
 strip by the same one. Verified equivalent to the definition it replaced over 200,000 random
-(image size, box) pairs, so `crop_horizontal_bands`' shared-edge guarantee is untouched.
+(image size, box) pairs, so the shared-edge guarantee — two boxes sharing an edge round to the same
+pixel, at any image size — is untouched.
 
-### Keyed by `target.process`, and it must never fall back
+**Both of payline's levels go through it, cells included.** `tiles.cell_boxes` used to round its own
+fractions — the last restatement of that rule in the tree — and now composes the inner margin into
+fractions of the ROI and hands the box to `pixel_box`, which also gets the clamping and the
+empty-cell answer for free (a cell `pixel_box` returns None for is exactly the cell the old
+by-hand test refused, so the `PaylineError` is unchanged). Verified to change nothing: 676,159 cell
+boxes over 45,561 ROI sizes — the real reel windows from 375x189 to 3489x1529, 30,000 random sizes,
+and every size from 1x1 up — and 225 real tiles cut from three frames at five scales, byte for byte
+identical, with 0 mismatches and every difference a collapsed cell both versions raise on.
 
-A game with no block **raises and names the process**. Fractions survive a change of scale; they do
+**The reel window is cropped by `utils.crop_roi`, the same call `extract` uses for the meter strip.**
+One box in, that region out, on a PIL image here and a numpy array there. `crop_reels` translates
+`RoiCropError` to `PaylineError` because that is the type this package's callers catch — an escaping
+`ValueError` would reach the browser as a 500 with a traceback instead of as the prose it already is.
+There is exactly one box, `geometry_for`'s, and never a choice between boxes: a wrong reel window
+does not fail, it reads a confident grid off unrelated pixels.
+
+### Keyed by the active game, and it must never fall back
+
+A game with no `payline_geometry` **raises and names the process**, and lists which games do have
+one. Fractions survive a change of scale; they do
 not survive a change of aspect ratio or of game art. FortuneOx's reel window applied to
 HuffNPuffLink's 612x961 portrait window lands on unrelated pixels and reports a perfectly confident
-grid. This is `game.games`'s rule for `gameclick`'s normalized click points, for the identical
+grid. This is the rule for `gameclick`'s normalized click points, for the identical
 reason — run `2026-08-12_131459` is the one where a fallback would have been indistinguishable from
 correct behaviour until the money was wrong.
 
-Adding a game is `payline.cli --profile <image> X0 Y0 X1 Y1` plus a block. **`--profile` reports, it
+Adding a game is `payline.cli --profile <image> X0 Y0 X1 Y1` plus a `payline_geometry` block in
+`game_config.json` — no code edit. **`--profile` reports, it
 does not detect**, and that is deliberate: two auto-detection approaches were written and measured
 against this cabinet's nine FortuneOx frames, and both failed.
 
@@ -653,11 +778,27 @@ and a row, so the two cells rarely carry the same overlay.
 
 So between 0.70 and the threshold, the decision is handed to an oracle rather than to a number.
 `matcher.ReelStopMatcher` wraps whichever strategy is running and, in that band only, answers on
-**symbol names**: `telemetry.py` reads the spin's `BaseGameReelStops` out of the game's own telemetry
-log, `reelstrips.py` maps those five numbers through `server/assets/payline_excel.xlsx`, and two names
+**symbol names**: `telemetry.py` reads the spin's `reelsStops` out of the game's own log — the same
+`games.<exe>.log` capture watches — `reelstrips.py` maps those five numbers through that game's own
+spreadsheet, `games.<exe>.reel_strips.path`, and two names
 either match or they do not. Outside the band nothing changes — a confident pixel reading is never
-overturned, which is what stops a stale telemetry file or a drifted strip from rewriting a verdict it
+overturned, which is what stops a stale log or a drifted strip from rewriting a verdict it
 has no business touching.
+
+**Both halves of that sentence are keyed by the same `active`, and the strips half was not.** The
+sheet was `reelstrips.DEFAULT_STRIPS`, a module constant, overridable only by a cabinet-level
+`payline.reel_stops.strips` — so `active` switched the reel geometry, the meter box, the click points
+and the log, and left the reel layout behind. It is the worst place in the app for that, because a
+reel strip is a table of *this game's* symbol names and a wrong one does not fail: it names symbols
+confidently. Measured on this machine before the change, with a `payline_geometry` block added for
+HuffNPuffLink — whose log is the one that actually carries `reelsStops` here — the checkpoint read its
+real stops `[68, 18, 43, 51, 1]`, mapped them through **FortuneOx's** sheet, and reported
+`status: "on"` with a grid of Ace / Mystery1 / King. Now `strips_for(cfg)` reads
+`games.<exe>.reel_strips` and a game without one stands the checkpoint down (`status: "unavailable"`,
+naming the key), so the pixels decide; `reel_stops.strips_game` and `reel_stops.placeholders` in
+`payline.json` say whose sheet a grid came from, "whose reel strips were these?" now being a question
+with an answer. `payline.reel_stops.strips` is retired and **logs a warning if it is still set**,
+because a cabinet-level path that silently stopped being read is the same class of trap.
 
 **The mapping is `strip[reel][stop + row - 1]`, and it was measured, not assumed.** The mapping
 supplied with the request (stops `[24, 79, 153, 25, 0]`) reproduces all fifteen names exactly, and run
@@ -667,20 +808,25 @@ fixtures in `test_reelstrips.py`. Position 200 is an `X` terminator in every ree
 
 Four things are load-bearing, and each is a way to be confidently wrong:
 
-- **It only ever speaks about the spin the frame can be *proved* to be.** The stops entry lands 3-4 s
-  before the `spin_result.png` it belongs to (measured across six consecutive captures), so the entry
-  chosen is the last one at or before the frame's own mtime. When there is none, the checkpoint
-  **stands down** and reports `status: "unavailable"` rather than judging on the newest entry in the
-  file. Run `2026-08-13_114200` is why: captured at 11:42 against a telemetry file that begins at
+- **It only ever speaks about the spin the frame can be *proved* to be.** The stops line lands a few
+  seconds before the `spin_result.png` it belongs to (1.8 s and 2.5 s on the two run folders on disk),
+  so the entry chosen is the last one at or before the frame's own mtime. When there is none, the
+  checkpoint **stands down** and reports `status: "unavailable"` rather than judging on the newest
+  entry in the log. Run `2026-08-13_114200` is why: captured at 11:42 against a log that begins at
   12:08, where the nearest entry is a spin four hours later. `payline.reel_stops.allow_latest_fallback`
   opts into the by-hand behaviour ("open the newest log, take the last stops"), which is right only
   while auditing the spin you have just made — and `matched: false` still says so in the record.
 - **A mystery symbol cannot decide a pair.** `Mystery1`, `Mystery2` and `Mystery (Orb)` are 15% of
   every strip and they reveal as other art: the supplied example has `Mystery1` at E13 where the frame
   shows an Ace, and run `2026-08-13_155048` has it on all three cells of reel 1 where the frame shows
-  three Ox. So `reelstrips.PLACEHOLDERS` abstains and the pixel verdict stands. `WILD` is deliberately
+  three Ox. So those names abstain and the pixel verdict stands. `WILD` is deliberately
   *not* in that set — it has its own art (the firecrackers) and was drawn as itself on both frames
   checked. Wild *substitution* is not modelled at all; `paylines.py` implements plain COMPARE.
+  The names live in `reel_strips.placeholders` beside the sheet they describe, not in a module
+  constant, and the key is **required rather than defaulted** — the failure is asymmetric, since a
+  set that is too large only makes the checkpoint abstain and the pixels decide, while one that is
+  too small settles a COMPARE on a name the screen is not showing. `[]` is a statement that this
+  game has none and is taken at its word; an absent key is only an omission, and is refused.
 - **Every pair it reaches is reported, agreed with or not** — `reel_stops.adjudications` in
   `payline.json`, a line under the COMPARE in the CLI and in the UI table, and
   `pays_without_checkpoint` beside the verdict. One measured disagreement between the sheet and a
@@ -692,12 +838,27 @@ Four things are load-bearing, and each is a way to be confidently wrong:
   `pays_without_checkpoint` exists: without it the cross-check table appears to contradict the verdict
   above it.
 
-The telemetry lines are **not valid JSON and must not be parsed as such** — `"Event":FortuneOx
-[monitoring]` has a bare word where a value belongs, `ProgressiveQualified:False` is Python's
-spelling, and `"2026-08-13T15:58:0905:30"` is missing the `+` of its offset. The newest file is also
-not necessarily the one with the stops: only the `_server_` files carry the marker, and a `_client_`
-file is newer than the server file here, so the search is "the newest file that actually contains an
-entry". The spreadsheet needs no new dependency (`zipfile` + `xml.etree`), and its symbol names are
+**The stops come from the game log, not from the platform's telemetry service, and that swap was
+measured before it was made.** The old source was `C:\logs\Telemetry\Data\<game>\*.log`'s
+`BaseGameReelStops`, found through a `payline.reel_stops.telemetry_dir` setting that fell back to a
+path derived from the process name. Over every entry both sources hold on this machine — 595
+game-log against 593 telemetry, paired by timestamp within 5 s — **593 agree and 0 disagree**, the
+game line landing 0.51 s after the telemetry line (median; −0.03 s to +1.00 s), and the two extras
+are spins the telemetry missed. So one file, one setting, and `telemetry_dir` and its
+`DEFAULT_DIR_ROOT` are gone; `telemetry.py` keeps its name and reads `cfg["game"]["log"]`.
+
+Three things about that reader are load-bearing. **The marker is anchored on its handler**
+(`[Slot.HandleSlotReelStoppedMessage] reelsStops[...]`), not on the word `reelsStops` — all 595
+occurrences here are that handler's, but the same log carries `LastStopsMsg`, `StopsMsg`,
+`SyncStopsMsg` and `HandleInternalSlotReelsStoppedMsg`, and `gamelog.EVENTS` narrows for the same
+reason. **The rotated siblings are merged**, because the log rotates at ~20 MB and the rotated file
+here holds 345 of the 595 entries — reading only the live path would stand the checkpoint down on
+any run older than the last rotation. **It is not a fallback for a game that does not log it**:
+FortuneOx writes this marker to `FortuneOx_Server.log`, which `games["FortuneOx.exe"].log` does not
+point at, so the checkpoint reports `unavailable` there and the pixels decide — which is what it did
+before, there being no FortuneOx telemetry folder on this machine either.
+
+The spreadsheet needs no new dependency (`zipfile` + `xml.etree`), and its symbol names are
 `t="str"` **cached XLOOKUP results against an external workbook** — a reader that handles only shared
 and inline strings finds an empty sheet, which is what the first version of `reelstrips.py` did.
 
@@ -736,7 +897,7 @@ instead of papering over it.
 ### `payline.image` is an override, and it invalidates the tiles
 
 Set it and it is read *instead of* the captured frame, whether or not captures exist -- because a
-chosen screenshot has to be demonstrable without emptying `captured_files/` first. It is stated as
+chosen screenshot has to be demonstrable without emptying `server/captured_files/` first. It is stated as
 a mode rather than flagged as a warning: a supported feature that renders as an error is its own
 kind of bug. What keeps it honest is that it is never silent -- logged, named in `image_source`,
 and printed above the image on the page -- and that a missing path is refused by name rather than
@@ -807,7 +968,7 @@ the numbers were only trustworthy *because* the sheet showed the crop had landed
 Also worth knowing before trusting the pays as a paytable check: the five lines are Payline.xlsx's
 spec, not FortuneOx's real paytable, and `classify()` cannot help — CLAUDE.md's note that
 `reels_stopped` and `final_grid` come back **0** for FortuneOx (they are in `FortuneOx_Server.log`,
-which `gamelog.path` does not point at) means there is no log oracle for the symbol grid on this game.
+which `games.<exe>.log` does not point at) means there is no log oracle for the symbol grid on this game.
 
 ## Extract
 
@@ -819,73 +980,91 @@ the two halves disagreed before they were joined. Renaming a key here is the sin
 change, because everything downstream iterates that dict. The lists beside the keys are OCR
 *synonyms* — what Tesseract might have read off the screen — so `BALANCE` stays in the list.
 
-### Three ways to crop the ROI, one selected, no fallback
+### One way to crop the ROI: the active game's box, and no fallback
 
-Everything about *locating* the meter strip is in `slotocr/roi_config.py` — that file is the only
-one a person edits to change the crop, and `slotocr/config.py` is the constants for *reading* it.
-`ROI_METHOD` names one of three methods and that is the one that runs:
+**The boxes live in `game_config.json`**, one per game — `games.<exe>.meter_roi`, a normalized
+`[x0, y0, x1, y1]` — and that file is what a person edits to change the crop; there is no separate
+`roi_config.py` any more, and no code-level fallback if a `cfg` carries none. `slotocr/config.py`
+is the constants for *reading* the crop once it's made, not for locating it.
 
-| `RoiMethod` | What it crops | Cost per frame |
-|---|---|---|
-| `BANDS` | the frame cut into `BAND_COUNT` full-width horizontal strips, keeping `BANDS` (an int, or an inclusive `(first, last)` pair) | ~4 s — no OCR to decide anything |
-| `CONFIGURED` | the best of the normalized `[x0, y0, x1, y1]` boxes in `CONFIGURED_BOXES`, one per game layout | ~8 s — each candidate costs a full extraction to validate |
-| `DYNAMIC` | whatever OpenCV dark-panel detection finds, with both extraction methods voting on which row is the meter bar | up to 30 s — one extraction over the whole screenshot on top of the crop's |
+`roi.locate_meter_roi(image, cfg)` crops to **`cfg["game"]["meter_roi"]` — the active game's box,
+the only one it looks at** — through `utils.crop_roi`, and returns a `MeterROI` of the crop and
+`config:<exe>`. `roi_source` in each record is that string, and it is always the active game now.
 
-**There is no fallback between them**, and that is the point: the earlier version tried the boxes
-and then raced the winner against dynamic detection, which made "which pixels was this number read
-from?" a question only `roi_source` could answer afterwards, and charged every frame for the losing
-methods. A crop that misses the meter bar now shows up as null meters. The multi-box race *inside*
-`CONFIGURED` is not a fallback and stays — those boxes are alternative layouts of the same thing,
-and choosing between them is what that method *is*.
+**There is nothing behind the box.** A crop that misses the meter bar shows up as null meters, which
+is the failure worth having. No active game, an active game with no `meter_roi`, and a box that is
+not a region of the image are three separate `RoiCropError`s, each naming what to edit, raised before
+anything is OCR'd. `extract.cli`'s `except (OSError, ValueError)` still falls back to `cfg = {}` for
+the *rest* of that stage's config (the Tesseract path), and ROI location then fails by name.
 
-`locate_meter_roi(image, method=None)` dispatches through `roi._METHODS`, which is keyed by every
-`RoiMethod` member; `process_image`/`extract_frames` take `roi_method` so the CLI can override it
-(`--roi-method bands`) and so config.json and the UI can later. `roi_source` in each record names
-what ran and what it chose: `bands:19/24`, `config:hnpl_portrait`, `dynamic`, or
-`dynamic:whole-image` (dynamic detection found no row to crop to — that name replaced a bare
-`"none"`, which said nothing about why).
+**Never add a fallback to another game's box.** Same rule, same reason, as `payline.geometry_for` and
+`gameclick.targets_for`: normalized fractions survive a change of screen *size* and not a change of
+*game*, and a box on unrelated pixels reports a confident wrong number instead of failing.
 
-**Tune a crop on the values, never on how many fields it resolved.** Sweeping six band geometries
-over this cabinet's five frames in `Images/`, `(32, 25)` scored the *most* fields — 10 against
-`(24, 19)`'s 7 — and was the worst of them: on `image1.png` it read cash as **108900.00** where the
-balance is $1,089.00, and invented a win of **89.00** out of the fragment `",089.00"`. Three
-confident fields, two fabricated. The shipped `24/19` never disagrees with the configured box on
-any frame; where it can't read a meter it comes back blank, which is the failure you want. Note
-also that a band is right for *one* layout — `24/19` scores 7 of 42 across all fourteen samples
-against the boxes' 26, because nine of them are the `bottom_bar` layout whose meter is band 21.
+#### The box race is gone, and is not to be reintroduced
 
-Two rules inside `CONFIGURED` were each bought with a wrong reading:
+Every game's `meter_roi` used to be cropped in turn, each candidate validated by running the real
+extraction over it and ranked by how many fields came back, best crop winning:
+`utils.crop_best_box` (with `BoxCrop` and a `confident` early exit) choosing, `roi.score_crop` and
+`roi._fields_resolved` scoring, `roi._candidate_boxes` building the list off `cfg["games"]`, and
+`MeterROI.extracted` carrying the winner's extraction forward so the pipeline did not repeat it. All
+of that is deleted, `cfg["games"]` included — `settings.load_config` no longer publishes it, and
+`cfg["game"]` is the only view of the games. Four reasons it should not come back:
 
-- **The best box wins, not the first that resolved anything** (`roi._locate_meter_roi_from_config`).
-  A box aimed at another layout can land somewhere unrelated on this screenshot and still scrape
-  one plausible number out of it. Under the original first-past-the-post rule, adding a box for
-  this cabinet silently degraded four of the sample images that were fine before it.
-- **`best_score` starts at −1, not 0**, so the first usable box always becomes the winner. With
-  nothing behind this method any more, a frame where no box resolved a single field still has to
-  return pixels; it returns the head of the preference order and warns, rather than reporting a
-  whole-image read nobody asked for.
+- **It chose which pixels to believe by reading them.** "Which pixels was this number read from?" was
+  answerable only after the fact, via `roi_source`.
+- **It ranked on a field count**, which is the one thing the band sweep below proves you must never
+  tune a crop on. The two rules were in direct contradiction and the sweep's is the one with a wrong
+  reading behind it.
+- **It was the only stage whose answer did not depend on `active`**, so a mis-set `active` was
+  invisible here and fatal everywhere else.
+- It cost a full extraction per candidate, ~8 s a frame each, to pick a box config already named.
 
-`CONFIDENT_FIELDS` is **2**, not 3, and that is a performance decision as much as a correctness
-one. WIN is genuinely blank on most before-frames, so a box that found the meter bar perfectly
-still comes back with two fields; requiring three meant every ordinary frame went on to try every
-remaining box as well, and the `/api/extract` call took **27 s** a pair instead of ~2 s. Two is
-also the right line on correctness, because one is exactly what a *wrong* box looks like.
+Measured over the fourteen `Images/` fixtures: **the race was only ever choosing between the two
+layouts.** `active: HuffNPuffLink.exe` resolves 11 fields, `active: FortuneOx.exe` resolves 18, and
+29 is exactly what the race resolved — every value identical, including the `230313.00` misread.
+The real captured frames re-read byte-identically, `validate.json` included. The cost, and it is
+real: **it now takes two `active` settings to cover all fourteen fixtures**, because a fixture of a
+non-active layout reads nothing rather than being rescued by a stranger's box. That is the point of
+the change, not a regression to fix — `server/extract/README.md` records the two commands.
 
-`hnpl_portrait` is this cabinet's box, and its bottom edge is 752 px of 961 and deliberately not
-754: the meter strip is only ~26 px tall, and two more rows of pixels pull the bright COLLECT row
-into the crop, which moves the Otsu threshold far enough to lose the BET value entirely. It was
-swept over y 722–727 × 750–756 against both frames of a real run; every combination but y1=754
-reads cash and bet on both. (That same edge is why band `19/24`, which runs to 761 px, loses BET on
-`before.png`.) Re-run `python -m server.extract.cli server/extract/Images` after touching any of
-this — the fourteen samples there are the regression suite — and re-run it once per method, because
-no method covers for another any more.
+**Two other methods, and the horizontal-band sweep that used to justify the early exit, were
+removed on request** — `BANDS` (the frame cut into equal horizontal strips) and `DYNAMIC` (OpenCV
+dark-panel detection, with both extraction methods voting on which row is the meter bar) — along
+with the `RoiMethod` enum, the `ROI_METHOD` constant, and the CLI's `--roi-method`. What is worth
+keeping from that sweep is the rule it proved: **tune a crop on the values it reads, never on how
+many fields it resolved.** Sweeping six band geometries over this cabinet's five frames in
+`Images/`, the geometry that scored the *most* fields was the worst of them — it read a $1,089.00
+balance as **108900.00** and invented a win of **89.00** out of the fragment `",089.00"`. Three
+confident fields, two of them fabricated. Don't reintroduce a field-count-driven method without
+also reintroducing that rule, or a config change that scores well can still be confidently wrong.
 
-Band edges come from the *fractions*, not from a per-band pixel height (`roi.crop_horizontal_bands`
-builds a normalized box and hands it to the same `crop_normalized_box` a configured box uses). That
-is what keeps band N's top edge exactly on band N−1's bottom edge when the count doesn't divide the
-height evenly: 24 bands over 961 px are 40 and 41 px tall and sum to exactly 961. A band outside
-`1..BAND_COUNT` raises and names the constant to fix, because `crop_normalized_box` clamps — `BANDS
-= 25` of 24 would otherwise quietly crop the bottom row of pixels and read every meter blank.
+The observation the race was built on is worth keeping even though the race is not, because it is the
+argument for cropping one named box: **a box aimed at another layout can land somewhere unrelated on
+a screenshot and still scrape one plausible number out of it.** That is why adding this cabinet's box
+under the original first-past-the-post rule silently degraded four of the fourteen sample images, and
+"best box wins" was a patch on the symptom — it read every box and compared them. Cropping only the
+active game's box removes the premise instead: nothing lands on unrelated pixels unless `active` is
+wrong, and an `active` that is wrong fails loudly in `settings.active_game`, `gameclick.targets_for`
+and `payline.geometry_for` already.
+
+`HuffNPuffLink.exe`'s `meter_roi` is this cabinet's box, and its bottom edge is 752 px of 961 and
+deliberately not 754: the meter strip is only ~26 px tall, and two more rows of pixels pull the
+bright COLLECT row into the crop, which moves the Otsu threshold far enough to lose the BET value
+entirely. It was swept over y 722–727 × 750–756 against both frames of a real run; every
+combination but y1=754 reads cash and bet on both.
+
+`FortuneOx.exe`'s `meter_roi` in the shipped `game_config.json` is an **inferred** assignment, not
+a measured one: it is the box that used to be labelled `bottom_bar` (no game name at all), carried
+over because its aspect ratio — "the 0.58 the box above was tuned on" — is within 0.7% of
+FortuneOx's own client area (1080x1849, 0.584). Nine of the fourteen `Images/` fixtures read via
+this box, and none of them are confirmed to be FortuneOx screenshots; re-measure it against a real
+FortuneOx capture before trusting it at the cabinet -- crop a real `spin_result.png` to the meter
+bar's pixel box and divide by the image's width and height, the way `hnpl_portrait` was measured.
+
+Re-run `python -m server.extract.cli server/extract/Images` after touching any of this — the
+fourteen samples there are the regression suite, and with nothing behind the boxes a bad crop is
+not covered for by anything else.
 
 ### A value is never to the left of its label, and that is a rejection
 
@@ -923,7 +1102,7 @@ Three things are load-bearing:
   above safe to enable at all. They were part of the same dead code, so switching them on is new
   behaviour rather than a restoration, and unguarded they invented `win = 200.0` on three of the
   fourteen fixtures: the bet-level buttons (100/200/300/500/800) nine label-heights below the WIN
-  label in a full-screen `dynamic` crop. **Bounding the vertical distance instead does not work** —
+  label in a full-screen crop. **Bounding the vertical distance instead does not work** —
   one of those pairings measures a gap of 0.03 label heights, because tesseract's box for that
   `win` swallowed the panel divider and came back 173 px tall against the value's 56. A bare
   integer that is not even on its label's row is a decoy every time; the same integer *on* the row
@@ -961,9 +1140,10 @@ invented `win=1.0` on three of them by reaching past the blank WIN cell to BET's
 label it found but whose row holds no value it can claim (`labelled_fields`). That is a positive
 reading of an empty meter, and it closes the two holes an absent key opens: `pipeline` merges the
 word method over the per-cell one, and `run_elimination_pass` only fires for a field in `missing`.
-The record itself is byte-identical to the not-found record, so the output contract is unchanged;
-`roi._fields_resolved` must not count a blank, or a box wins the configured race on meters it
-could not read.
+The record itself is byte-identical to the not-found record, so the output contract is unchanged.
+(This used to carry a second consequence — `roi._fields_resolved` must not count a blank, or a box
+wins the ROI race on meters it could not read. The race and that function are gone; the blank record
+stands on its own two reasons above.)
 
 One live consequence, worth knowing before touching this again: the rejection is what *exposed*
 the `-00` misread on `2026-08-10_173258`. WIN there used to take CASH's `$2,185.10` and lose it
@@ -1098,24 +1278,10 @@ the tolerance included, is a `Decimal`, so the boundary sits exactly on half a c
 wherever binary float lands. `working` is that sum written out as a sentence, which is what the CLI
 prints and what the UI falls back to when the meters could not be read as numbers.
 
-**This was one call to a local LLM** (LM Studio, qwen2.5-7b, `ChatOpenAI(...)
-.with_structured_output(Verdict, method="json_schema")`) and the model owned every number. Removed
-on request. What is worth keeping from it:
-
-- The reply *shape* is unchanged — `Verdict` still has `working`, `computed_cash`, `difference`,
-  `verdict` in that order — so `runner`, `validate.json`, the CLI and the UI ledger did not move.
-  The only field dropped is `model`.
-- `git log` holds the model version and the eight-record table that measured its schema (`working`
-  declared before the numbers was worth 6 of 8 verdicts; amounts typed `float` rather than `str`
-  was worth 8 of 8 sums; a JSON Schema `pattern` makes LM Studio answer 400). Go there before
-  reintroducing a model, and re-measure — none of those numbers transfer across a model change.
-- Re-running the 14 folders on disk that hold a `validate.json`, **11 agree** and all three
-  disagreements are the model having been wrong: `2026-08-12_144541` (model: fail, computed 1075.41
-  — actually `1075.49 - 0.88 + 0.20` = 1074.81, exact), `2026-08-12_162510` (model: fail, computed
-  999.94 — actually 998.94, exact) and `2026-08-12_130905` (model: `Connection error.`). Two real
-  spins were reported out by 60c and by a dollar because the model mis-added three two-place
-  numbers it had itself written out correctly one line above. Across all 22 folders: 15 pass,
-  0 fail, 7 error, every error a `pre_spin` record `extract` could not read.
+**`Verdict` is `working`, `computed_cash`, `difference`, `verdict`, in that order**, and that
+shape is what `runner`, `validate.json`, the CLI and the UI ledger all read — changing it moves
+four things. Across the 22 folders on disk the stage reports 15 pass, 0 fail, 7 error, every error
+a `pre_spin` record `extract` could not read, which is the only way this stage reaches no verdict.
 
 Which frame each number comes from is the correctness question in this stage — it always was, the
 arithmetic never being in doubt — and it is one rule:
@@ -1134,9 +1300,9 @@ cannot be added into the sum by mistake. Verified on run `2026-08-11_212236`:
 Only the three-frame layout is read; the old `before.json`/`after.json` folders and the
 `before_spin.json` sample pair were dropped when this was simplified.
 
-Nothing outside this stage needs to be up for it to run — no cabinet, no OBS, no model — and
-`/api/health` has no check for it, deliberately: there is nothing that could be down. The LM Studio
-probe that used to sit there gated the whole meter page on a server that has no part in it any more.
+Nothing outside this stage needs to be up for it to run — no cabinet, no OBS, nothing over the
+network — and `/api/health` has no check for it, deliberately: there is nothing that could be
+down, and a check that can never fail would only gate the meter page for no reason.
 
 ### A blank WIN meter is zero; a blank CASH meter is a failure
 
@@ -1152,8 +1318,12 @@ a Pass.
 Only the *second* record's inference is reported. The only field `pre_spin` can ever infer is
 `win`, which takes no part in the sum, and badging it would point the UI at the wrong ledger row.
 
-`DEFAULT_TOLERANCE` (half a cent) is an **input**, overridable from `config.json`'s
-`validate.tolerance`, and it is compared as a `Decimal` against a `Decimal`. Money crosses the JSON
+`ledger.TOLERANCE` (half a cent) lives beside the comparison it governs and is **not a config key** —
+it was `config.json`'s `validate.tolerance`, and a file that restates half a cent is one more thing to
+keep in step with the code. `judge` and `validate_records` still take it as an argument, so a caller
+can widen it deliberately; the consequence worth knowing is that **this stage now imports `settings`
+nowhere**, so it runs against a checkout with no config at all, and `validate.cli` has no `--config`.
+It is compared as a `Decimal` against a `Decimal`. Money crosses the JSON
 boundary as strings — the values read off the frames are `Decimal` the whole way, and `ledger.pad`
 renders them, so `validate.json`'s `record` is digit-for-digit what was read off the meters.
 

@@ -14,19 +14,13 @@ import { cn } from "@/lib/utils"
  * One payline at a time: its path, every COMPARE behind its verdict, and the line drawn on the
  * pixels it was read from.
  *
- * The lines are behind a dropdown rather than stacked, because five COMPARE tables is more
- * scrolling than reading -- and the picker states every line's verdict in its own row, so
- * choosing one is not blind. The selected line's cells are shown in path order with the paying
- * run marked, so the "left to right, adjacent pairs, no skipping" rule is visible rather than
- * asserted: line 4 reading E11 E22 E33 E24 E15 is a V, and a reader can check it against the
- * annotated image below it.
+ * Behind a dropdown rather than stacked, five COMPARE tables being more scrolling than reading, and
+ * the picker states each line's verdict so choosing one is not blind. Cells are in path order with
+ * the paying run marked, so "left to right, adjacent pairs, no skipping" is visible rather than
+ * asserted.
  *
- * **The evidence that the crop landed is `annotated_line{n}.png` and the contact sheet, not a
- * grid of tiles.** This used to open on all 15 cells for that reason; they are gone at request,
- * and what carries the argument now is the annotated image here -- the drawn path over the cells
- * it was read from -- plus the contact sheet `PaylineImages` puts above every number on the
- * page. Both show a crop half a cell out immediately, which is the one thing a table of cosines
- * can never do. If the tiles ever come back, that is the reason they were there.
+ * **The evidence that the crop landed is `annotated_line{n}.png` and the contact sheet, not a grid
+ * of tiles.** Both show a crop half a cell out immediately, which a table of cosines never can.
  */
 
 const LINE_TONES = [

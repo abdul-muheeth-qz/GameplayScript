@@ -1,34 +1,21 @@
-"""STEP 2a - turn "COMPARE E21 & E22" into a yes/no decision.
+"""Turn "COMPARE E21 & E22" into a yes/no decision.
 
-The payline says COMPARE as if it were ==, but embeddings are never equal, so a decision
-rule is needed. Three are provided; all expose the same `compare(a, b) -> Decision`, so
-`paylines.py` never knows which one is running.
+COMPARE is not equality -- embeddings are never equal -- so a decision rule is needed. Three, all
+exposing `compare(a, b) -> Decision`, so `paylines.py` never knows which is running:
 
-  ThresholdMatcher  cosine similarity >= threshold. Closest to the literal payline wording,
-                    and the default. The threshold is per-backend because CLIP and pixel
-                    similarities do not live on the same scale, and it must be measured
-                    rather than guessed -- see `embeddings.py` for the numbers behind the
-                    shipped pixel value.
+  ThresholdMatcher  cosine >= threshold. The default, and closest to the literal wording. The
+                    threshold is per-backend, because CLIP and pixel similarities are not on the
+                    same scale, and it must be measured rather than guessed.
+  ClusterMatcher    agglomerative clustering over all tiles at once; same symbol == same cluster.
+                    Less sensitive to one borderline pair. Needs scikit-learn.
+  LibraryMatcher    nearest neighbour against reference symbol art. The only mode that can name a
+                    symbol, and inert until a folder of art exists -- the POC ships none.
 
-  ClusterMatcher    agglomerative clustering over all the tiles at once, then "same symbol"
-                    == "same cluster". Self-consistent within a spin and less sensitive to
-                    one borderline pair than a global threshold. Needs scikit-learn.
+`cross_check` runs the other strategies and reports agreement; a method that cannot run is reported
+as **skipped**, never omitted, because a missing row reads as agreement.
 
-  LibraryMatcher    nearest neighbour against reference symbol art, then compare names.
-                    Gives readable output -- "LINE 4 PAYS 3 [POT, POT, POT]" -- and is the
-                    only mode that can name a symbol at all. The POC's repo ships **no**
-                    symbol art, so this is inert until a folder of it exists.
-
-`cross_check` runs the other available strategies and reports whether they agree. Agreement
-across independent methods is cheap credibility; disagreement means recalibrate before
-trusting the number. A method that cannot run (no sklearn, no symbol library) is skipped and
-said to be skipped -- never silently treated as agreeing.
-
-`ReelStopMatcher` is not a fourth strategy but a **checkpoint over whichever one is running**:
-in the narrow band where the cosine is neither clearly the same symbol nor clearly a different
-one, it asks the game's own telemetry what the symbols were and answers on the names. It is the
-only thing here with an oracle rather than an opinion, and it is deliberately not in `METHODS`
--- there is nothing to cross-check it against.
+`ReelStopMatcher` is not a fourth strategy but a checkpoint over whichever one is running, so it is
+deliberately not in `METHODS` -- there is nothing to cross-check an oracle against.
 """
 
 from __future__ import annotations
@@ -58,9 +45,8 @@ class Decision:
     similarity: float
     match: bool
     detail: str = ""
-    # Set by ReelStopMatcher when the reel-stop checkpoint had something to say about this
-    # pair: what it decided and on which symbol names. Empty on every pair it did not reach,
-    # which is most of them -- the band is narrow on purpose.
+    # What the reel-stop checkpoint decided about this pair, and on which symbol names. Empty on
+    # every pair it did not reach, which is most of them -- the band is narrow on purpose.
     checkpoint: str = ""
 
     @property
@@ -78,8 +64,8 @@ class BaseMatcher:
         raise NotImplementedError
 
     def labels(self):
-        """Optional {'E11': 'POT'} map. Empty when the matcher has no notion of a symbol
-        identity -- which is most of them, and is why the UI must not require it."""
+        """Optional {'E11': 'POT'} map, empty when the matcher has no notion of symbol identity --
+        which is most of them, so the UI must not require it."""
         return {}
 
     def describe(self) -> str:
@@ -158,13 +144,13 @@ class LibraryMatcher(BaseMatcher):
         super().__init__(embeddings)
         self.library = library
         self.min_confidence = min_confidence
-        self._labels, self._confidence = self._classify()
+        self._labels = self._classify()
 
     def describe(self):
         return f"library ({len(self.library)} reference symbols)"
 
     def _classify(self):
-        labels, confidence = {}, {}
+        labels = {}
         for name, vec in self.embeddings.items():
             best, best_sim = "UNKNOWN", -1.0
             for symbol, ref in self.library.items():
@@ -172,8 +158,7 @@ class LibraryMatcher(BaseMatcher):
                 if sim > best_sim:
                     best, best_sim = symbol, sim
             labels[name] = best if best_sim >= self.min_confidence else "UNKNOWN"
-            confidence[name] = best_sim
-        return labels, confidence
+        return labels
 
     def labels(self):
         return dict(self._labels)
@@ -187,45 +172,34 @@ class LibraryMatcher(BaseMatcher):
 class ReelStopMatcher(BaseMatcher):
     """The checkpoint: an ambiguous COMPARE is decided by the game's own reel stops.
 
-    Same symbol, low cosine is the failure this exists for. On run `2026-08-13_153618` the
-    inverted V is five Arm Bands and its first pair reads
+    Same symbol at a low cosine is the failure this exists for -- five identical Arm Bands whose
+    first pair reads 0.7622 and pays 0, because the win animation draws a highlight across one cell
+    and not the other. No threshold fixes it: 0.7622 is far from the 0.996-0.9998 same-symbol pairs
+    otherwise sit at, and coming down to catch it sweeps in the 0.28 of a genuinely different pair.
 
-        COMPARE E31 & E22   cos=0.7622   NO   (threshold 0.9000)
+    So inside the band only, the decision is handed to the spin's `reelsStops` mapped through the
+    reel strips -- two symbol names either match or they do not. Outside it nothing changes, so a
+    confident pixel reading is never overturned by a stale log or a drifted strip.
 
-    so the line paid 0 where it should have paid 5. The art is identical; the *pixels* are not,
-    because the win animation draws a highlight across E22 that E31 does not have. No threshold
-    fixes that -- 0.7622 is genuinely far from the 0.996-0.9998 that same-symbol pairs otherwise
-    sit at here, and dropping the threshold to catch it would sweep in the 0.28 of a different
-    pair from the other direction.
+    It abstains rather than guessing, and reports it, in three cases: no stops or strips, a mystery
+    symbol (which reveals as other art), and a cell the grid cannot name. Abstaining leaves the inner
+    decision untouched. Every pair it reaches is recorded in `adjudications` either way.
 
-    So between `band` (0.70 by default) and the matcher's own threshold, the decision is handed
-    to the telemetry: `BaseGameReelStops` for this spin, mapped through the reel strips in
-    `payline_excel.xlsx`, gives a symbol name per cell, and two names either match or they do
-    not. Outside that band nothing changes -- a confident pixel reading is never overturned,
-    which is what keeps a stale telemetry file or a drifted strip from rewriting a verdict it
-    has no business touching.
-
-    **It abstains rather than guessing, in three cases, and each is reported.** No telemetry or
-    no strips (the audit still runs, on the pixels alone); a cell whose name is a mystery
-    symbol, which reveals as other art and so cannot be compared by name (`reelstrips`'
-    `PLACEHOLDERS`); and a cell the grid has no name for at all. Abstaining leaves the inner
-    matcher's decision exactly as it was.
-
-    Every pair it reaches is recorded in `adjudications`, whether it agreed with the pixels or
-    overturned them, because a checkpoint that silently rewrites verdicts is indistinguishable
-    from a bug in the one place it matters.
+    `placeholders` comes from the strips this grid was built from (`games.<exe>.reel_strips`), not
+    from a module constant: which names are mystery symbols is a fact about one game's sheet.
     """
     name = "reel-stops"
 
-    def __init__(self, inner, grid: dict, band, source: str = ""):
+    def __init__(self, inner, grid: dict, band, source: str = "", placeholders=()):
         super().__init__(inner.embeddings)
         self.inner = inner
         self.grid = dict(grid or {})
         self.low, self.high = (float(band[0]), float(band[1]))
         self.source = source
+        self.placeholders = reelstrips.normalize_placeholders(placeholders)
         self.adjudications: list[dict] = []
-        # The inner matcher's own name, so `cross_check` keys and `payline.json`'s `method`
-        # still say which vision strategy ran. The checkpoint is not one of METHODS.
+        # The inner matcher's name, so `cross_check`'s keys and `payline.json`'s `method` still say
+        # which vision strategy ran. The checkpoint is not one of METHODS.
         self.method = inner.name
 
     def describe(self):
@@ -233,14 +207,16 @@ class ReelStopMatcher(BaseMatcher):
                 f"(cos {self.low:.2f}-{self.high:.2f} decided by the game's reel stops)")
 
     def labels(self):
-        """The telemetry's symbol names, which is the only thing on this stage that can name a
-        symbol without reference art -- so `symbol_grid` and the annotated captions get real
-        names rather than nothing. Falls back to the inner matcher's labels when there is no
-        grid, which for every shipped matcher but `library` is empty."""
+        """The telemetry's symbol names -- the only thing here that can name a symbol without
+        reference art, so the annotated captions get real names. Falls back to the inner matcher's,
+        which is empty for every shipped matcher but `library`."""
         return dict(self.grid) if self.grid else self.inner.labels()
 
     def _names(self, a, b):
         return self.grid.get(a), self.grid.get(b)
+
+    def _is_placeholder(self, symbol: str | None) -> bool:
+        return bool(symbol) and symbol.strip().upper() in self.placeholders
 
     def compare(self, a, b):
         decision = self.inner.compare(a, b)
@@ -256,7 +232,7 @@ class ReelStopMatcher(BaseMatcher):
         elif name_a is None or name_b is None:
             missing = a if name_a is None else b
             note = f"the reel stops name no symbol for {missing}"
-        elif reelstrips.is_placeholder(name_a) or reelstrips.is_placeholder(name_b):
+        elif self._is_placeholder(name_a) or self._is_placeholder(name_b):
             note = (f"{name_a} / {name_b} -- a mystery symbol reveals as other art, so the "
                     f"strip cannot say what is on the screen")
 
@@ -293,8 +269,8 @@ class ReelStopMatcher(BaseMatcher):
 
 
 def load_symbol_library(settings: dict, backend: str) -> dict:
-    """Embed every image in `payline.symbol_library`. {} when there is no such folder,
-    which is how `library` matching stays optional -- the POC ships no symbol art."""
+    """Embed every image in `payline.symbol_library`. {} when there is no such folder, which is how
+    `library` matching stays optional."""
     folder = settings.get("symbol_library")
     if not folder or not os.path.isdir(folder):
         return {}
@@ -350,10 +326,9 @@ DEFAULT_BAND_LOW = 0.70
 def _band(settings: dict, inner, backend: str) -> tuple[float, float]:
     """The ambiguous band, `[low, high)`.
 
-    `high` defaults to the matcher's **own** threshold rather than a literal 0.90, so the band
-    is exactly "below the line the pixels draw, but not clearly a different symbol" and moving
-    `payline.thresholds.pixel` moves it too. A matcher with no threshold (cluster, library) has
-    no such line, so the configured pixel threshold is used and then 0.90 as the last resort.
+    `high` defaults to the matcher's **own** threshold rather than a literal, so moving
+    `payline.thresholds.pixel` moves the band with it. A matcher with no threshold (cluster,
+    library) has no such line, so the configured pixel threshold is used, then 0.90.
     """
     stops = settings.get("reel_stops") or {}
     configured = stops.get("band")
@@ -378,13 +353,10 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
                      image_path: str | None) -> tuple[object, dict]:
     """Wrap `inner` in the reel-stop checkpoint, or explain why it is not wrapped.
 
-    Returns `(matcher, record)`. The matcher is the wrapper when everything needed was found
-    and `inner` otherwise -- **an unavailable checkpoint does not fail the audit**, because the
-    pixel reading is a complete verdict on its own and this stage's whole point is that it needs
-    no cabinet. What it must not do is fail *quietly*: the returned record always carries a
-    `status`, it is written into `payline.json`, and the CLI and the page both print it. A
-    checkpoint that was configured on and did nothing is otherwise invisible, and the answer it
-    would have corrected is the wrong one.
+    Returns `(matcher, record)` -- the wrapper when everything needed was found, `inner` otherwise.
+    An unavailable checkpoint does not fail the audit: the pixel reading is a complete verdict, and
+    this stage needing no cabinet is the point. What it must not do is fail *quietly*, so the record
+    always carries a `status` that reaches `payline.json`, the CLI and the page.
     """
     from . import telemetry
 
@@ -392,11 +364,19 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
     if not stops_cfg.get("enabled", True):
         return inner, {"status": "off", "detail": "payline.reel_stops.enabled is false"}
 
+    if stops_cfg.get("strips"):
+        # Retired, and loud rather than silently ignored: one cabinet-level path could not follow
+        # `active` from one game to the next, which is the whole reason the key moved.
+        LOG.warning("payline.reel_stops.strips (%s) is no longer read -- the reel strips are a "
+                    "per-game asset now, named by games.<exe>.reel_strips in game_config.json",
+                    stops_cfg["strips"])
+
     try:
         band = _band(settings, inner, backend)
-        strips = reelstrips.load_strips(stops_cfg.get("strips"))
-        folder = telemetry.telemetry_dir(cfg, settings)
-        found = telemetry.latest_stops(folder, image_path,
+        # The active game's own sheet. A game with no block raises here, which is caught below and
+        # reported as unavailable, so the pixels decide rather than another game's symbol names.
+        strips = reelstrips.strips_for(cfg)
+        found = telemetry.latest_stops(cfg, image_path,
                                        float(stops_cfg.get("tolerance_s")
                                              or telemetry.DEFAULT_TOLERANCE_S))
         grid = strips.grid(found["stops"], geometry.rows, geometry.reels)
@@ -404,11 +384,10 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
         LOG.warning("reel-stop checkpoint unavailable: %s", exc)
         return inner, {"status": "unavailable", "detail": str(exc)}
 
-    # **Only the spin this frame can be proved to be.** Without this, re-auditing an older run
-    # folder decides its COMPAREs -- and names every symbol on its annotated images -- from
-    # whatever spin happens to be last in today's telemetry. Run `2026-08-13_114200` does
-    # exactly that: captured at 11:42, against a file that starts at 12:08. The stops that were
-    # found are still reported, so the record says which spin it declined to use and why.
+    # Only the spin this frame can be *proved* to be. Without it, re-auditing an older run folder
+    # decides its COMPAREs from whatever spin is last in today's log -- one run on disk was captured
+    # at 11:42 against a file starting at 12:08. The stops found are still reported, so the record
+    # says which spin it declined to use and why.
     if not found.get("matched") and not stops_cfg.get("allow_latest_fallback"):
         LOG.warning("reel-stop checkpoint stood down: %s", found["matched_by"])
         return inner, {
@@ -420,12 +399,17 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
             **found,
         }
 
-    wrapper = ReelStopMatcher(inner, grid, band, source=strips.source)
+    wrapper = ReelStopMatcher(inner, grid, band, source=strips.source,
+                              placeholders=strips.placeholders)
     record = {
         "status": "on",
         "band": [round(band[0], 4), round(band[1], 4)],
         "strips": strips.source,
         "strip_lengths": strips.lengths(),
+        # Which game's sheet this grid came from, and which of its names cannot decide a pair.
+        # In the record because "whose reel strips were these?" is now a question with an answer.
+        "strips_game": (cfg.get("game") or {}).get("process"),
+        "placeholders": sorted(strips.placeholders),
         "symbol_grid": grid,
         **found,
     }
@@ -433,11 +417,10 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
 
 
 def cross_check(embeddings, settings: dict, backend: str, geometry, primary) -> dict:
-    """Run the other strategies over the same embeddings and report what each one paid.
+    """What each other strategy paid, over the same embeddings.
 
-    Returns `{method: {"pays": [...]}}` or `{method: {"skipped": "why"}}`. A strategy that
-    cannot run is reported as skipped rather than omitted -- a missing row reads as
-    agreement, which is the opposite of what it means.
+    `{method: {"pays": [...]}}` or `{method: {"skipped": "why"}}`. Skipped rather than omitted: a
+    missing row reads as agreement, which is the opposite of what it means.
     """
     from .paylines import evaluate_all
 
@@ -449,8 +432,7 @@ def cross_check(embeddings, settings: dict, backend: str, geometry, primary) -> 
             alt = build_matcher(embeddings, settings, backend, method=method)
             out[method] = {"pays": [r.pays for r in evaluate_all(geometry, alt)]}
         except Exception as exc:
-            # An optional dependency or a missing symbol library must not kill the run --
-            # the primary reading is already made and is what the verdict rests on.
+            # An optional dependency must not kill the run: the primary reading is already made.
             out[method] = {"skipped": str(exc)}
             LOG.info("cross-check %r skipped: %s", method, exc)
     return out

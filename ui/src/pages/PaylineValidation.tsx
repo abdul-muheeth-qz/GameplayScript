@@ -12,25 +12,15 @@ import { StepRail, type Step, type StepStatus } from "@/components/StepRail"
 /**
  * The payline audit: read the reel grid off an image and walk the lines.
  *
- * **It does not spin.** The image is whatever the server says it would read -- the newest
- * capture's `spin_result` by default, or a supplied `payline.image` when one is configured --
- * and it is fetched and shown on load, so the page opens on the picture it is about to judge
- * rather than on an empty state and a button. Capturing belongs to the Meter Validation tab;
- * duplicating it here put OBS, the i-Deck and a three-minute wait in front of an audit that
- * needs none of them.
+ * **It does not spin.** The image is whatever the server says it would read, fetched and shown on
+ * load, so the page opens on the picture it is about to judge rather than on an empty state and a
+ * button. Capturing belongs to the meter tab; duplicating it here put OBS, the i-Deck and a
+ * three-minute backstop in front of an audit that needs none of them.
  *
- * **One step, at request.** There used to be two buttons -- cut the reels, then validate -- and
- * the first was already optional: `runner.validate_paylines` cuts the tiles itself whenever they
- * are missing, or were cut from a different image or geometry (`_tiles_are_current`), so the
- * single call does the crop and the matching and writes both `tiles.json` and `payline.json`.
- * Removing the button removed a click, not a stage.
- *
- * What the two buttons were *for* was making the contact sheet unavoidable -- every similarity
- * number here is meaningless if the crop is half a cell out, and that sheet is the only thing
- * that shows it. It is now in the disclosure below the verdict instead of in front of it. The
- * pipeline is still two steps and still says so: `payline/tiles.json` is its own output, and
- * `python -m server.payline.cli --tiles-only` and `POST /api/payline/tiles` both still stop
- * after the crop. Only the page collapsed them.
+ * **One step, at request.** `validate_paylines` cuts the tiles itself whenever they are missing or
+ * stale, so removing the second button removed a click, not a stage -- the pipeline is still two
+ * steps, and `--tiles-only` and `POST /api/payline/tiles` both still stop after the crop. What that
+ * button was *for* was making the contact sheet unavoidable, which is now `PaylineDetails`' job.
  */
 
 type Stage = "payline"
@@ -58,9 +48,8 @@ export function PaylineValidation({
 
   useEffect(refreshHealth, [refreshHealth])
 
-  // What the server says it would read: the source label, and whether there is anything to read
-  // at all. Adopting the newest run is App's job, not this page's -- see App.tsx for why the
-  // URL has to settle first. This is only for what gets said and shown.
+  // What the server says it would read. Adopting the newest run is App's job, not this page's --
+  // see App.tsx for why the URL has to settle first.
   useEffect(() => {
     api.paylineSource().then(setSource).catch(() => setSource(null))
   }, [])
@@ -95,9 +84,8 @@ export function PaylineValidation({
   // block is worth saying before a button is pressed rather than after.
   const geometry = health?.checks?.payline
 
-  // One step. The crop's own facts stay on it beside the verdict's, because they are the
-  // numbers that say *which pixels* the pays were read from -- with no separate reels step to
-  // report them, dropping them would leave the geometry unstated anywhere on the page.
+  // One step. The crop's own facts stay beside the verdict's, because they say *which pixels* the
+  // pays were read from and there is no separate reels step left to report them.
   const steps: Step[] = [
     {
       ordinal: "01",

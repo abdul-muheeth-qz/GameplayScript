@@ -8,22 +8,16 @@ import { PaylineValidation } from "@/pages/PaylineValidation"
 /**
  * Two audits over one spin, and the shell that switches between them.
  *
- * All this holds is which audit is showing and which run is open. Everything else lives on the
- * server: every endpoint returns the whole RunState, so a reload, a second tab or a
- * `?run=<id>&mode=payline` link rebuilds the page from the run folder alone.
+ * All this holds is which audit is showing and which run is open; everything else is on the server,
+ * so a reload or a `?run=<id>&mode=payline` link rebuilds the page from the run folder alone.
  *
- * **The run is held here rather than inside each page** so switching audits keeps the spin you
- * are looking at. One capture, two readings -- a spin captured on the meter tab can have its
- * paylines read without spinning again, which is the point of joining them at all.
+ * **The run is held here rather than in either page**, so switching audits keeps the spin you are
+ * looking at -- one capture, two readings, which is the point of joining them.
  *
- * **Adopting the latest spin is decided here, not in the payline page**, because only this
- * component knows whether the URL named a run. The payline audit never captures, so with no run
- * open it reads the newest one; but a `?run=<id>` link has to win, and since `remember` writes
- * the open run back into the URL after every step, a page that adopted "the latest" on its own
- * mount could not tell a deliberate link from its own leftovers. Waiting for the URL load to
- * settle first removes the race rather than papering over it.
- *
- * No router: two modes and a run id fit in the query string, and the whole app is one screen.
+ * **Adopting the latest spin is decided here too**, because only this component knows whether the
+ * URL named a run: `remember` writes the open run back into `?run=`, so a page adopting "the latest"
+ * on its own mount could not tell a deliberate link from its own leftovers. Waiting for the URL to
+ * settle removes that race rather than papering over it.
  */
 
 function isMode(value: string | null): value is Mode {

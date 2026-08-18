@@ -1,8 +1,8 @@
-"""The reel-stop checkpoint, checked without a cabinet, a model or a telemetry service.
+"""The reel-stop checkpoint, checked without a cabinet, a model or a running game.
 
     python -m server.payline.test_reelstrips      (or: python -m pytest server/payline)
 
-Same shape and the same reason as `test_paylines.py`: the mapping from `BaseGameReelStops` to
+Same shape and the same reason as `test_paylines.py`: the mapping from a spin's reel stops to
 symbol names is pure data, so it is testable, and it is the part of the checkpoint that decides
 verdicts. The fixtures are the two spins the rule was measured on --
 
@@ -10,18 +10,22 @@ verdicts. The fixtures are the two spins the rule was measured on --
   * run `2026-08-13_153618`, stops `[86, 121, 127, 138, 86]`, which was checked 15/15 against
     its own contact sheet and is the spin whose inverted V the checkpoint has to fix;
 
--- plus the band, the abstentions and the telemetry parser, which has to survive lines that are
-not valid JSON. It reads `server/assets/payline_excel.xlsx`; that file is the fixture.
+-- plus the band, the abstentions, and the game-log reader: that it takes the marker only from
+its own handler and not from the other stops-flavoured messages beside it, that it merges the
+rotated siblings, and that it names `games.<exe>.log` rather than guessing when there is
+nothing to read. It reads `server/assets/payline_excel.xlsx`; that file is the fixture.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 
+from ..settings import DEFAULT_GAME_CONFIG
 from . import reelstrips, telemetry
-from .geometry import GAMES, Geometry, PaylineError
+from .geometry import PaylineError, geometry_for_game
 from .matcher import Decision, ReelStopMatcher
 
 # The mapping supplied with the request, read off the game's own screen.
@@ -43,12 +47,30 @@ RUN_153618_GRID = {
 }
 
 
+GAME = "FortuneOx.exe"
+
+
+def game_block(**overrides) -> dict:
+    """FortuneOx's shipped block, by name -- `active` may be pointing at another game.
+
+    Read off game_config.json rather than restated here, so the fixtures below are checked against
+    the strips the cabinet would actually read, and a block that stops validating fails these tests
+    rather than only failing at the cabinet.
+    """
+    with open(DEFAULT_GAME_CONFIG, encoding="utf-8") as fh:
+        block = dict((json.load(fh)["games"] or {})[GAME])
+    block["process"] = GAME
+    block.update(overrides)
+    return block
+
+
 def strips():
-    return reelstrips.load_strips()
+    """The active game's strips, the way the checkpoint reads them."""
+    return reelstrips.strips_for({"game": game_block()})
 
 
 def geometry():
-    return Geometry("FortuneOx.exe", GAMES["FortuneOx.exe"])
+    return geometry_for_game(GAME)
 
 
 class FixedMatcher:
@@ -131,18 +153,63 @@ def test_missing_spreadsheet_names_the_setting():
     try:
         reelstrips.load_strips(os.path.join(tempfile.gettempdir(), "no_such_sheet.xlsx"))
     except PaylineError as exc:
-        assert "payline.reel_stops.strips" in str(exc)
+        assert "reel_strips" in str(exc) and "path" in str(exc)
     else:
         raise AssertionError("a missing spreadsheet was accepted")
 
 
 def test_placeholders_are_the_mystery_symbols():
     """Mystery symbols reveal as other art; WILD is drawn as itself and must stay comparable."""
-    assert reelstrips.is_placeholder("Mystery1")
-    assert reelstrips.is_placeholder("mystery (orb)")
-    assert not reelstrips.is_placeholder("WILD")
-    assert not reelstrips.is_placeholder("Arm Band")
-    assert not reelstrips.is_placeholder(None)
+    s = strips()
+    assert s.is_placeholder("Mystery1")
+    assert s.is_placeholder("mystery (orb)")
+    assert not s.is_placeholder("WILD")
+    assert not s.is_placeholder("Arm Band")
+    assert not s.is_placeholder(None)
+
+
+# -- the strips belong to one game, and are read off its own block ----------
+
+def test_strips_come_from_the_active_games_block():
+    """The path is `games.<exe>.reel_strips`, so `active` moves the sheet with everything else."""
+    s = strips()
+    assert s.source.endswith("payline_excel.xlsx")
+    assert s.placeholders == {"MYSTERY1", "MYSTERY2", "MYSTERY (ORB)"}
+
+
+def test_a_game_with_no_strips_is_refused_rather_than_given_anothers():
+    """The bug this key exists for, in miniature.
+
+    Before the strips were per-game they were a module default with a cabinet-level override, so a
+    game with reel geometry but no sheet of its own was handed whichever sheet was shipped. Measured
+    on this machine: HuffNPuffLink's real stops [68, 18, 43, 51, 1] mapped through FortuneOx's sheet,
+    reported `status: "on"` with a confident Ace/Mystery1/King grid, and nothing said the names and
+    the spin came from different games.
+    """
+    block = game_block()
+    del block["reel_strips"]
+    try:
+        reelstrips.strips_for({"game": block})
+    except PaylineError as exc:
+        assert "reel_strips" in str(exc) and GAME in str(exc)
+        assert "another game" in str(exc)
+    else:
+        raise AssertionError("a game with no reel strips was given another game's")
+
+
+def test_absent_placeholders_are_refused_but_an_empty_list_is_honoured():
+    """A too-small placeholder set decides a COMPARE on a name the screen is not showing, so the
+    key is required; [] is a statement that this game has none, and is taken at its word."""
+    block = game_block(reel_strips={"path": "assets/payline_excel.xlsx"})
+    try:
+        reelstrips.strips_for({"game": block})
+    except PaylineError as exc:
+        assert "placeholders" in str(exc)
+    else:
+        raise AssertionError("a sheet with no stated placeholders was accepted")
+
+    block = game_block(reel_strips={"path": "assets/payline_excel.xlsx", "placeholders": []})
+    assert reelstrips.strips_for({"game": block}).placeholders == frozenset()
 
 
 # -- the checkpoint --------------------------------------------------------
@@ -177,9 +244,15 @@ def test_confident_readings_are_never_touched():
 
 
 def test_mystery_abstains_and_says_so():
-    """A mystery name cannot decide a pair -- the frame may be showing anything."""
-    grid = strips().grid(SUPPLIED_STOPS, 3, 5)                 # E13 is Mystery1
-    matcher = ReelStopMatcher(FixedMatcher(0.80), grid, (0.70, 0.90))
+    """A mystery name cannot decide a pair -- the frame may be showing anything.
+
+    The placeholder names travel with the sheet they came from, so the matcher is given the strips'
+    own set rather than reading a module constant that a change of game would not have moved.
+    """
+    s = strips()
+    grid = s.grid(SUPPLIED_STOPS, 3, 5)                        # E13 is Mystery1
+    matcher = ReelStopMatcher(FixedMatcher(0.80), grid, (0.70, 0.90),
+                              placeholders=s.placeholders)
     decision = matcher.compare("E13", "E23")
     assert decision.match is False                             # the inner verdict, unchanged
     assert matcher.overrides() == 0
@@ -230,34 +303,43 @@ def test_paylines_pay_what_the_stops_say():
     assert pays == [5, 2, 0, 0, 5], pays
 
 
-# -- the telemetry log -----------------------------------------------------
+# -- the game log ----------------------------------------------------------
 
+# Real line shapes, including three decoys the narrow marker has to stay off: two other
+# stops-flavoured messages the same log carries, and a bare `reelsStops[` from a handler that
+# is not the one this reads.
 SAMPLE_LOG = (
-    '{"Timestamp_ISO8601":"2026-08-13T15:54:3305:30", "Config":{"MaxBetByCost":"5000.000"}}\n'
-    '{"Timestamp_ISO8601":"2026-08-13T15:54:3705:30", "Event":FortuneOx    [monitoring]'
-    '[GameMetrics]  {"BaseGameFeaturette":{"Type":"BaseGameFeaturette"}}}\n'
-    '{"Timestamp_ISO8601":"2026-08-13T15:58:0605:30", "Game_Id":"65537;65047279698077",'
-    '"GamePlay":{"GDKWager":{"BetUnits":10, "ProgressiveQualified":False}}}\n'
-    '{"Timestamp_ISO8601":"2026-08-13T15:51:0305:30", "Game_Id":"65537;65047279698076",'
-    '"GamePlay":{"BaseGameReelStops":["135","89","15","144","75"]}}\n'
-    '{"Timestamp_ISO8601":"2026-08-13T15:58:0905:30", "Game_Id":"65537;65047279698077",'
-    '"GamePlay":{"BaseGameReelStops":["24","79","153","25","0"]}}\n'
+    "08/13/26 15:54:33.120 00 FortuneOx:4210 INF: [GameStateMachine.PayWin] payWin[0]\n"
+    "08/13/26 15:54:37.884 00 FortuneOx:4210 INF: "
+    "[GDK.Common.ServerAPI.LastStopsMsg] reelsStops[1 2 3 4 5]\n"
+    "08/13/26 15:58:06.001 00 FortuneOx:4210 INF: "
+    "[SlotGameEngine.HandleInternalSlotReelsStoppedMsg] reelsStops[9 9 9 9 9]\n"
+    "08/13/26 15:51:03.417 00 FortuneOx:4210 INF: "
+    "[Slot.HandleSlotReelStoppedMessage] reelsStops[135 89 15 144 75]\n"
+    "08/13/26 15:58:09.902 00 FortuneOx:4210 INF: "
+    "[Slot.HandleSlotReelStoppedMessage] reelsStops[24 79 153 25 0]\n"
 )
+
+LOG_NAME = "FortuneOx_Client.log"
 
 
 def _sample_file():
-    path = os.path.join(tempfile.mkdtemp(), "FortuneOx_server_TELEMETRY-20260813-120836.log")
+    path = os.path.join(tempfile.mkdtemp(), LOG_NAME)
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(SAMPLE_LOG)
     return path
 
 
-def test_entries_are_read_from_lines_that_are_not_json():
-    """A bare word for a value, Python's False, and a timestamp missing its offset sign."""
+def test_entries_are_read_from_the_game_log():
+    """The five numbers, the line's own clock, and nothing from the decoy handlers.
+
+    Anchoring on `Slot.HandleSlotReelStoppedMessage` rather than on `reelsStops[` is what
+    keeps `LastStopsMsg` and `HandleInternalSlotReelsStoppedMsg` out -- both are real markers
+    in this log, and both would otherwise be read as this spin's stops.
+    """
     entries = telemetry.read_entries(_sample_file())
     assert [e.stops for e in entries] == [[135, 89, 15, 144, 75], SUPPLIED_STOPS]
-    assert entries[-1].game_id == "65537;65047279698077"
-    assert entries[-1].timestamp.isoformat() == "2026-08-13T15:58:09"
+    assert entries[-1].timestamp.isoformat() == "2026-08-13T15:58:09.902000"
 
 
 def test_the_frames_own_spin_is_picked_not_the_last():
@@ -289,20 +371,33 @@ def test_no_frame_time_takes_the_last_entry():
     assert entry.stops == SUPPLIED_STOPS and "last entry" in why and matched is False
 
 
-def test_a_client_file_without_stops_is_skipped():
-    """The folder holds client and server files; only the server ones carry the marker."""
-    folder = tempfile.mkdtemp()
-    older = os.path.join(folder, "FortuneOx_server_TELEMETRY-1.log")
-    with open(older, "w", encoding="utf-8") as fh:
-        fh.write(SAMPLE_LOG)
-    newer = os.path.join(folder, "FortuneOx_client_TELEMETRY-2.log")
-    with open(newer, "w", encoding="utf-8") as fh:
-        fh.write('{"Timestamp_ISO8601":"2026-08-13T16:00:0005:30", "Config":{"a":"b"}}\n')
-    os.utime(newer, (os.path.getmtime(older) + 60,) * 2)
+def test_rotated_siblings_are_merged_in_time_order():
+    """The log rotates at ~20 MB, so an older frame's stops are in a sibling, not the live file.
 
-    path, entries = telemetry.newest_file_with_entries(folder)
-    assert os.path.basename(path) == "FortuneOx_server_TELEMETRY-1.log"
-    assert len(entries) == 2
+    Reading only the configured path would stand the checkpoint down on any run from before the
+    last rotation -- a silent loss of coverage. The merge is ordered by each line's own clock
+    rather than by mtime, which lies while the game holds the handle open.
+    """
+    folder = tempfile.mkdtemp()
+    live = os.path.join(folder, LOG_NAME)
+    with open(live, "w", encoding="utf-8") as fh:
+        fh.write(SAMPLE_LOG)
+    rotated = os.path.join(folder, "FortuneOx_Client-20260729-164741.log")
+    with open(rotated, "w", encoding="utf-8") as fh:
+        fh.write("07/29/26 16:59:27.795 00 FortuneOx:9 INF: "
+                 "[Slot.HandleSlotReelStoppedMessage] reelsStops[70 91 110 114 86]\n")
+    # A neighbour that is not a rotation of this log must not be swept in.
+    with open(os.path.join(folder, "SomethingElse.log"), "w", encoding="utf-8") as fh:
+        fh.write("07/29/26 17:00:00.000 00 X:9 INF: "
+                 "[Slot.HandleSlotReelStoppedMessage] reelsStops[1 1 1 1 1]\n")
+
+    paths = telemetry.game_logs({"game": {"log": live}})
+    assert sorted(os.path.basename(p) for p in paths) == [
+        "FortuneOx_Client-20260729-164741.log", LOG_NAME]
+
+    entries = telemetry.collect_entries(paths)
+    assert [e.stops for e in entries] == [
+        [70, 91, 110, 114, 86], [135, 89, 15, 144, 75], SUPPLIED_STOPS]
 
 
 def test_checkpoint_stands_down_for_another_spin():
@@ -317,8 +412,8 @@ def test_checkpoint_stands_down_for_another_spin():
     from .matcher import build_checkpoint
 
     folder = tempfile.mkdtemp()
-    with open(os.path.join(folder, "FortuneOx_server_TELEMETRY-x.log"), "w",
-              encoding="utf-8") as fh:
+    log = os.path.join(folder, LOG_NAME)
+    with open(log, "w", encoding="utf-8") as fh:
         fh.write(SAMPLE_LOG)
     frame = os.path.join(folder, "spin_result.png")
     with open(frame, "wb") as fh:
@@ -327,15 +422,18 @@ def test_checkpoint_stands_down_for_another_spin():
     os.utime(frame, (old, old))
 
     inner = FixedMatcher(0.80)
-    settings = {"reel_stops": {"telemetry_dir": folder}, "thresholds": {"pixel": 0.90}}
-    matcher, record = build_checkpoint(inner, geometry(), {}, settings, "pixel", frame)
+    # The whole game block, log swapped for the fixture: the checkpoint now reads this game's reel
+    # strips out of it as well as its log, so a bare {"log": ...} has no sheet to map stops through.
+    cfg = {"game": game_block(log=log)}
+    settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
+    matcher, record = build_checkpoint(inner, geometry(), cfg, settings, "pixel", frame)
     assert matcher is inner, "the checkpoint judged a frame it could not identify"
     assert record["status"] == "unavailable"
     assert record["stops"] == SUPPLIED_STOPS          # reported, but not used
     assert "allow_latest_fallback" in record["detail"]
 
     settings["reel_stops"]["allow_latest_fallback"] = True
-    matcher, record = build_checkpoint(inner, geometry(), {}, settings, "pixel", frame)
+    matcher, record = build_checkpoint(inner, geometry(), cfg, settings, "pixel", frame)
     assert matcher is not inner and record["status"] == "on"
     assert record["matched"] is False                 # opted into, and still said out loud
 
@@ -347,8 +445,8 @@ def test_checkpoint_runs_for_a_frame_it_can_identify():
     from .matcher import build_checkpoint
 
     folder = tempfile.mkdtemp()
-    with open(os.path.join(folder, "FortuneOx_server_TELEMETRY-x.log"), "w",
-              encoding="utf-8") as fh:
+    log = os.path.join(folder, LOG_NAME)
+    with open(log, "w", encoding="utf-8") as fh:
         fh.write(SAMPLE_LOG)
     frame = os.path.join(folder, "spin_result.png")
     with open(frame, "wb") as fh:
@@ -356,32 +454,89 @@ def test_checkpoint_runs_for_a_frame_it_can_identify():
     shot = dt.datetime(2026, 8, 13, 15, 51, 7).timestamp()      # 4s after the 15:51:03 entry
     os.utime(frame, (shot, shot))
 
-    settings = {"reel_stops": {"telemetry_dir": folder}, "thresholds": {"pixel": 0.90}}
-    matcher, record = build_checkpoint(FixedMatcher(0.80), geometry(), {}, settings,
-                                       "pixel", frame)
+    settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
+    matcher, record = build_checkpoint(FixedMatcher(0.80), geometry(),
+                                       {"game": game_block(log=log)}, settings, "pixel", frame)
     assert record["status"] == "on" and record["matched"] is True
     assert record["stops"] == [135, 89, 15, 144, 75]
     assert record["band"] == [0.70, 0.90]                        # high tracks the threshold
     assert matcher.labels()["E11"]                               # names come from the stops
+    # Whose sheet these names came from, in the record rather than left to be assumed.
+    assert record["strips_game"] == GAME
+    assert record["placeholders"] == ["MYSTERY (ORB)", "MYSTERY1", "MYSTERY2"]
 
 
-def test_missing_folder_names_the_setting():
-    missing = os.path.join(tempfile.gettempdir(), "no_such_telemetry_folder_here")
+def test_checkpoint_stands_down_for_a_game_with_no_strips_of_its_own():
+    """End to end: reel geometry and a log full of stops, but no sheet -- pixels decide.
+
+    The failure direction that matters. Standing down costs the audit an ambiguous COMPARE it might
+    have settled; mapping the stops through a stranger's sheet costs it the verdict, and looks
+    exactly like a working checkpoint while doing so.
+    """
+    import datetime as dt
+
+    from .matcher import build_checkpoint
+
+    folder = tempfile.mkdtemp()
+    log = os.path.join(folder, LOG_NAME)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write(SAMPLE_LOG)
+    frame = os.path.join(folder, "spin_result.png")
+    with open(frame, "wb") as fh:
+        fh.write(b"")
+    shot = dt.datetime(2026, 8, 13, 15, 51, 7).timestamp()
+    os.utime(frame, (shot, shot))
+
+    block = game_block(log=log)
+    del block["reel_strips"]
+    inner = FixedMatcher(0.80)
+    settings = {"reel_stops": {}, "thresholds": {"pixel": 0.90}}
+    matcher, record = build_checkpoint(inner, geometry(), {"game": block}, settings,
+                                       "pixel", frame)
+    assert matcher is inner, "the checkpoint used another game's reel strips"
+    assert record["status"] == "unavailable"
+    assert "reel_strips" in record["detail"]
+
+
+def test_a_missing_log_names_the_setting():
+    missing = os.path.join(tempfile.gettempdir(), "no_such_game_log_here", "Game.log")
     try:
-        telemetry.newest_file_with_entries(missing)
+        telemetry.game_logs({"game": {"log": missing}})
     except telemetry.TelemetryError as exc:
-        assert "payline.reel_stops.telemetry_dir" in str(exc)
+        assert "games.<exe>.log" in str(exc) and missing in str(exc)
     else:
-        raise AssertionError("a missing telemetry folder was accepted")
+        raise AssertionError("a missing game log was accepted")
 
 
-def test_folder_is_derived_from_the_process():
-    """A second game needs no config edit."""
-    folder = telemetry.telemetry_dir({"target": {"process": "HuffNPuffLink.exe"}}, {})
-    assert folder.endswith("HuffNPuffLink")
-    configured = telemetry.telemetry_dir({"target": {"process": "FortuneOx.exe"}},
-                                        {"reel_stops": {"telemetry_dir": "D:/elsewhere"}})
-    assert configured == "D:/elsewhere"
+def test_a_game_with_no_log_is_refused_rather_than_guessed_at():
+    """There is no second place to look any more, and that is the point.
+
+    The stops used to come from a telemetry folder found by `payline.reel_stops.telemetry_dir`,
+    falling back to a path derived from the process name. Two settings for one file is what
+    `settings.py` calls a half-done edit waiting to happen, so the game log -- which the capture
+    stage already reads -- is now the only source, and a game block without one says so.
+    """
+    for cfg in ({}, {"game": {}}, {"game": {"process": "FortuneOx.exe", "log": None}}):
+        try:
+            telemetry.game_logs(cfg)
+        except telemetry.TelemetryError as exc:
+            assert "games.<exe>.log" in str(exc)
+        else:
+            raise AssertionError(f"a game with no log was accepted: {cfg}")
+
+
+def test_a_log_with_no_stops_names_the_split_log_trap():
+    """FortuneOx writes this marker to its *server* log, which `log` does not point at."""
+    folder = tempfile.mkdtemp()
+    log = os.path.join(folder, LOG_NAME)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write("08/13/26 15:54:33.120 00 FortuneOx:4210 INF: [GameOverMsg] done\n")
+    try:
+        telemetry.collect_entries(telemetry.game_logs({"game": {"log": log}}))
+    except telemetry.TelemetryError as exc:
+        assert "server" in str(exc) and telemetry.MARKER in str(exc)
+    else:
+        raise AssertionError("a log with no reel stops was accepted")
 
 
 def main() -> int:

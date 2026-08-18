@@ -1,58 +1,48 @@
-"""THE CHECKPOINT, part 2 -- where the reel stops come from.
+"""Where the reel stops come from: the game's own log, the same file `gamelog.py` reads.
 
-The game writes one telemetry file per session under `C:\\logs\\Telemetry\\Data\\<game>`, and a
-spin's landing positions appear in it as
+    08/06/26 00:07:29.861 00 HuffNPuffLink:5760 INF:
+        [Slot.HandleSlotReelStoppedMessage] reelsStops[107 93 66 94 95]
 
-    {"Timestamp_ISO8601":"2026-08-13T15:58:0905:30", "Game_Id":"65537;65047279698077",
-     "GamePlay":{"BaseGameReelStops":["24","79","153","25","0"]}}
+One stop per reel, left to right; `reelstrips.py` turns those five numbers into fifteen names. This
+replaced the platform's telemetry service, and the swap was measured first: over every entry both
+sources hold here, 593 agree and 0 disagree, the game line landing 0.51 s later, with two extra
+spins the telemetry missed.
 
-one stop per reel, left to right. `reelstrips.py` turns those five numbers into fifteen symbol
-names.
+Three things are load-bearing. **The marker is anchored on its handler**, not on the word
+`reelsStops` -- the same log carries `LastStopsMsg`, `StopsMsg` and `SyncStopsMsg`. **The rotated
+siblings are merged**, because the log rotates at ~20 MB and reading only the live path would stand
+the checkpoint down on any run older than the last rotation. And **which entry decides whether the
+checkpoint is even about the right spin**: the stops line lands a few seconds before the frame it
+belongs to, so the default is the last entry at or before the frame's own timestamp, and falling
+back to the last entry in the file is *reported* (`matched_by`), never silent.
 
-**These lines are not valid JSON and must not be parsed as such.** Measured against the files
-on this machine: `"Event":FortuneOx    [monitoring][GameMetrics]` has a bare word where a value
-belongs, `ProgressiveQualified:False` is Python's spelling rather than JSON's, and the timestamp
-reads `2026-08-13T15:58:0905:30` -- the `+` of the `+05:30` offset is missing, so even the date
-does not parse. Hence regex for the three fields that matter and nothing else.
-
-**The newest file is not necessarily the one with the stops.** The folder holds `_client_` and
-`_server_` files, only the server ones carry `BaseGameReelStops` (36 entries across three server
-files here, 0 across two client files), and the second-newest file by mtime is a client file. So
-the search is "the newest file that actually contains an entry".
-
-**Which entry, though, is the question that decides whether the checkpoint is even about the
-right spin.** Taking the last one is right when you have just spun -- that is how the mapping in
-the request was read off by hand -- and wrong the moment a run folder from earlier in the day is
-re-audited, where it would confidently describe a different spin's reels. The timestamps make
-that answerable: measured across six consecutive captures, the stops entry lands 3-4 s before
-the `spin_result.png` it belongs to (15:51:03 → 15:51:07, 15:36:33 → 15:36:38, 15:16:37 →
-15:16:40, 15:14:42 → 15:14:45, 15:11:59 → 15:12:02, 15:09:11 → 15:09:14). So the default is
-**the last entry at or before the frame's own timestamp**, within `DEFAULT_TOLERANCE_S`, and
-falling back to the last entry in the file is a *reported* fallback (`matched_by`), never a
-silent one.
+Not every game writes it -- FortuneOx logs it to a second file this does not point at -- and that is
+reported as `unavailable` rather than worked around.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import glob
 import logging
 import os
 import re
 
+from ..settings import resolve
+
 LOG = logging.getLogger("payline")
 
-DEFAULT_DIR_ROOT = r"C:\logs\Telemetry\Data"
-
-# How far before the frame an entry may sit and still be taken as that frame's spin. The
-# measured gap is 3-4 s; 15 minutes is loose on purpose -- it is here to reject *another
-# session's* stops, not to police seconds, and a Hold & Spin can put a minute between the
-# stop landing and the frame being shot.
+# How far before the frame an entry may sit and still be that frame's spin. The measured gap is a
+# few seconds; 15 minutes is loose on purpose -- it rejects *another session's* stops rather than
+# policing seconds, and a Hold & Spin can put a minute between the stop and the frame.
 DEFAULT_TOLERANCE_S = 900
 
-STOPS_RE = re.compile(r'"BaseGameReelStops"\s*:\s*\[([^\]]*)\]')
-NUMBER_RE = re.compile(r'-?\d+')
-TIMESTAMP_RE = re.compile(r'"Timestamp_ISO8601"\s*:\s*"([^"]+)"')
-GAME_ID_RE = re.compile(r'"Game_Id"\s*:\s*"([^"]+)"')
+# Named once, so the error messages cannot drift from the pattern.
+MARKER = "[Slot.HandleSlotReelStoppedMessage] reelsStops[...]"
+
+STOPS_RE = re.compile(r'HandleSlotReelStoppedMessage\]\s*reelsStops\[([0-9\s]+)\]')
+TIMESTAMP_RE = re.compile(r'^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d+)')
+TIMESTAMP_FMT = "%m/%d/%y %H:%M:%S.%f"
 
 
 class TelemetryError(Exception):
@@ -60,12 +50,11 @@ class TelemetryError(Exception):
 
 
 class Entry:
-    """One `BaseGameReelStops` line: the stops, and enough to say which spin it was."""
+    """One reel-stops line: the stops, and enough to say which spin it was."""
 
-    def __init__(self, stops, timestamp, game_id, path, line_no):
+    def __init__(self, stops, timestamp, path, line_no):
         self.stops = stops
         self.timestamp = timestamp          # naive local datetime, or None if unparsable
-        self.game_id = game_id
         self.path = path
         self.line_no = line_no
 
@@ -73,31 +62,49 @@ class Entry:
         return {
             "stops": self.stops,
             "timestamp": self.timestamp.isoformat(sep=" ") if self.timestamp else None,
-            "game_id": self.game_id,
             "file": os.path.basename(self.path),
             "line": self.line_no,
         }
 
 
-def telemetry_dir(cfg: dict, settings: dict) -> str:
-    """Where to look. `payline.reel_stops.telemetry_dir` wins; otherwise it is derived from
-    `target.process`, so a second game needs no config edit -- `FortuneOx.exe` becomes
-    `C:\\logs\\Telemetry\\Data\\FortuneOx`."""
-    configured = (settings.get("reel_stops") or {}).get("telemetry_dir")
-    if configured:
-        return configured
-    process = (cfg.get("target") or {}).get("process") or ""
-    return os.path.join(DEFAULT_DIR_ROOT, os.path.splitext(process)[0] or "")
+def game_logs(cfg: dict) -> list[str]:
+    """The active game's log and its rotated siblings, oldest first.
+
+    One name in one place, `games.<exe>.log` -- deliberately no payline-level override, since a
+    second setting naming the same file is what `telemetry_dir` was.
+
+    Ordered by **name**, not mtime: the rotated names carry a sortable timestamp and sort before the
+    live log, while mtime lies because the game holds the handle open. Only a stable pre-order
+    anyway; `collect_entries` sorts on each line's own clock.
+    """
+    game = cfg.get("game") or {}
+    configured = game.get("log")
+    if not configured:
+        raise TelemetryError(
+            "the active game has no \"log\" in game_config.json, so there is nowhere to read "
+            "this spin's reel stops from. Set games.<exe>.log to the file the game writes, or "
+            "set payline.reel_stops.enabled to false to audit on the pixels alone")
+
+    live = resolve(configured)
+    folder, name = os.path.split(live)
+    stem, ext = os.path.splitext(name)
+    rotated = glob.glob(os.path.join(glob.escape(folder),
+                                     glob.escape(stem) + "-*" + glob.escape(ext)))
+    paths = sorted({live, *rotated})
+    paths = [p for p in paths if os.path.isfile(p)]
+    if not paths:
+        raise TelemetryError(
+            f"the game log {live} does not exist, so this spin's reel stops cannot be read. "
+            f"Check games.<exe>.log in game_config.json, or set payline.reel_stops.enabled to "
+            f"false to audit on the pixels alone")
+    return paths
 
 
 def _timestamp(text: str) -> dt.datetime | None:
-    """The first 19 characters of `2026-08-13T15:58:0905:30`, which is the part that is real.
-
-    The offset is written without its sign, so the tail is dropped rather than guessed at --
-    everything this is compared against (a file's mtime) is local time anyway.
-    """
+    """`08/06/26 00:07:29.861` -> a naive local datetime. Month first, and everything it is
+    compared against (a frame's mtime) is local time too."""
     try:
-        return dt.datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")
+        return dt.datetime.strptime(text, TIMESTAMP_FMT)
     except (ValueError, TypeError):
         return None
 
@@ -110,55 +117,46 @@ def read_entries(path: str) -> list[Entry]:
             found = STOPS_RE.search(line)
             if not found:
                 continue
-            stops = [int(n) for n in NUMBER_RE.findall(found.group(1))]
+            stops = [int(n) for n in found.group(1).split()]
             if not stops:
                 continue
-            stamp = TIMESTAMP_RE.search(line)
-            game = GAME_ID_RE.search(line)
+            stamp = TIMESTAMP_RE.match(line)
             entries.append(Entry(stops,
                                  _timestamp(stamp.group(1)) if stamp else None,
-                                 game.group(1) if game else None,
                                  path, line_no))
     return entries
 
 
-def newest_file_with_entries(folder: str) -> tuple[str, list[Entry]]:
-    """The newest file in `folder` that holds any reel stops, and its entries."""
-    if not os.path.isdir(folder):
+def collect_entries(paths: list[str]) -> list[Entry]:
+    """Every reel-stops line across the logs, oldest first.
+
+    Merged rather than "the newest file that has any", because rotation puts an older run's stops in
+    a sibling and `pick_entry` chooses on the frame's own time, not on the file.
+    """
+    entries: list[Entry] = []
+    for path in paths:
+        entries.extend(read_entries(path))
+    if not entries:
         raise TelemetryError(
-            f"the telemetry folder {folder} does not exist. Set "
-            f"payline.reel_stops.telemetry_dir in config.json to the folder the game writes "
-            f"its telemetry to, or set payline.reel_stops.enabled to false to audit on the "
-            f"pixels alone")
-
-    files = [os.path.join(folder, name) for name in os.listdir(folder)]
-    files = [p for p in files if os.path.isfile(p)]
-    if not files:
-        raise TelemetryError(f"the telemetry folder {folder} is empty")
-
-    # Newest first, and the first one that *has* stops wins -- the client files in this folder
-    # have none, and one of them is newer than the server file that does.
-    for path in sorted(files, key=os.path.getmtime, reverse=True):
-        entries = read_entries(path)
-        if entries:
-            return path, entries
-
-    raise TelemetryError(
-        f"none of the {len(files)} files in {folder} contains a BaseGameReelStops entry. That "
-        f"marker is written by the game server's telemetry -- check that the game has played "
-        f"at least one spin since it was started")
+            f"none of the {len(paths)} game log(s) at "
+            f"{os.path.dirname(paths[-1]) or '.'} contains a {MARKER} line. That marker is "
+            f"written when the reels stop, so check that a spin has been played since the game "
+            f"started, and that this game writes it to the log games.<exe>.log names -- "
+            f"FortuneOx logs it to its *server* log, which that key does not point at")
+    # By each line's own clock rather than by file, the mtime being unreliable while the game holds
+    # the handle open. Undated lines sort first, so the `entries[-1]` fallback lands on a dated one.
+    entries.sort(key=lambda e: e.timestamp or dt.datetime.min)
+    return entries
 
 
 def pick_entry(entries: list[Entry], frame_time: dt.datetime | None,
                tolerance_s: float = DEFAULT_TOLERANCE_S) -> tuple[Entry, str, bool]:
     """The entry for the frame being audited, how it was chosen, and whether that is *proof*.
 
-    The last entry at or before `frame_time` is this frame's spin (the stops land 3-4 s before
-    the frame is shot), and the third element is True only then. With no frame time, or nothing
-    inside the tolerance, the last entry in the file is returned with False beside it -- and the
-    caller must not decide a COMPARE on it. Run `2026-08-13_114200` is why that flag exists: it
-    was captured at 11:42, the telemetry file on disk begins at 12:08, and the nearest thing to
-    it is a spin four hours later whose reels have nothing to do with that frame.
+    The last entry at or before `frame_time` is this frame's spin, and the third element is True
+    only then. Otherwise the last entry comes back with False beside it and the caller must not
+    decide a COMPARE on it -- one run on disk was captured at 11:42 against a log beginning at
+    12:08, where the nearest entry was a spin four hours later.
     """
     if frame_time is not None:
         before = [e for e in entries
@@ -170,20 +168,20 @@ def pick_entry(entries: list[Entry], frame_time: dt.datetime | None,
             gap = (frame_time - best.timestamp).total_seconds()
             return best, f"the frame's own time, {gap:.0f}s after these stops landed", True
         return entries[-1], (
-            f"the last entry in the file -- no stops within {tolerance_s:.0f}s before the "
+            f"the last entry in the log -- no stops within {tolerance_s:.0f}s before the "
             f"frame, so this is a different spin"), False
-    return entries[-1], "the last entry in the file (the frame has no timestamp to match)", False
+    return entries[-1], "the last entry in the log (the frame has no timestamp to match)", False
 
 
-def latest_stops(folder: str, frame_path: str | None = None,
+def latest_stops(cfg: dict, frame_path: str | None = None,
                  tolerance_s: float = DEFAULT_TOLERANCE_S) -> dict:
-    """The reel stops to audit against, with everything needed to check that choice.
+    """The reel stops to audit against, plus everything needed to check that choice.
 
-    Returns the entry's own description plus `matched_by`, `entries` (how many were in the
-    file) and `frame_time`. Raises `TelemetryError` with the folder named when there is
-    nothing to read -- the caller decides whether that is fatal.
+    Raises `TelemetryError` naming the config key when there is nothing to read; the caller decides
+    whether that is fatal.
     """
-    path, entries = newest_file_with_entries(folder)
+    paths = game_logs(cfg)
+    entries = collect_entries(paths)
 
     frame_time = None
     if frame_path and os.path.isfile(frame_path):
@@ -192,12 +190,12 @@ def latest_stops(folder: str, frame_path: str | None = None,
     entry, matched_by, matched = pick_entry(entries, frame_time, tolerance_s)
     record = entry.describe()
     record.update({
-        "folder": folder,
-        "path": path,
+        "path": entry.path,
+        "logs": len(paths),
         "entries": len(entries),
         "matched_by": matched_by,
         "matched": matched,
         "frame_time": frame_time.isoformat(sep=" ") if frame_time else None,
     })
-    LOG.info("reel stops %s from %s (%s)", entry.stops, os.path.basename(path), matched_by)
+    LOG.info("reel stops %s from %s (%s)", entry.stops, os.path.basename(entry.path), matched_by)
     return record

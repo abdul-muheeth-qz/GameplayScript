@@ -1,10 +1,7 @@
 import type { Health } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
-/**
- * One dot per thing that has to be up, with the reason on hover. OBS is allowed to be
- * down -- the capture step opens it -- so it is drawn amber rather than red.
- */
+/** One dot per thing that has to be up. OBS may be down -- capture opens it -- so it is amber. */
 const OPTIONAL = new Set(["obs"])
 
 export function HealthStrip({ health }: { health: Health | null }) {

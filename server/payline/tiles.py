@@ -1,18 +1,16 @@
-"""STEP 1a - crop the reels window out of the frame and cut it into cells.
+"""Crop the reel window out of the frame and cut it into cells.
 
-    payline/reels.png            the cropped reel window
-    payline/tiles/e11.png ...    one file per cell, lowercase names
-    payline/tiles/contact_sheet.png   all cells on one image, labelled
+    payline/reels.png                 the cropped reel window
+    payline/tiles/e11.png ...         one file per cell, lowercase
+    payline/tiles/contact_sheet.png   all cells on one labelled image
 
-**Look at the contact sheet before trusting a single similarity number.** Every number this
-stage feeds downstream is meaningless if the crop is half a cell out, and the sheet shows
-that in one glance -- which is why the tiles are their own step in the UI rather than an
-invisible part of the reading.
+**Look at the contact sheet before trusting a similarity number.** Every number downstream is
+meaningless if the crop is half a cell out, and the sheet shows that in one glance.
 
-The crop resolves through `server.geometry.pixel_box`, the same rule `extract` crops the
-meter strip with. Two levels of it: the ROI is a fraction of the frame, and each cell is a
-fraction of the ROI. The inner margin is a fraction of the cell, not a pixel count, so a
-bigger screen trims proportionally rather than shaving a sliver off a much larger tile.
+Both levels of the crop go through the shared rule and neither restates it: the reel window via
+`utils.crop_roi`, the cells via `geometry.pixel_box` underneath it. One box, keyed by the active
+game, never a choice between boxes -- a wrong reel window does not fail, it reads a confident grid
+off unrelated pixels.
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ import os
 from PIL import Image, ImageDraw
 
 from ..geometry import pixel_box
+from ..utils import RoiCropError, crop_roi
 from .geometry import PaylineError, cell_name
 
 LOG = logging.getLogger("payline")
@@ -33,39 +32,47 @@ CONTACT_SHEET = "contact_sheet.png"
 
 
 def crop_reels(image_path: str, geometry) -> Image.Image:
-    """Open a frame and return just the reel window."""
+    """Open a frame and return just the reel window.
+
+    `RoiCropError` is translated to `PaylineError` because that is what this package's callers
+    catch; an escaping ValueError would reach the browser as a 500 with a traceback instead of as
+    the prose it already is.
+    """
     try:
         frame = Image.open(image_path).convert("RGB")
     except OSError as exc:
         raise PaylineError(f"cannot read {image_path}: {exc}") from None
 
-    edges = pixel_box(geometry.reels_roi, frame.width, frame.height)
-    if edges is None:
-        raise PaylineError(
-            f"the reels ROI {geometry.reels_roi} is empty on a "
-            f"{frame.width}x{frame.height} frame -- check reels_roi for "
-            f"{geometry.process} in server/payline/geometry.py")
-    return frame.crop(edges)
+    try:
+        return crop_roi(frame, geometry.reels_roi,
+                        what=f"the reels ROI for {geometry.process} (reels_roi in "
+                             f"game_config.json's games[\"{geometry.process}\"]"
+                             f".payline_geometry)")
+    except RoiCropError as exc:
+        raise PaylineError(str(exc)) from None
+
+
+def _inset(lo: float, hi: float, margin_frac: float) -> tuple[float, float]:
+    """One cell's bounds with the margin trimmed off both ends, still as fractions -- which is what
+    lets `pixel_box` do the rounding for both levels."""
+    margin = (hi - lo) * margin_frac
+    return lo + margin, hi - margin
 
 
 def cell_boxes(geometry, roi_size: tuple[int, int]) -> dict[str, tuple[int, int, int, int]]:
-    """{'E11': (x0, y0, x1, y1), ...} in pixels within an ROI of `roi_size`.
+    """{'E11': (x0, y0, x1, y1), ...} in pixels within an ROI of `roi_size`, margin trimmed.
 
-    The margin is already trimmed off every side. Edges come from the fractions
-    independently rather than from a per-cell pixel width, so a cell's right edge lands on
-    exactly the pixel the gutter beside it starts at.
+    Edges come from the fractions independently, through `pixel_box` rather than a second copy of
+    that rule, so a cell's right edge lands exactly on the pixel its gutter starts at.
     """
     roi_w, roi_h = roi_size
     boxes = {}
     for r, (fy0, fy1) in enumerate(geometry.row_bounds, start=1):
         for c, (fx0, fx1) in enumerate(geometry.reel_bounds, start=1):
-            x0, x1 = fx0 * roi_w, fx1 * roi_w
-            y0, y1 = fy0 * roi_h, fy1 * roi_h
-            margin_x = (x1 - x0) * geometry.inner_margin_frac
-            margin_y = (y1 - y0) * geometry.inner_margin_frac
-            box = (round(x0 + margin_x), round(y0 + margin_y),
-                   round(x1 - margin_x), round(y1 - margin_y))
-            if box[2] <= box[0] or box[3] <= box[1]:
+            x0, x1 = _inset(fx0, fx1, geometry.inner_margin_frac)
+            y0, y1 = _inset(fy0, fy1, geometry.inner_margin_frac)
+            box = pixel_box((x0, y0, x1, y1), roi_w, roi_h)
+            if box is None:
                 raise PaylineError(
                     f"cell {cell_name(r, c)} is empty on a {roi_w}x{roi_h} reel window. "
                     f"The frame is too small for this geometry, or inner_margin_frac "
@@ -76,11 +83,8 @@ def cell_boxes(geometry, roi_size: tuple[int, int]) -> dict[str, tuple[int, int,
 
 def build_tiles(image_path: str, geometry, out_dir: str | None = None,
                 save: bool = True) -> tuple[dict[str, Image.Image], Image.Image, dict]:
-    """Crop the reel window, cut the cells, optionally save them.
-
-    Returns `(tiles, reels, info)` -- the cells by name, the reel window itself, and what
-    the record should say about this crop.
-    """
+    """`(tiles, reels, info)` -- the cells by name, the reel window, and what the record should say
+    about this crop."""
     reels = crop_reels(image_path, geometry)
     boxes = cell_boxes(geometry, reels.size)
     tiles = {name: reels.crop(box) for name, box in boxes.items()}
@@ -88,7 +92,7 @@ def build_tiles(image_path: str, geometry, out_dir: str | None = None,
     any_box = next(iter(boxes.values()))
     info = {
         "image": os.path.basename(image_path),
-        "frame_size": None,          # filled by the caller, which knows the whole frame
+        "frame_size": None,          # the caller fills it; it knows the whole frame
         "reels_size": f"{reels.width}x{reels.height}",
         "tile_size": f"{any_box[2] - any_box[0]}x{any_box[3] - any_box[1]}",
         "cells": len(tiles),
@@ -146,37 +150,52 @@ def load_tiles(out_dir: str, geometry) -> dict[str, Image.Image] | None:
     return tiles
 
 
-# ---------------------------------------------------------------------------
-# measuring a new game
-# ---------------------------------------------------------------------------
+# The reel background as named bounds rather than as an expression: "clearly coloured, and neither
+# the bright frame art nor near-black". These five numbers describe FortuneOx's purple field, which
+# is the only art they were measured on, so a game whose reels sit on another colour sets its own
+# `reel_background` in its `payline_geometry` block and needs no code edit.
+#
+# **This one keeps a default, unlike every other per-game number here, and the reason is the
+# bootstrap:** `--profile` is what a person runs *before* that game has a block at all, so requiring
+# one would mean needing the config in order to measure the config. It is safe to default precisely
+# because this function reports and never decides -- a wrong mask shows up as obviously wrong density
+# numbers a human is reading, and it cannot reach a verdict. `background_source` says which was used.
+DEFAULT_REEL_BACKGROUND = {
+    "blue_min": 55,
+    "green_max": 75,
+    "red_max": 150,
+    "blue_over_green": 35,
+    "red_over_green": 5,
+}
+
+
+def background_for(cfg: dict | None) -> tuple[dict, str]:
+    """The active game's reel-background bounds, and where they came from."""
+    game = (cfg or {}).get("game") or {}
+    block = (game.get("payline_geometry") or {}).get("reel_background")
+    if block:
+        merged = dict(DEFAULT_REEL_BACKGROUND)
+        merged.update(block)
+        return merged, f"games.{game.get('process')}.payline_geometry.reel_background"
+    return dict(DEFAULT_REEL_BACKGROUND), "the built-in default (measured on FortuneOx's purple)"
+
 
 def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
-            sparse: float = 0.10) -> dict:
+            sparse: float = 0.10, background_bounds: dict | None = None) -> dict:
     """Reel-background density along both axes of a region -- the measuring aid for a new game.
 
-    Given a rough box around the reels (read off any image viewer), this reports where the
-    background actually starts and stops, and which columns inside it hold almost none --
-    which on a game with gutters between the reels is exactly the reel boundaries. That is
-    the measurement the shipped FortuneOx block came from, and it is a *reporting* tool: it
-    prints profiles for a person to read, and does not decide anything.
+    Given a rough box around the reels, this reports where the background starts and stops and
+    which interior columns hold almost none of it, which on a game with gutters is the reel
+    boundaries. It **reports and does not detect**, and that is deliberate: two auto-detection
+    attempts failed on this cabinet's own frames, and neither should be retried.
 
-    **It deliberately does not try to find the box itself.** Two attempts at that were
-    written and both failed on this cabinet's own frames, in ways worth recording so they are
-    not retried:
+      * Thresholding row density collapses on large symbol art -- a row of J's leaves 70%
+        background where a row of pots leaves under 50%, so the window shrank to a 39 px sliver of
+        487 px; loosening it instead swept in the UI chrome and reported nearly the whole screen.
+      * Connected components with a morphological close merged all five reels into one blob: the
+        kernel that bridges a symbol also bridges an 8 px gutter, and none does one without the other.
 
-      * Thresholding row density (rows more than half background) collapses on large symbol
-        art. The J's leave a row 70% background; a row of pots and fish leaves it under 50%,
-        so the detected window shrank to a 39 px sliver of the 487 px it should be -- and
-        loosening the threshold instead swept in the purple UI chrome above and below the
-        reels and reported the window as nearly the whole screen.
-      * Connected components over the background mask, with a morphological close to stop
-        symbol art splitting a reel in two, merged all five reels into one blob: the close
-        that bridges a symbol also bridges an 8 px gutter, and there is no kernel that does
-        one without the other.
-
-    A wrong crop here is not a crash, it is a confident grid read off the wrong pixels, so
-    the numbers are worth a person's minute. Read the profile, take the edges, divide by the
-    frame size, check the contact sheet.
+    Read the profile, take the edges, divide by the frame size, check the contact sheet.
     """
     import numpy as np
 
@@ -184,11 +203,13 @@ def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
     height, width, _ = frame.shape
     red, green, blue = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
 
-    # The reel background is the saturated non-grey field the symbols sit on. Purple here;
-    # the test is "clearly coloured, and neither the bright frame art nor near-black". Edit
-    # it for a game whose reels sit on something else.
-    background = ((blue > 55) & (green < 75) & (blue > green + 35)
-                  & (red > green + 5) & (red < 150))
+    bounds = dict(DEFAULT_REEL_BACKGROUND)
+    bounds.update(background_bounds or {})
+    background = ((blue > bounds["blue_min"])
+                  & (green < bounds["green_max"])
+                  & (blue > green + bounds["blue_over_green"])
+                  & (red > green + bounds["red_over_green"])
+                  & (red < bounds["red_max"]))
 
     x0, x1 = max(0, x0), min(width, x1)
     y0, y1 = max(0, y0), min(height, y1)
@@ -217,12 +238,13 @@ def profile(image_path: str, x0: int, y0: int, x1: int, y1: int,
     return {
         "frame": f"{width}x{height}",
         "searched": (x0, y0, x1, y1),
-        # Where the background begins and ends inside the region searched. These are the
-        # reels_roi edges, if the region was drawn generously enough around them.
+        # Which mask produced these numbers. A density profile read off the wrong background is the
+        # one way this aid misleads, so it says so rather than leaving it to be inferred.
+        "background_bounds": bounds,
+        # The reels_roi edges, if the region was drawn generously enough around them.
         "background_rows": vertical,
         "background_cols": horizontal,
-        # Interior runs holding almost no background: the gutters between reels, plus the
-        # margins if the region was drawn wider than the reels.
+        # The gutters between reels, plus the margins if the region was drawn wider than them.
         "sparse_col_runs": gutters,
         "row_density": [round(float(f), 3) for f in rows],
         "col_density": [round(float(f), 3) for f in cols],

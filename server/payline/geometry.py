@@ -1,99 +1,48 @@
-"""Where the reels are, and what a payline is -- the only file to edit for a new game.
+"""Where the reels are, and what a payline is -- the rule, over numbers a person edits.
 
-Same role `slotocr/roi_config.py` plays for the meter strip, and the same idiom: every
-number here is a **fraction**, never a pixel. Three levels of it, because the thing being
-located is nested:
+The numbers are `games.<exe>.payline_geometry` in game_config.json, beside that game's `meter_roi`
+and `targets`, so one `active` line decides all of them. This module keeps the rule: what a valid
+block is, what a payline is, and the refusal to guess.
 
-    REELS_ROI      fractions of the whole FRAME     -- where the reel window is
-    reel/row_bounds  fractions of that ROI          -- where the 15 cells are inside it
-    inner_margin_frac  fraction of each CELL        -- how much to trim off every side
+Every number is a fraction, never a pixel, at three nested levels -- `reels_roi` of the FRAME,
+`reel_bounds`/`row_bounds` of that ROI, `inner_margin_frac` of each CELL. That is what survives a
+bigger screen: the same frame from 0.6x to 3.0x reads the identical grid, where a flat 8 px margin
+would be a fifth of a cell at one end and a fortieth at the other.
 
-That is what makes it work on a bigger screen. The same frame resampled from 0.6x to 3.0x
-(648x1109 up to 3240x5547) read the identical grid and the identical five verdicts at every
-size. A flat pixel margin would not have: 8 px is a fifth of a cell at 0.6x and a fortieth
-at 3x, so it is expressed against the cell it trims.
+**Keyed by the active game, and a game with no block raises.** Fractions survive a change of scale,
+not of aspect ratio or of game art -- FortuneOx's reel window on HuffNPuffLink's portrait frame
+lands on unrelated pixels and reports a confident grid. Never fall back to another game's numbers.
 
-**Keyed by `target.process`, and a game with no block raises.** Fractions survive a change
-of *scale*; they do not survive a change of *aspect ratio* or of game art. FortuneOx's reel
-window is 0.045-0.956 of the width and 0.564-0.827 of the height; applying that to
-HuffNPuffLink's 612x961 portrait window lands on the wrong pixels entirely and would report
-a confident grid read off whatever art happened to be there. `gameclick` learned this the
-expensive way -- run 2026-08-12_131459 clicked HuffNPuffLink's TAKE WIN fraction on FortuneOx,
-hit empty space and killed the capture -- so this follows `game.games`'s rule: **name the
-process and refuse, never fall back to another game's numbers.**
-
-To add a game, and this is the procedure the FortuneOx block below came from:
-
-    python -m server.payline.cli --profile <a spin_result.png> 0 900 1080 1600
-
-Draw a rough box around the reels first (any image viewer will do) and hand it those four
-numbers. It reports where the reel background actually begins and ends inside that box and
-which columns hold almost none of it -- the gutters between reels. Divide the edges by the
-frame's width and height for `reels_roi`, express the gutters as fractions of the ROI's width
-for `reel_bounds`, and check the result on `payline/tiles/contact_sheet.png` before trusting
-a single similarity number.
-
-**It will not find the box for you, and that is not an omission.** Two auto-detection
-approaches were written and measured against this cabinet's nine FortuneOx frames, and both
-failed; `tiles.profile`'s docstring records how, so they are not retried. A wrong crop here
-does not crash -- it reads a confident grid off the wrong pixels -- which is worth a person's
-minute.
+Adding a game is `--profile` plus a block, and no code edit. `--profile` reports rather than
+detects: two auto-detection approaches were measured and failed, and `tiles.profile`'s docstring
+records how so neither is retried.
 """
 
 from __future__ import annotations
+
+import json
+
+from ..settings import DEFAULT_GAME_CONFIG
 
 
 class PaylineError(Exception):
     """Something went wrong in a way the user can act on."""
 
 
-# The Payline.xlsx rule set: five lines over a 3x5 grid, cells named E{row}{reel} with
-# row 1 at the top and reel 1 at the left. A game whose paytable differs sets its own
-# `paylines` in its block below; these are the default because they are the spec the
-# logic in paylines.py was written and tested against.
-DEFAULT_PAYLINES = [
-    {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
-    {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
-    {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
-    {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
-    {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]},
-]
+# The Payline.xlsx rule set: five lines over a 3x5 grid, cells E{row}{reel} with row 1 at the top
+# and reel 1 at the left. A game whose paytable differs sets its own `paylines`, and **the shipped
+# block now does state these explicitly** -- they are the spec's lines and not FortuneOx's real
+# paytable, so a config that leans on a code literal for them reads as though the paytable had been
+# checked. This stays as the default for a block that omits the key, because it is the rule set
+# `paylines.py` and `test_paylines.py` were written and verified against.
 
 
-GAMES = {
-    "FortuneOx.exe": {
-        "label": "fortuneox_portrait",
-        "measured_on": "1080x1849",
-        "notes":
-            "Measured off captured_files/2026-08-12_124528/spin_result.png rather than "
-            "converted from the POC's hardcoded pixels, which were taken on a 1073x1852 "
-            "capture and sit ~7 px left of the reels here (and include a slice of the red "
-            "frame). The reel background is a flat purple that no other part of the screen "
-            "shares, so all four edges are unambiguous: 0.0% purple above y1042 and below "
-            "y1528, none left of x49 or right of x1032. The four gutters between reels are "
-            "8 px of non-purple at x239-246, 438-445, 636-643 and 835-842, which is where "
-            "reel_bounds' gaps come from -- the gold frame between reels is therefore "
-            "outside every cell rather than inside one. Rows have no gutter at all (the "
-            "purple is continuous top to bottom), so an even three-way split is not an "
-            "approximation here, it is the layout.",
-        "reels_roi": [0.045370, 0.563548, 0.956481, 0.826933],
-        "reel_bounds": [
-            [0.000000, 0.193089],   # px  49..238
-            [0.201220, 0.395325],   # px 247..437
-            [0.403455, 0.596545],   # px 446..635
-            [0.604675, 0.798780],   # px 644..834
-            [0.806911, 1.000000],   # px 843..1032
-        ],
-        "row_bounds": [
-            [0.000000, 0.333333],   # px 1042..1203
-            [0.333333, 0.666667],   # px 1204..1366
-            [0.666667, 1.000000],   # px 1367..1528
-        ],
-        # 0.0407 of a cell, which is the POC's 8 px against the 196x162 cell it was
-        # trimming. Keeps the gold frame and a tall neighbour's artwork out of the tile.
-        "inner_margin_frac": 0.0407,
-    },
-}
+
+# The key a game's block carries its reel geometry under, in game_config.json.
+GEOMETRY_KEY = "payline_geometry"
+
+# The three with no safe default. `label` and `inner_margin_frac` have one.
+REQUIRED_KEYS = ("reels_roi", "reel_bounds", "row_bounds")
 
 
 class Geometry:
@@ -102,13 +51,33 @@ class Geometry:
     def __init__(self, process: str, block: dict):
         self.process = process
         self.label = block.get("label", "unnamed")
-        self.notes = block.get("notes", "")
         self.measured_on = block.get("measured_on")
-        self.reels_roi = list(block["reels_roi"])
-        self.reel_bounds = [list(b) for b in block["reel_bounds"]]
-        self.row_bounds = [list(b) for b in block["row_bounds"]]
-        self.inner_margin_frac = float(block.get("inner_margin_frac", 0.0))
-        self.paylines = block.get("paylines") or DEFAULT_PAYLINES
+
+        # Hand-edited JSON, so a missing key or a quoted number arrives at runtime rather than being
+        # a typo caught while writing a literal. Named against the key to fix, or the alternative is
+        # a KeyError on the browser's screen.
+        where = f"payline geometry for {process} ({self.label})"
+        missing = [key for key in REQUIRED_KEYS if key not in block]
+        if missing:
+            raise PaylineError(
+                f"{where}: {GEOMETRY_KEY} in game_config.json has no "
+                f"{', '.join(repr(k) for k in missing)}. A block needs "
+                f"{', '.join(REQUIRED_KEYS)}; measure them with "
+                f"`python -m server.payline.cli --profile <a spin_result.png> X0 Y0 X1 Y1`")
+        try:
+            self.reels_roi = [float(v) for v in block["reels_roi"]]
+            self.reel_bounds = [[float(v) for v in pair] for pair in block["reel_bounds"]]
+            self.row_bounds = [[float(v) for v in pair] for pair in block["row_bounds"]]
+            self.inner_margin_frac = float(block.get("inner_margin_frac", 0.0))
+        except (TypeError, ValueError):
+            raise PaylineError(
+                f"{where}: every number in {GEOMETRY_KEY} must be a plain JSON number, and "
+                f"reel_bounds/row_bounds a list of [start, end] pairs. Got reels_roi="
+                f"{block.get('reels_roi')!r}, reel_bounds={block.get('reel_bounds')!r}, "
+                f"row_bounds={block.get('row_bounds')!r}, inner_margin_frac="
+                f"{block.get('inner_margin_frac')!r}") from None
+
+        self.paylines = block.get("paylines") 
         self._validate()
 
     @property
@@ -133,10 +102,8 @@ class Geometry:
     def _validate(self):
         """Refuse numbers that would otherwise crop silently wrong.
 
-        `geometry.pixel_box` clamps to the image, so a fraction above 1.0 or a pair the
-        wrong way round does not raise on its own -- it quietly returns a crop of the
-        frame's edge, and every meter reads as an unrecognisable symbol with nothing to
-        say why. Named here instead, against the key to fix.
+        `geometry.pixel_box` clamps to the image, so a fraction above 1.0 or an inverted pair does
+        not raise on its own -- it returns a crop of the frame's edge with nothing to say why.
         """
         where = f"payline geometry for {self.process} ({self.label})"
 
@@ -214,30 +181,66 @@ def cell_name(row: int, reel: int) -> str:
     return f"E{row}{reel}"
 
 
-def geometry_for(cfg: dict) -> Geometry:
-    """The geometry for the game named by `target.process` in config.json.
+def configured_games(games_path: str | None = None) -> dict[str, dict]:
+    """Every game in game_config.json with a `payline_geometry` block, keyed by process.
 
-    Raises and names the process when there is no block for it. There is deliberately no
-    fallback: reading a grid off the wrong fractions produces a confident answer about
-    pixels that hold something else, which is worse than no answer. See the module
-    docstring for the run that established that.
+    Read off the file rather than a loaded `cfg`, because `cfg["game"]` is deliberately the only
+    view of the games. This is for the two questions about the *file*: which games the error below
+    should list, and the test modules' "does every shipped block validate".
     """
-    process = (cfg.get("target") or {}).get("process")
+    path = games_path or DEFAULT_GAME_CONFIG
+    try:
+        with open(path, encoding="utf-8") as fh:
+            games = (json.load(fh) or {}).get("games") or {}
+    except (OSError, ValueError):
+        return {}
+    return {process: (block or {})[GEOMETRY_KEY]
+            for process, block in games.items()
+            if (block or {}).get(GEOMETRY_KEY)}
+
+
+def geometry_for_game(process: str, games_path: str | None = None) -> Geometry:
+    """One named game's geometry, whatever `active` currently says -- what the test modules and an
+    audit of an old capture need. Same refusal: a process with no block raises."""
+    blocks = configured_games(games_path)
+    if process not in blocks:
+        raise PaylineError(_no_block_message(process, games_path))
+    return Geometry(process, blocks[process])
+
+
+def _no_block_message(process: str, games_path: str | None = None) -> str:
+    """The refusal, in one place -- both callers must say the same thing.
+
+    It names the file it was read from rather than saying "game_config.json", because `--config`
+    points at another folder's pair and the listing would then come from a file this run never read.
+    """
+    path = games_path or DEFAULT_GAME_CONFIG
+    known = ", ".join(sorted(configured_games(path))) or "none"
+    return (f"no payline reel geometry for {process}. A game's block carries it under "
+            f"\"{GEOMETRY_KEY}\", and {path} sets it for: {known}. Reel positions are "
+            f"fractions of the frame and survive a change of screen size but NOT a change of "
+            f"game, so this will not fall back to another game's numbers -- measure this one "
+            f"with `python -m server.payline.cli --profile <a spin_result.png> X0 Y0 X1 Y1` "
+            f"(a rough box around the reels) and add a \"{GEOMETRY_KEY}\" block to "
+            f"games[\"{process}\"]")
+
+
+def geometry_for(cfg: dict) -> Geometry:
+    """The geometry for the active game, off `cfg["game"]` -- where `extract` reads `meter_roi`.
+
+    Raises and names the process when there is no block. There is deliberately no fallback: a grid
+    read off the wrong fractions is a confident answer about pixels holding something else.
+    """
+    game = cfg.get("game") or {}
+    process = game.get("process")
     if not process:
         raise PaylineError(
-            "config.json has no target.process, so there is no way to tell which game's "
-            "reel geometry to use. Set it to the game's executable name, e.g. "
-            "\"FortuneOx.exe\"")
+            "there is no active game, so there is no way to tell which game's reel "
+            "geometry to use. Set \"active\" in game_config.json to the game's executable "
+            "name, e.g. \"FortuneOx.exe\"")
 
-    block = GAMES.get(process)
-    if block is None:
-        known = ", ".join(sorted(GAMES)) or "none"
-        raise PaylineError(
-            f"no payline reel geometry for {process}. server/payline/geometry.py has "
-            f"blocks for: {known}. Reel positions are fractions of the frame and survive "
-            f"a change of screen size but NOT a change of game, so this will not fall "
-            f"back to another game's numbers -- measure this one with "
-            f"`python -m server.payline.cli --profile <a spin_result.png> X0 Y0 X1 Y1` "
-            f"(a rough box around the reels) and add a block for it")
+    block = game.get(GEOMETRY_KEY)
+    if not block:
+        raise PaylineError(_no_block_message(process))
 
     return Geometry(process, block)

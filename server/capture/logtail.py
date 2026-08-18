@@ -1,17 +1,13 @@
-"""Reading new lines out of a log file that something else is writing.
+"""Reading new lines out of a log file something else is writing. Safety-critical for both readers.
 
-Both logs this project watches are appended to live by a long-running service, and both need
-the same three things handled. Each one is a real failure seen on this machine, not a
-precaution:
+Three things, each a real failure seen here rather than a precaution:
 
-1. **Only whole lines.** A read can land mid-line. Consuming the partial tail loses the rest
-   of that line forever, and the event it described never registers.
-2. **Rotation.** The platform rolls these logs at ~20 MB into `<name>-YYYYMMDD-HHMMSS.log` and
-   starts a fresh one. A reader holding a byte offset then seeks past the end of a much shorter
-   file and goes quiet -- reporting nothing, looking healthy.
-3. **Never trust the file's timestamp.** While the writer holds the handle open, Windows leaves
-   the directory entry stale: `HuffNPuffLink_Theme.log` reported a modification time of 11:04
-   while it was being appended to at 14:31. Liveness is decided by reading, not by mtime.
+1. **Only whole lines.** A read can land mid-line, and consuming the partial tail loses the rest of
+   it forever.
+2. **Rotation.** These logs roll at ~20 MB, so a reader holding a byte offset seeks past the end of a
+   much shorter file and goes quiet -- reporting nothing, looking healthy.
+3. **Never trust the file's timestamp.** The writer holds the handle open, so the directory entry is
+   stale: one log reported 11:04 while being appended to at 14:31.
 """
 
 from __future__ import annotations

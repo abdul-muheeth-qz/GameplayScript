@@ -9,26 +9,13 @@ import { Figure } from "@/components/Figure"
 import { Heading } from "@/components/FramePanel"
 
 /**
- * The image being validated, shown before anything has been run, and the crops beside it as
- * the steps produce them.
+ * The image being validated, shown unprompted before anything has been run, because "which picture
+ * is this verdict about?" is the first question a payline result raises.
  *
- * The frame comes first and unprompted because "which picture is this verdict about?" is the
- * first question a payline result raises, and this page never captures -- so there is always an
- * answer available on load. The caption says which source it is, plainly: the newest capture's
- * `spin_result`, or a supplied `payline.image`.
- *
- * **A supplied image is a supported mode, not an error**, so it reads as a statement rather
- * than a warning. It is the whole point of `payline.image`: validating a chosen screenshot
- * while real captures sit on disk, which otherwise would mean emptying `captured_files/` first.
- * It still has to be *stated* — a stale setting auditing the wrong picture is invisible in the
- * pixels — but stating it in red would make the intended case look broken.
- *
- * **The crops are no longer here.** The reel window and the contact sheet moved into
- * `PaylineDetails`, the one disclosure below the verdict, so this panel is now only the frame
- * itself and the summary of every paying line drawn on it. The contact sheet is still the thing
- * to look at first when a number looks wrong -- every similarity in this stage is meaningless if
- * the crop is half a cell out, and the sheet shows that immediately where a table of cosines
- * never would -- it is just one click away instead of unprompted.
+ * **A supplied `payline.image` is a supported mode, not an error**, so it reads as a statement
+ * rather than a warning -- but it still has to be *stated*, a stale setting auditing the wrong
+ * picture being invisible in the pixels. The reel window and contact sheet live in
+ * `PaylineDetails` now, one click away instead of here.
  */
 
 export function PaylineImages({

@@ -1,27 +1,21 @@
-"""Stage 4 from the command line, over a run folder or a loose image.
+"""The payline audit from the command line, over a run folder or a loose image.
 
     python -m server.payline.cli                                    the newest usable capture
-    python -m server.payline.cli captured_files/<run>               one particular run
-    python -m server.payline.cli captured_files/<run> --tiles-only  just crop and cut
-    python -m server.payline.cli captured_files/<run> --json        the whole record
+    python -m server.payline.cli server/captured_files/<run>               one particular run
+    python -m server.payline.cli server/captured_files/<run> --tiles-only  just crop and cut
+    python -m server.payline.cli server/captured_files/<run> --json        the whole record
     python -m server.payline.cli --image <path>                     a loose image, forced
     python -m server.payline.cli --profile <path> X0 Y0 X1 Y1       measure a new game
 
-With no run folder it reads the newest capture that actually holds a `spin_result` -- the same
-default `POST /api/payline` uses, so the command line and the page agree about which spin "the
-latest one" is. `--image` is the way to force a particular file regardless of what is on disk;
-`payline.image` in config.json is only a fallback for when no capture has a frame.
+With no run folder it reads the newest capture that holds a `spin_result` -- the same default
+`POST /api/payline` uses, so the CLI and the page agree about which spin the latest one is.
+`--image` forces a particular file; `payline.image` in config.json is an override read *instead of*
+the captured frame whenever it is set.
 
-Exit codes follow the house rule that a test runner needs one distinction: `0` some line
-pays, `1` an error, `2` nothing pays. That is the same shape as `validate.cli`'s pass / error
-/ no-verdict and for the same reason -- the interesting outcome has to be distinguishable
-from the failure to reach one.
+Exit codes: `0` some line pays, `1` an error, `2` nothing pays -- the same shape as
+`validate.cli`, so the interesting outcome stays distinguishable from a failure to reach one.
 
-`--profile` is the aid for adding a game: give it a rough box around the reels and it reports
-where the reel background actually starts and stops and where the gutters are, for a person to
-turn into a `geometry.GAMES` block. It does not guess the box -- see `tiles.profile` for the
-two auto-detection approaches that were written, measured against this cabinet's frames, and
-thrown away.
+`--profile` is the aid for adding a game, and it reports rather than detecting; see `tiles.profile`.
 """
 
 from __future__ import annotations
@@ -44,7 +38,7 @@ EXIT_PAYS, EXIT_ERROR, EXIT_NO_PAY = 0, 1, 2
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("run_dir", nargs="?",
-                        help="a run folder under captured_files/ (default: the newest one "
+                        help="a run folder under server/captured_files/ (default: the newest one "
                              "holding a spin_result frame)")
     parser.add_argument("--image", help="validate this image instead of a run's frame")
     parser.add_argument("--profile", nargs=5, metavar=("IMAGE", "X0", "Y0", "X1", "Y1"),
@@ -52,7 +46,7 @@ def main(argv=None) -> int:
     parser.add_argument("--tiles-only", action="store_true",
                         help="crop and cut the tiles, then stop")
     parser.add_argument("--json", action="store_true", help="print the whole record")
-    parser.add_argument("--config", help="a config.json other than the repository's")
+    parser.add_argument("--config", help="a config.json other than server/config.json")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -66,24 +60,27 @@ def main(argv=None) -> int:
         return EXIT_ERROR
 
     if args.profile:
-        from .tiles import profile
+        from .tiles import background_for, profile
 
         image, *box = args.profile
+        # The active game's own reel-background bounds when it has them, and the built-in default
+        # otherwise -- which is the normal case here, `--profile` being what you run for a game that
+        # has no block yet. Either way the answer names which was used.
+        bounds, origin = background_for(cfg)
         try:
-            result = profile(image, *(int(v) for v in box))
+            result = profile(image, *(int(v) for v in box), background_bounds=bounds)
         except (PaylineError, ValueError) as exc:
             print(exc, file=sys.stderr)
             return EXIT_ERROR
-        # The two density arrays are hundreds of numbers each and only useful when reading
-        # an edge by hand, so they stay out of the summary unless asked for.
+        result["background_source"] = origin
+        # Hundreds of numbers each, and only useful when reading an edge by hand.
         dense = {k: result.pop(k) for k in ("row_density", "col_density")}
         print(json.dumps(result, indent=2))
         if args.verbose:
             print(json.dumps(dense, indent=2))
         return EXIT_PAYS
 
-    # A loose image is judged in a scratch folder, so the run-folder contract holds for it
-    # too and nothing has to special-case "there is no run".
+    # In a scratch folder, so the run-folder contract holds for a loose image too.
     temp = None
     if args.image:
         if not os.path.isfile(args.image):
@@ -98,7 +95,7 @@ def main(argv=None) -> int:
             print(f"no such run folder: {run_dir}", file=sys.stderr)
             return EXIT_ERROR
     else:
-        # The same default the API uses, so "the latest capture" means one thing across both.
+        # The API's default, so "the latest capture" means one thing across both.
         from .. import frames as frame_names
         from .. import runs
 
