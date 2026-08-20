@@ -16,8 +16,13 @@ checkpoint is even about the right spin**: the stops line lands a few seconds be
 belongs to, so the default is the last entry at or before the frame's own timestamp, and falling
 back to the last entry in the file is *reported* (`matched_by`), never silent.
 
-Not every game writes it -- FortuneOx logs it to a second file this does not point at -- and that is
-reported as `unavailable` rather than worked around.
+**And not every game writes it to the log the capture stage reads.** FortuneOx splits its logging
+into `FortuneOx_Client.log` (the terminal events, the denom, the collect) and
+`FortuneOx_Server.log` (the reel stops), so `games.<exe>.reel_stops_log` names the file *this*
+module reads when the two differ, falling back to `games.<exe>.log` when it is absent. A game with
+neither still reports `unavailable` rather than being worked around, and the fallback is on the key
+being *missing* -- never on the named file turning out to hold no stops, which is the silent
+cross-file guess this exists to avoid.
 """
 
 from __future__ import annotations
@@ -39,6 +44,11 @@ DEFAULT_TOLERANCE_S = 900
 
 # Named once, so the error messages cannot drift from the pattern.
 MARKER = "[Slot.HandleSlotReelStoppedMessage] reelsStops[...]"
+
+# The per-game key this module reads, and the one it falls back to. Both named here so every error
+# message below names the key actually in use rather than a guess at which one the reader set.
+STOPS_LOG_KEY = "reel_stops_log"
+LOG_KEY = "log"
 
 STOPS_RE = re.compile(r'HandleSlotReelStoppedMessage\]\s*reelsStops\[([0-9\s]+)\]')
 TIMESTAMP_RE = re.compile(r'^(\d\d/\d\d/\d\d \d\d:\d\d:\d\d\.\d+)')
@@ -67,23 +77,43 @@ class Entry:
         }
 
 
-def game_logs(cfg: dict) -> list[str]:
-    """The active game's log and its rotated siblings, oldest first.
+def stops_log_key(cfg: dict) -> str:
+    """Which per-game key names the file the stops are read from.
 
-    One name in one place, `games.<exe>.log` -- deliberately no payline-level override, since a
-    second setting naming the same file is what `telemetry_dir` was.
+    `reel_stops_log` when the game declares one, `log` otherwise. Separate from `game_logs` so the
+    caller can *report* which file it read and why -- "whose log were these stops?" being the same
+    question `reel_stops.strips_game` exists to answer for the sheet.
+
+    The fallback is on the key being **absent**, never on the named file turning out to hold no
+    stops. Reading `log` because `reel_stops_log` came up empty would be a silent cross-file guess,
+    and a guess here does not fail: it names symbols confidently off another file's spin.
+    """
+    game = cfg.get("game") or {}
+    return STOPS_LOG_KEY if game.get(STOPS_LOG_KEY) else LOG_KEY
+
+
+def game_logs(cfg: dict) -> list[str]:
+    """The log the reel stops are written to, and its rotated siblings, oldest first.
+
+    `games.<exe>.reel_stops_log` when the game splits its logging, `games.<exe>.log` otherwise --
+    see `stops_log_key`. Still one name per game in one file; the second key exists because
+    FortuneOx writes the terminal events and the reel stops to two *different* files, which is not
+    the "two settings for one file" that retired `telemetry_dir`.
 
     Ordered by **name**, not mtime: the rotated names carry a sortable timestamp and sort before the
     live log, while mtime lies because the game holds the handle open. Only a stable pre-order
     anyway; `collect_entries` sorts on each line's own clock.
     """
     game = cfg.get("game") or {}
-    configured = game.get("log")
+    key = stops_log_key(cfg)
+    configured = game.get(key)
     if not configured:
         raise TelemetryError(
-            "the active game has no \"log\" in game_config.json, so there is nowhere to read "
-            "this spin's reel stops from. Set games.<exe>.log to the file the game writes, or "
-            "set payline.reel_stops.enabled to false to audit on the pixels alone")
+            f"the active game has no \"{LOG_KEY}\" in game_config.json, so there is nowhere to "
+            f"read this spin's reel stops from. Set games.<exe>.{LOG_KEY} to the file the game "
+            f"writes -- or games.<exe>.{STOPS_LOG_KEY}, if it writes the reel stops to a "
+            f"different file than its events -- or set payline.reel_stops.enabled to false to "
+            f"audit on the pixels alone")
 
     live = resolve(configured)
     folder, name = os.path.split(live)
@@ -95,7 +125,7 @@ def game_logs(cfg: dict) -> list[str]:
     if not paths:
         raise TelemetryError(
             f"the game log {live} does not exist, so this spin's reel stops cannot be read. "
-            f"Check games.<exe>.log in game_config.json, or set payline.reel_stops.enabled to "
+            f"Check games.<exe>.{key} in game_config.json, or set payline.reel_stops.enabled to "
             f"false to audit on the pixels alone")
     return paths
 
@@ -127,22 +157,31 @@ def read_entries(path: str) -> list[Entry]:
     return entries
 
 
-def collect_entries(paths: list[str]) -> list[Entry]:
+def collect_entries(paths: list[str], key: str = LOG_KEY) -> list[Entry]:
     """Every reel-stops line across the logs, oldest first.
 
     Merged rather than "the newest file that has any", because rotation puts an older run's stops in
     a sibling and `pick_entry` chooses on the frame's own time, not on the file.
+
+    `key` is the per-game key `paths` came from, so the message below names the one to edit rather
+    than always naming `log`.
     """
     entries: list[Entry] = []
     for path in paths:
         entries.extend(read_entries(path))
     if not entries:
+        advice = (f"and that this game writes it to the log games.<exe>.{key} names")
+        if key == LOG_KEY:
+            # The split-log trap, and the key that answers it. FortuneOx is the measured case:
+            # 271 of these lines in FortuneOx_Server.log against 0 in the FortuneOx_Client.log
+            # that `log` names, which stood the checkpoint down on every spin of that game.
+            advice += (f" -- a game that writes its reel stops to a *server* log separate from "
+                       f"its events needs games.<exe>.{STOPS_LOG_KEY} pointing at that file")
         raise TelemetryError(
             f"none of the {len(paths)} game log(s) at "
             f"{os.path.dirname(paths[-1]) or '.'} contains a {MARKER} line. That marker is "
             f"written when the reels stop, so check that a spin has been played since the game "
-            f"started, and that this game writes it to the log games.<exe>.log names -- "
-            f"FortuneOx logs it to its *server* log, which that key does not point at")
+            f"started, {advice}")
     # By each line's own clock rather than by file, the mtime being unreliable while the game holds
     # the handle open. Undated lines sort first, so the `entries[-1]` fallback lands on a dated one.
     entries.sort(key=lambda e: e.timestamp or dt.datetime.min)
@@ -180,8 +219,9 @@ def latest_stops(cfg: dict, frame_path: str | None = None,
     Raises `TelemetryError` naming the config key when there is nothing to read; the caller decides
     whether that is fatal.
     """
+    key = stops_log_key(cfg)
     paths = game_logs(cfg)
-    entries = collect_entries(paths)
+    entries = collect_entries(paths, key)
 
     frame_time = None
     if frame_path and os.path.isfile(frame_path):
@@ -191,6 +231,9 @@ def latest_stops(cfg: dict, frame_path: str | None = None,
     record = entry.describe()
     record.update({
         "path": entry.path,
+        # Which key named this file, so a record says whether the stops came from the log the
+        # capture stage reads or from the game's separate server log.
+        "log_key": key,
         "logs": len(paths),
         "entries": len(entries),
         "matched_by": matched_by,

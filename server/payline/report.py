@@ -101,14 +101,20 @@ def _fit(text, max_width, preferred=CAPTION_PREFERRED, minimum=CAPTION_MINIMUM):
 # -- the record ------------------------------------------------------------
 
 def build_record(results, matcher, geometry, *, image, image_source, backend,
-                 method, tiles_info, checks, agree) -> dict:
-    """The whole verdict as a JSON-able object. This is `payline.json`."""
+                 method, tiles_info, checks, agree, denom=None) -> dict:
+    """The whole verdict as a JSON-able object. This is `payline.json`.
+
+    `denom` is `denoms.DenomSelection.describe()` -- which denomination was played, where that was
+    read from, and which payline set and paytable it chose. It sits beside `geometry` rather than
+    inside it because it is a fact about the *rules applied*, not about the crop.
+    """
     lines_paying, total_pay = total_pays(results)
     labels = matcher.labels()
     return {
         "verdict": "pays" if lines_paying else "no pay",
         "image": image,
         "image_source": image_source,
+        "denom": denom,
         "backend": backend,
         "method": method,
         "matcher": matcher.describe(),
@@ -167,6 +173,33 @@ def print_results(record: dict) -> None:
           f"{geom['grid']}{measured}")
     print(f"  Embedding  : {record['backend']}")
     print(f"  Matching   : {record['matcher']}")
+
+    # Which rules were applied, above the numbers they produced. Printed in both states: a record
+    # with no denomination is a reading of the *base* line set, and that has to be as visible as a
+    # reading at 1c, or "5 lines" looks like the whole paytable.
+    denom = record.get("denom") or {}
+    if denom.get("denom"):
+        label = f" -- {denom['payline_set_label']}" if denom.get("payline_set_label") else ""
+        print(f"  Denom      : {denom['denom']}, {denom.get('lines')} lines{label}")
+        print(f"               set {denom.get('payline_set')} from {denom.get('source')}")
+        if denom.get("paytable"):
+            print(f"               paytable {denom['paytable']}")
+        # The game's own reading of the same thing, on its own line and never merged into the
+        # figure above -- "1c (200.000 cents)" reads as though 1c *were* 200 cents, which was the
+        # first way this printed. Agreement is stated as plainly as disagreement, or a reader
+        # cannot tell a checked value from an unchecked one.
+        if denom.get("logged_cents"):
+            agrees = denom.get("agrees_with_log")
+            print(f"               the game's own log recorded {denom['logged_cents']} cents"
+                  f"{' -- agrees' if agrees else ''}")
+        if denom.get("disagreement"):
+            print(f"               DISAGREES: {denom['disagreement']}")
+    elif denom:
+        print(f"  Denom      : none -- {denom.get('source')}")
+        if denom.get("logged_cents"):
+            print(f"               (this spin's own log recorded {denom['logged_cents']} cents)")
+    if denom.get("note"):
+        print(f"               NOTE: {denom['note']}")
 
     stops = record.get("reel_stops") or {}
     if stops.get("status") == "on":
@@ -326,10 +359,20 @@ def _draw_path(draw, line, centres, colour, width=7):
 
 
 def annotate(out_dir: str, record: dict, geometry) -> dict:
-    """One image per line plus a summary. Returns {"line1": name, ..., "summary": name}."""
+    """One image per line plus a summary. Returns {"line1": name, ..., "summary": name}.
+
+    Last run's line images are deleted first, because how many there are is a per-denomination fact:
+    auditing a folder at 1c writes 39 and re-auditing it at $1 writes 5, which would leave 34 images
+    of lines this verdict never walked sitting beside it. Nothing *points* at them -- the record
+    lists only what was written -- but a folder that shows 39 line images for a five-line verdict is
+    the kind of thing a person reads as the answer.
+    """
     reels_path = os.path.join(out_dir, REELS_FILE)
     if not os.path.isfile(reels_path):
         return {}
+    for stale in os.listdir(out_dir):
+        if stale.startswith("annotated_line") and stale.endswith(".png"):
+            os.remove(os.path.join(out_dir, stale))
     reels = Image.open(reels_path).convert("RGB")
     boxes = cell_boxes(geometry, reels.size)
     centres = _centres(boxes)

@@ -24,6 +24,13 @@ log is the one that actually carries `reelsStops` here -- the checkpoint read it
 confident grid of Ace/Mystery1/King. Nothing said the two came from different games, because
 nothing knew.
 
+**And it is per *denomination* as well as per game.** The same game ships a different reel layout at
+each denom -- 1c and 2c share one sheet here, 5c and 10c another, $1 and $2 a third and a fourth --
+so `games.<exe>.denoms.<denom>.reel_strips` is read when a denomination is configured and the
+game-level block only when none is (`denoms.strips_for`'s `selection`). Same failure direction as
+above, one level down: mapping a 1c spin's stops through the $1 sheet does not fail, it names
+symbols confidently.
+
 `placeholders` is required alongside the path rather than defaulting to the names above, and the
 direction of the failure is why: a placeholder set that is too *large* only makes the checkpoint
 abstain and the pixels decide, while one that is too *small* lets it settle a COMPARE on a name the
@@ -197,14 +204,19 @@ def _sheet_cells(path: str) -> dict[tuple[int, str], str]:
     return cells
 
 
-def strips_for(cfg: dict) -> ReelStrips:
-    """The active game's reel strips, out of its own block (`cfg["game"]`).
+def strips_for(cfg: dict, selection=None) -> ReelStrips:
+    """The reel strips this reading should use, out of the active game's block (`cfg["game"]`).
 
-    Raises `PaylineError` naming the key when the game has no `reel_strips`, and **never falls back
-    to another game's sheet** -- see the module docstring for the measured cross-game grid that
-    fallback produced. `matcher.build_checkpoint` catches that and reports `status: "unavailable"`,
-    so a game with no strips is audited on the pixels alone, which is the correct answer rather than
-    a degraded one.
+    With a `denoms.DenomSelection` that named a denomination, its **own** `reel_strips` is read
+    instead of the game's: each denomination here has its own reel layout, and the game-level block
+    is the base sheet used when no denom is configured at all. The selection carries the key path it
+    came from so an error names the block a person actually has to edit.
+
+    Raises `PaylineError` naming the key when there is no `reel_strips` to read, and **never falls
+    back to another game's or another denomination's sheet** -- see the module docstring for the
+    measured cross-game grid that fallback produced. `matcher.build_checkpoint` catches that and
+    reports `status: "unavailable"`, so a reading with no strips is audited on the pixels alone,
+    which is the correct answer rather than a degraded one.
     """
     game = (cfg or {}).get("game") or {}
     process = game.get("process")
@@ -213,7 +225,10 @@ def strips_for(cfg: dict) -> ReelStrips:
             "there is no active game, so there is no way to tell whose reel strips to read. "
             "Set \"active\" in game_config.json to the running game's executable name")
 
-    block = game.get(STRIPS_KEY)
+    block = getattr(selection, "strips_block", None)
+    where = getattr(selection, "strips_where", None) or f"games.{process}.{STRIPS_KEY}"
+    if not block:
+        block = game.get(STRIPS_KEY)
     if not block:
         raise PaylineError(
             f"{process} has no \"{STRIPS_KEY}\" in game_config.json, so this spin's reel stops "
@@ -224,16 +239,16 @@ def strips_for(cfg: dict) -> ReelStrips:
             f"would name the symbols of a spin that never happened")
     if not isinstance(block, dict):
         raise PaylineError(
-            f"games.{process}.{STRIPS_KEY} is {block!r}; it must be an object with \"path\" and "
+            f"{where} is {block!r}; it must be an object with \"path\" and "
             f"\"placeholders\" keys")
 
     path = block.get("path")
     if not path:
-        raise PaylineError(f"games.{process}.{STRIPS_KEY} has no \"path\", so there is no "
+        raise PaylineError(f"{where} has no \"path\", so there is no "
                            f"spreadsheet to read the reel layout from")
     if "placeholders" not in block:
         raise PaylineError(
-            f"games.{process}.{STRIPS_KEY} has no \"placeholders\", so there is no way to tell "
+            f"{where} has no \"placeholders\", so there is no way to tell "
             f"which of this sheet's names are mystery symbols that reveal as other art. Set it to "
             f"the list of those names, or to [] if this game has none -- an empty list is a "
             f"statement, and a missing key is only an omission, so it is not assumed")

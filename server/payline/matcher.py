@@ -246,6 +246,8 @@ class ReelStopMatcher(BaseMatcher):
             return decision
 
         same = name_a.strip().upper() == name_b.strip().upper()
+        print(f"checkpoint {a} vs {b}: {name_a} vs {name_b} -> {'same' if same else 'different'}")
+        print(f"same=========================>{same}")
         was = decision.match
         decision.match = same
         verb = "confirms" if same == was else "overturns"
@@ -350,13 +352,18 @@ def _band(settings: dict, inner, backend: str) -> tuple[float, float]:
 
 
 def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
-                     image_path: str | None) -> tuple[object, dict]:
+                     image_path: str | None, selection=None) -> tuple[object, dict]:
     """Wrap `inner` in the reel-stop checkpoint, or explain why it is not wrapped.
 
     Returns `(matcher, record)` -- the wrapper when everything needed was found, `inner` otherwise.
     An unavailable checkpoint does not fail the audit: the pixel reading is a complete verdict, and
     this stage needing no cabinet is the point. What it must not do is fail *quietly*, so the record
     always carries a `status` that reaches `payline.json`, the CLI and the page.
+
+    `selection` is the `denoms.DenomSelection`, and it decides **whose sheet** the stops are mapped
+    through -- the denomination's own paytable, or the game's base one when no denom is configured.
+    The stops themselves are the game's either way: one spin has one set of reel stops, and it is the
+    layout they are read against that the denomination changes.
     """
     from . import telemetry
 
@@ -373,9 +380,10 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
 
     try:
         band = _band(settings, inner, backend)
-        # The active game's own sheet. A game with no block raises here, which is caught below and
-        # reported as unavailable, so the pixels decide rather than another game's symbol names.
-        strips = reelstrips.strips_for(cfg)
+        # This denomination's sheet, or the active game's own when none is configured. A block with
+        # no strips raises here, which is caught below and reported as unavailable, so the pixels
+        # decide rather than another game's -- or another denom's -- symbol names.
+        strips = reelstrips.strips_for(cfg, selection)
         found = telemetry.latest_stops(cfg, image_path,
                                        float(stops_cfg.get("tolerance_s")
                                              or telemetry.DEFAULT_TOLERANCE_S))
@@ -409,6 +417,9 @@ def build_checkpoint(inner, geometry, cfg: dict, settings: dict, backend: str,
         # Which game's sheet this grid came from, and which of its names cannot decide a pair.
         # In the record because "whose reel strips were these?" is now a question with an answer.
         "strips_game": (cfg.get("game") or {}).get("process"),
+        # ...and at which denomination, since one game has a sheet per denom. Null means the game's
+        # base block was read because no denom was configured.
+        "strips_denom": getattr(selection, "text", None),
         "placeholders": sorted(strips.placeholders),
         "symbol_grid": grid,
         **found,

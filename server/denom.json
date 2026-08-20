@@ -1,0 +1,27 @@
+{
+  "play_credit": {
+    "text": "880 credits",
+    "value": 880,
+    "unit": "credits",
+    "available": [
+      88,
+      176,
+      264,
+      440,
+      880
+    ]
+  },
+  "denom": {
+    "text": "5c",
+    "value": 5,
+    "unit": "cents",
+    "available": [
+      "1c",
+      "2c",
+      "5c",
+      "10c",
+      "$1.00",
+      "$2.00"
+    ]
+  }
+}

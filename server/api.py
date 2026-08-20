@@ -24,6 +24,7 @@ from .settings import DEFAULT_CONFIG, DEFAULT_GAME_CONFIG, ROOT, load_config
 from . import frames
 from .extract import tesseract
 from .extract.runner import extract_frames
+from .payline.denoms import select as denom_select
 from .payline.geometry import PaylineError, geometry_for
 from .payline.runner import build_tiles_for, settings_for, validate_paylines
 from .validate.runner import validate_run
@@ -330,9 +331,16 @@ async def health():
 
         The backend probe is an import, not a weight load -- loading CLIP for a health check
         would cost seconds per page view.
+
+        The denomination is resolved too, without a run folder: it comes from one fixed file, so a
+        missing or malformed `denom.json`, or one naming a denomination this game has no block for,
+        is a config question and belongs on the health strip rather than surfacing when the button
+        is pressed. The cross-check against the game's log needs a captured spin and is skipped
+        here; that one is per-spin and lands on the verdict.
         """
-        geometry = geometry_for(cfg)
         settings = settings_for(cfg)
+        selection = denom_select(cfg)
+        geometry = geometry_for(cfg, selection.lines)
         backend = settings.get("backend", "pixel")
         if backend == "clip":
             import importlib.util
@@ -345,7 +353,12 @@ async def health():
                     f"{'is' if len(missing) == 1 else 'are'} not installed. Run "
                     f"`python -m pip install -r server/requirements.txt`, or set "
                     f"payline.backend to \"pixel\" in config.json")
-        return (f"{geometry.label} for {geometry.process} ({geometry.grid_label}), "
+        # The denomination first: it is the thing most likely to be wrong on any given day, and it
+        # changes what every number under it means.
+        denom = (f"{selection.text} paying {len(selection.lines)} lines"
+                 if selection.configured else
+                 f"no denomination, so the {len(geometry.paylines)} base lines")
+        return (f"{denom}; {geometry.label} for {geometry.process} ({geometry.grid_label}), "
                 f"{backend} backend, {settings.get('method', 'threshold')} matching")
 
     try:

@@ -22,7 +22,7 @@ command list; the thing to notice is that run-folder arguments read
 
 There is no build step and no linter here. Verification is per stage and is in
 [README.md](README.md#verifying-a-change) — `extract` against the `Images/` fixtures, `validate`
-against the folders on disk, `payline` against its two test modules **plus the contact sheet**, and
+against the folders on disk, `payline` against its three test modules **plus the contact sheet**, and
 `capture` only by `--dry-run` followed by a real run.
 
 ## Two anchors, and picking the wrong one is silent
@@ -30,7 +30,8 @@ against the folders on disk, `payline` against its two test modules **plus the c
 `settings.py` owns both, and nothing is relative to the CWD.
 
 - **`SERVER_DIR`** — this package. Both config files, and what `settings.resolve` hangs a relative
-  path off: `output.dir`, `--out`, `--run-dir`, `payline.image`, `games.<exe>.reel_strips.path`.
+  path off: `output.dir`, `--out`, `--run-dir`, `payline.image`,
+  `games.<exe>.reel_strips.path` and each denomination's.
   Reach for `resolve()` rather than composing a path yourself.
 - **`ROOT`** — the repository root. **Exactly two readers, and neither is config:** `api.UI_DIST`
   (`ui/dist`, genuinely outside this package) and `runs.capture`'s subprocess `cwd`, because
@@ -88,12 +89,13 @@ Two files, both in this folder, and `settings.load_config` returns them merged �
   Python literal left for a person to have to edit in step with the config.
 - **An `active` with no block raises in the loader.** So does a game with no `targets` when a click
   is needed, a game with no `payline_geometry`, a game with no `log`, a game with no `window_class`,
-  and a game with no `reel_strips` when the checkpoint wants one. **Never add a fallback to another
+  a game with no `reel_strips` when the checkpoint wants one, and a *denomination* with no block or
+  no paytable of its own. **Never add a fallback to another
   game's numbers** — normalized coordinates survive a change of *scale* and not a change of *game*,
   and a fallback is indistinguishable from correct behaviour until the money is wrong.
 - **One reader per per-game key, and it raises naming the key.** `gamelog.path_for`,
   `winfocus.find_game_window`, `gameclick.targets_for`, `roi.locate_meter_roi`,
-  `payline.geometry_for`, `reelstrips.strips_for`, `telemetry.game_logs`. Four of these were
+  `payline.geometry_for`, `reelstrips.strips_for`, `telemetry.game_logs`, `denoms.select`. Four of these were
   `.get(key, <literal>)` at the call site until the literals were removed — the root
   [CLAUDE.md](../CLAUDE.md) table says what each did when it fired, and the log one is the reason to
   distrust the pattern generally: it read a *different game's* live log and reported success. If you
@@ -217,11 +219,51 @@ is `("cash", "bet")` for that reason, and don't add `win` back "for completeness
   travels with the sheet and is **required** rather than defaulted: too large only abstains, too small
   decides a COMPARE on a name the screen is not showing, so `[]` is a statement and an absent key is
   refused. `reel_stops.strips_game` and `reel_stops.placeholders` put the provenance in the record.
+- **The denomination is a second axis with the same no-fallback rule.** How many lines pay is the
+  denomination's answer, not the game's — five at $1/$2, 20 at 5c/10c, 40 at 1c/2c — and each
+  denomination has its **own** paytable, which is the half that fails quietly (the layouts genuinely
+  differ, so a 1c spin's stops through the $1 sheet names symbols confidently rather than raising).
+  Both are `games.<exe>.payline_sets` + `games.<exe>.denoms`, resolved by `denoms.select` and
+  threaded as one object into `geometry_for(cfg, lines)` and `reelstrips.strips_for(cfg, selection)`.
+  Sets are *named* because 1c/2c and 5c/10c each share one; paytables are per denomination because
+  they do not. **Rows 1–5 of every set are the five named lines in order**, so `payline.json`'s
+  "line 1" means one thing across denominations and across records written before this existed.
+- **The denomination is `server/denom.json`'s `denom.text`, at one fixed path.** No config key and
+  no `--denom` flag — a second place to point at is a second place for the answer to come from.
+  `payline.denom_file` is retired and **warns if still set**, on the `payline.reel_stops.strips` rule.
+- **The game's own logged cents is a cross-check that never decides.** `classify` lifts
+  `denom_changed` to `spin.json`'s top-level `denom`; `denoms.select` prices `denom.text` and
+  compares. It exists because **`denom.json` holds one value for the cabinet and the game logs one
+  per spin** — a real $2.00 run on this disk sits between two 1c runs. Report it, don't resolve it:
+  `logged_cents`, `agrees_with_log`, `disagreement`. **It may never fail the audit** (a missing or
+  unreadable `spin.json` reports `null`), and **agreement is stated as plainly as disagreement**, or
+  a reader cannot tell a checked value from an unchecked one.
+- **`classify`'s `belongs_to` exclusion must not be applied to the denom, and `spin.py` says so.**
+  A denomination is state, not an outcome — logged on every activation, so on a carried win it lands
+  in the old spin's block. Two run folders here are exactly that; excluding them leaves the
+  carried-win spins with nothing to compare against. Last event wins.
+- **The logged value is cents and the comparison is arithmetic** (`cents_of`), so a game with other
+  denominations needs a config edit and no code edit. `normalize` canonicalises `denom.text` and
+  every config key (`"$1.00"` = `"1$"` = `"$1"`); **a bare number is refused, not guessed**.
+- **`read_denom_file` resolves `DENOM_FILE` inside, not as a default argument.** A default binds at
+  import, and `test_denoms` swaps the constant to keep off the cabinet's real file — every one of
+  those tests silently read the shipped file until this was fixed.
+- **No denomination to apply is a mode; an unknown one is an error.** No `denom.json`, or a game
+  declaring no `denoms`, reads the game's own `paylines` and `reel_strips` and says which in
+  `denom.source` — that is what keeps every pre-denom run folder re-readable. A game that *does*
+  declare them with no block for the one in the file raises, because reaching the base set that way
+  reports 5 lines for a spin that pays 40 and the meter audit deliberately does not check this one.
+- **The denom is deliberately not in `Geometry.describe()`.** That is also `_tiles_are_current`'s
+  comparison, and a tile is a cell of the grid — which lines are walked over it changes nothing about
+  the crop. `build_tiles_for` resolves no denomination at all for the same reason.
 - **Do not collapse the two steps in `runner`.** `_tiles_are_current` depends on that boundary, and
   it was bought with two bugs — saved tiles are reused only when the recorded image path *and* the
   geometry still match, and the source is resolved unconditionally before the cache is consulted.
 - **`payline.image` is an override, not a fallback**, and a missing path is refused by name rather
   than reverting to the last capture.
+- **`report.annotate` clears last run's line images before writing.** How many there are is a
+  per-denomination fact (39 at 1c, 5 at $1), so re-auditing one folder at a smaller denomination
+  would otherwise leave images of lines that verdict never walked sitting beside it.
 
 ## api.py
 

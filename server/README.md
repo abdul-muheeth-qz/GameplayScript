@@ -40,7 +40,12 @@ python -m server.payline.cli                            # over the newest usable
 python -m server.payline.cli server/captured_files/<run> --json
 python -m server.payline.test_paylines                  # the rule, no pixels needed
 python -m server.payline.test_reelstrips                # the reel-stop checkpoint, ditto
+python -m server.payline.test_denoms                    # the denominations, their sets and paytables
 ```
+
+There is no `--denom` flag and no config key for the path: the denomination is
+[denom.json](denom.json)'s `denom.text`, at that one fixed location. The game's own logged cents is
+read beside it as a cross-check and never decides — a disagreement is reported, not resolved.
 
 Note the shape of those paths: the command runs from the repository root, and the run folders are
 **inside this package**, so an argument is `server/captured_files/<run>`.
@@ -56,9 +61,13 @@ nothing pays.
 server/
   config.json         this cabinet: OBS, the i-Deck, output.dir, Tesseract, the server's host/port
   game_config.json    the games: `active`, and a block per executable
+  denom.json          the denomination in play -- the payline audit's one fixed input
   captured_files/     one folder per run. Not committed
   requirements.txt    the one dependency list
-  assets/             payline_excel.xlsx -- FortuneOx's reel strips, named by its own block
+  assets/             payline_excel.xlsx -- FortuneOx's base reel strips, named by its own block
+                      paytable_excel_{1c,2c,5c,10c,1$,2$}.xlsx -- one per denomination
+                      Payline_Validation_denoms.xlsx -- where the 40- and 20-line sets came from;
+                        read once into game_config.json, never opened at runtime
 
   settings.py         the one loader for BOTH config files, and the two anchors below
   frames.py           the three frame names, and which part of the ledger each supplies
@@ -72,8 +81,9 @@ server/
             gamelog.py logtail.py
   extract/  runner.py cli.py tesseract.py slotocr/ Images/    (Images/ is the regression suite)
   validate/ records.py ledger.py runner.py cli.py
-  payline/  geometry.py tiles.py embeddings.py matcher.py paylines.py report.py runner.py cli.py
-            telemetry.py reelstrips.py test_paylines.py test_reelstrips.py
+  payline/  geometry.py tiles.py embeddings.py matcher.py paylines.py denoms.py report.py
+            runner.py cli.py telemetry.py reelstrips.py
+            test_paylines.py test_reelstrips.py test_denoms.py
 ```
 
 Each stage folder has its own README where there is more to say — [extract](extract/) and
@@ -101,10 +111,15 @@ anchor — which is how `assets/payline_excel.xlsx` broke when this folder was a
   `OBS_WS_PASSWORD` in the environment overrides it, and `spin._ScrubSecrets` keeps it out of
   `run.log`. **It is tracked in git, password and all.**
 - **[game_config.json](game_config.json)** — the games. `active` names the running executable and
-  `games` holds a block per game (`window_class`, `log`, `targets`, `meter_roi`, `payline_geometry`).
+  `games` holds a block per game (`window_class`, `log`, `targets`, `meter_roi`, `reel_strips`,
+  `payline_sets`, `denoms`, `payline_geometry`).
   No secret. **Every number that is per-game is in there**, the payline stage's reel fractions
   included: they were a `GAMES` dict in `payline/geometry.py`, which made adding a game a code edit
   and a config edit that had to agree. `geometry.py` now holds only the rule a block has to satisfy.
+  **And every number that is per-*denomination*** — `payline_sets` holds the named line sets (5, 20
+  and 40 lines) and `denoms` says which set each denomination pays and which paytable its reel stops
+  map through. Which denomination is *in play* is neither of these files: it is
+  **[denom.json](denom.json)**, one fixed path, written by whatever reads it off the screen.
 
 `settings.load_config` reads both and returns one dict, resolving the active game's block onto
 `cfg["game"]` with `process` folded in. That is the only view of the games any stage gets — `extract`
@@ -164,11 +179,11 @@ core: every module in `capture/` talks to live Windows APIs, a running game, a r
 | `capture` | `--dry-run`, then a real run, then read `run.log` and `spin.json` in the run folder |
 | `extract` | offline: `python -m server.extract.cli server/extract/Images` over the fourteen fixtures, then read `roi_source` in each record. This is the regression suite — and it takes **two runs** to cover it, since the crop is the *active* game's box: 11 fields with `active: HuffNPuffLink.exe`, 18 with `active: FortuneOx.exe`. Pass `--config` a copy with `active` switched rather than editing the shipped file |
 | `validate` | needs nothing running at all — re-run it over the folders already in `captured_files/`, covering both a winning and a losing one |
-| `payline` | `test_paylines.py` (the rule, against the spreadsheet's own fixtures) and `test_reelstrips.py` (the checkpoint) run without pytest and without a cabinet. Then `payline.cli` over a FortuneOx folder on disk — and **look at `payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop landed |
+| `payline` | `test_paylines.py` (the rule, against the spreadsheet's own fixtures), `test_reelstrips.py` (the checkpoint) and `test_denoms.py` (every shipped denomination's set and paytable, and the refusals) run without pytest and without a cabinet. Then `payline.cli` over a FortuneOx folder on disk — and **look at `payline/tiles/contact_sheet.png`**, which is the only thing that shows whether the crop landed. Edit [denom.json](denom.json) to check a denomination end to end; auditing `2026-08-19_145308` (a $2.00 spin) while it says `1c` exercises the disagreement report |
 | the API | `python -m server`, then `/api/health` — it names each config file it read and the game it resolved |
 
-`test_paylines.py` and `test_reelstrips.py` are the only genuinely unit-testable things in the
-repository.
+`test_paylines.py`, `test_reelstrips.py` and `test_denoms.py` are the only genuinely unit-testable
+things in the repository.
 
 ## Errors are prose that names the key to fix
 

@@ -60,6 +60,12 @@ def game_block(**overrides) -> dict:
     with open(DEFAULT_GAME_CONFIG, encoding="utf-8") as fh:
         block = dict((json.load(fh)["games"] or {})[GAME])
     block["process"] = GAME
+    # Swapping `log` for a fixture must move the *stops* to that fixture too, or the shipped
+    # `reel_stops_log` wins and the test reads the cabinet's real server log instead of the file it
+    # just wrote -- passing or failing on whatever was last played here. Same trap as
+    # `read_denom_file`'s default argument. An explicit reel_stops_log= override still stands.
+    if "log" in overrides and "reel_stops_log" not in overrides:
+        block.pop("reel_stops_log", None)
     block.update(overrides)
     return block
 

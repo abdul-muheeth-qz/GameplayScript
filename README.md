@@ -966,7 +966,156 @@ DISPLAY "LINE n PAYS {counter}"
 
 Left to right, adjacent pairs only, no skipping -- so the counter is the length of the matching run
 that starts on reel 1. Cells are `E{row}{reel}`, row 1 at the top and reel 1 at the left, and the
-five lines are the middle row, the top row, the bottom row, a V and an inverted V.
+five lines every denomination pays are the middle row, the top row, the bottom row, a V and an
+inverted V. **How many lines there are beyond those five is the denomination's answer**, which is
+the next section.
+
+### The denomination decides which lines pay, and whose paytable
+
+The same reels pay a different number of lines at each denomination. Those five are only the ones
+every denomination shares:
+
+| denomination | lines | paytable |
+|---|---|---|
+| 1c, 2c | 40 | `assets/paytable_excel_1c.xlsx`, `assets/paytable_excel_2c.xlsx` |
+| 5c, 10c | 20 | `assets/paytable_excel_5c.xlsx`, `assets/paytable_excel_10c.xlsx` |
+| $1.00, $2.00 | 5 | `assets/paytable_excel_1$.xlsx`, `assets/paytable_excel_2$.xlsx` |
+
+The line sets come from `server/assets/Payline_Validation_denoms.xlsx`, whose two sheets are
+`1c&2c` (40 rows) and `5c&10c` (20 rows), and the second is the first twenty rows of the first,
+line for line -- checked rather than assumed (`test_denoms.test_the_larger_sets_are_supersets_of_the_smaller`).
+The five named lines are rows 1-5 of both, in that order, so `payline.json`'s "line 1" means the
+same thing at every denomination and in every record written before denominations existed.
+
+**Both halves are per-denomination, and the paytable half is the one that fails quietly.** The reel
+layouts genuinely differ between denominations -- position 8 of reel 1 is `Mystery1` at 1c and
+`Arm Band` at $1 -- so mapping a 1c spin's stops through the $1 sheet does not raise, it names
+symbols confidently, and the reel-stop checkpoint would then settle an ambiguous COMPARE on a symbol
+the screen is not showing. That is the same failure, one level down, that
+[keyed by the game](#keyed-by-the-game-and-no-fallback) records for reel strips across *games*, and
+it gets the same treatment: `denoms.denom_strips` refuses a denomination with no `reel_strips` of
+its own rather than reaching for the game's. 1c and 2c shipping identical strips today is a fact
+about this build's data, not about the game.
+
+Both live in the active game's block in `game_config.json`, which is where every other per-game
+number already is:
+
+```json
+"payline_sets": {
+  "40_line": { "label": "…", "lines": [{"id": 1, "name": "Middle row", "cells": ["E21", …]}, …] },
+  "20_line": { "…": "…" },
+  "5_line":  { "…": "…" }
+},
+"denoms": {
+  "1c":    { "paylines": "40_line", "reel_strips": {"path": "assets/paytable_excel_1c.xlsx",
+                                                    "placeholders": ["Mystery1", …]} },
+  "$1.00": { "paylines": "5_line",  "reel_strips": {"path": "assets/paytable_excel_1$.xlsx", "…": "…"} }
+}
+```
+
+**The sets are named rather than inlined per denomination because they are shared** -- 1c and 2c pay
+the identical 40 lines and 5c and 10c the identical 20 -- and four copies of two tables in one file
+is how one copy ends up stale and believed. The paytables are *not* shared and so are named per
+denomination, for the reason above.
+
+#### The denomination comes from `server/denom.json`
+
+One fixed path, no config key and no CLI flag -- `settings.SERVER_DIR`'s `denom.json`, beside
+`config.json` and `game_config.json`. It is written by whatever reads the credit and denomination off
+the screen; the audit only reads it, and only `denom.text` decides anything:
+
+```json
+{ "play_credit": { "text": "880 credits", "value": 880, "unit": "credits",
+                   "available": [88, 176, 264, 440, 880] },
+  "denom":       { "text": "1c", "value": 1, "unit": "cents",
+                   "available": ["1c", "2c", "5c", "10c", "$1.00", "$2.00"] } }
+```
+
+`value`, `unit` and `available` are carried into `payline.json` unchecked -- they are the reader's
+own account of the same thing, and a disagreement between `"1c"` and `value: 5` is worth being able
+to see after the fact. `available` also earns a warning when it lists a denomination
+`games.<exe>.denoms` has no block for, so that is found once rather than at the cabinet.
+
+That file says `"$1.00"`, the config key is `"$1.00"` and the asset is named `paytable_excel_1$.xlsx`
+-- one denomination, three spellings -- so `denoms.normalize` canonicalises both sides of every
+lookup once: `"$1.00"`, `"$1"`, `"1$"` and `"1.00$"` are all `$1`, and `"1c"`, `"1C"`, `"1cent"` and
+`"1¢"` are all `1c`. Two config keys that canonicalise to one denomination are **refused**, not
+resolved: `"$1"` and `"$1.00"` as separate blocks is one denomination with two paytables, and picking
+either would be arbitrary.
+
+**A bare number is deliberately not canonicalised.** `"1"` is `$1` or `1c` depending on who wrote
+it, and this is the one place in the audit where guessing wrong changes which lines are walked -- so
+it comes back unchanged and fails the lookup by name, listing the denominations the game has.
+
+#### The game's own log is read beside it, and never decides
+
+`gamelog` already parses `[WagerGameApp.UpdateDenom] New denom[1.000]` into a `denom_changed` event,
+`spin.py` writes it into `spin.json`, and `classify` lifts it to that file's top-level `denom`. So
+every run folder already carries, **in cents**, the denomination the *game* thought it was running.
+`select` prices `denom.json`'s answer and compares. `denom.json` still decides -- that is what it is
+for -- but the two are reported together in `payline.json` (`logged_cents`, `agrees_with_log`,
+`disagreement`), on the CLI, and in vermilion on the page when they differ.
+
+That is worth the few lines because **`denom.json` holds one value for the whole cabinet and the
+game logs one per spin.** Run `2026-08-19_145308` on this disk is a real $2.00 spin sitting between
+two 1c spins; a file left saying `1c` walks 39 lines over it and is confidently wrong. The file
+remains the source; nothing here lets that happen *quietly*:
+
+```
+  Denom      : 1c, 39 lines -- the 40 lines of the 1c and 2c denominations
+               set 40_line from denom.json, which says '1c'
+               paytable assets/paytable_excel_1c.xlsx
+               the game's own log recorded 200.000 cents
+               DISAGREES: denom.json says 1c (1 cents) but this spin's own log recorded 200.000
+               cents. The file decides, so this audit walked 1c's lines -- but one of the two is
+               describing a different spin.
+```
+
+Agreement is printed as plainly as disagreement (`-- agrees`), because otherwise a reader cannot
+tell a checked value from an unchecked one. Reading the log value has three rules of its own:
+
+- **The game logs cents**, so the comparison is arithmetic. `cents_of` prices `denom.text` and
+  compares numbers, rather than this module holding a table of strings; a game with denominations
+  other than these six needs a config edit and no code edit.
+- **The last `denom_changed` wins, and `belongs_to` is not excluded.** This is the one place that
+  deliberately does not apply `classify`'s carry rule. A denomination is *state*, not an outcome: the
+  game logs it on every activation as well as on a real change (`changed: False` on all seven runs
+  here), so on a spin that collected a carried win it lands inside the *previous* spin's block. Runs
+  `2026-08-18_115614` and `2026-08-19_145308` are exactly that, and excluding them would leave the
+  carried-win spins -- and only those -- with nothing to compare against.
+- **A missing, unreadable or silent `spin.json` is not a failure.** The audit is already answered by
+  `denom.json`; a cross-check that could fail it would be worse than no cross-check. It reports
+  `agrees_with_log: null` instead.
+
+#### With no denomination to apply, nothing changes
+
+Two cases read the game's own `payline_geometry.paylines` and its own `reel_strips`, exactly as
+before denominations existed, and each says which it was in `denom.source`: no `denom.json` at the
+fixed path, and a game whose block declares no `denoms` at all. The second is a statement rather than
+a gap -- the block's presence is the game's declaration that denominations change what pays.
+
+That is a stated mode and not a fallback, and the distinction matters in both directions:
+
+- a record with `denom: null` is a reading of the **base** line set, not a statement about any
+  denomination -- so the CLI prints `Denom : none -- ...` and the page badges it in amber rather than
+  staying silent, or five lines read as though they were the whole paytable. What the log said is
+  still reported, so a missing file is diagnosable from the record alone;
+- a denomination the game *does* declare denominations for but has no block for **raises**, naming
+  what `denom.json` said and listing the ones it has. Reaching the base set that way would report
+  five lines for a spin that pays forty, and nothing downstream would catch it -- the meter audit
+  does not check the payline audit, and is not supposed to.
+
+A missing, malformed or unknown `denom.json` is also caught by `/api/health`'s `payline` check, so it
+is on screen before the button is pressed rather than after.
+
+#### What it costs
+
+`payline/annotated_line{n}.png` is one image per line, so an audit at 1c writes 39 of them where one
+at $1 writes 5, and the whole step measures 5.2 s against 1.1 s on this cabinet -- annotation, not
+matching. `report.annotate` deletes last run's line images before writing, because re-auditing one
+folder at $1 after 1c would otherwise leave 34 images of lines that verdict never walked sitting
+beside it. Nothing points at them -- the record lists only what was written -- but a folder showing
+39 line images for a five-line verdict is the kind of thing a person reads as the answer.
 
 ### Every number in the geometry is a fraction
 
@@ -1241,7 +1390,12 @@ python -m server.payline.cli server/captured_files/<run> --json        # the who
 python -m server.payline.cli --image <path>                     # a loose image, no run folder
 python -m server.payline.test_paylines                          # the rule, without any pixels
 python -m server.payline.test_reelstrips                        # the reel-stop checkpoint
+python -m server.payline.test_denoms                            # the denominations, sets and paytables
 ```
+
+There is **no `--denom` flag and no config key for the path**, deliberately: `server/denom.json` is
+one fixed location, and a second place to point at is a second place for the answer to come from. To
+audit at another denomination, rewrite that file.
 
 Exit codes are `0` some line pays, `1` an error, `2` nothing pays -- the same shape as
 `validate.cli`'s, and for the same reason.
@@ -1327,6 +1481,8 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
         "path": "assets/payline_excel.xlsx",
         "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
       },
+      "payline_sets": { "5_line": { "…": "…" }, "20_line": { "…": "…" }, "40_line": { "…": "…" } },
+      "denoms": { "1c": { "paylines": "40_line", "reel_strips": { "…": "…" } }, "…": "…" },
       "payline_geometry": { "…": "…" }
     }
   }
@@ -1341,7 +1497,9 @@ plaintext-password line exists for exactly that. `game_config.json` holds no sec
 | `games.<exe>.targets` | the normalized click points — `{"take_win": [0.0713, 0.9724], "gamble": [0.0694, 0.9383]}`. A block per game because the points do not transfer between them; measure one with `gameclick --calibrate` |
 | `games.<exe>.meter_roi` | `extract`'s meter-strip crop for this game — see [it never assumes a pixel coordinate](#it-never-assumes-a-pixel-coordinate). Only the **active** game's is read, off `cfg["game"]`, and there is no fallback to another's. Every game's used to be raced against every screenshot; that is gone, and so is the `cfg["games"]` key that existed for it |
 | `games.<exe>.reel_strips` | `{"path": …, "placeholders": [...]}` — the spreadsheet the reel-stop checkpoint maps this game's `reelsStops` through, and which of its symbol names are mystery symbols that reveal as other art. Optional `columns` / `first_row` for a sheet laid out differently. A game without it stands the checkpoint down rather than reading another game's sheet; `placeholders` is required, and `[]` is how a game with none says so |
-| `games.<exe>.payline_geometry` | the reel window, in fractions, plus this game's `paylines` and its optional `reel_background` for `--profile`. See [the geometry is fractions all the way down](#the-geometry-is-fractions-all-the-way-down) |
+| `games.<exe>.payline_geometry` | the reel window, in fractions, plus this game's **base** `paylines` -- the set read when no denomination is configured -- and its optional `reel_background` for `--profile`. See [the geometry is fractions all the way down](#the-geometry-is-fractions-all-the-way-down) |
+| `games.<exe>.payline_sets` | `{"40_line": {"label": …, "lines": [...]}, …}` — the named line sets a denomination chooses between, since 1c and 2c pay the identical 40 and 5c and 10c the identical 20. Optional `note` for a set that is knowingly incomplete, and it reaches `payline.json` and the page rather than only the file |
+| `games.<exe>.denoms` | `{"1c": {"paylines": "40_line", "reel_strips": {…}}, …}` — which set each denomination pays and which paytable its reel stops map through. Keyed however the denomination is written; `"$1"`, `"$1.00"` and `"1$"` are one key and two of them is refused. See [the denomination decides which lines pay](#the-denomination-decides-which-lines-pay-and-whose-paytable) |
 
 **An `active` with no `games` block raises, and it raises in the loader** — before OBS is launched
 or anything is clicked. There is no fallback to another game's window class, log or coordinates,
@@ -1398,7 +1556,8 @@ carries the measurement.
 `captured_files/`. Nothing outside that package reads either one, so nothing outside it needs
 them; the repository root holds the two shared documents and the two folders and nothing else.
 
-Relative paths — `output.dir`, `--out`, `--run-dir`, `payline.image` — are resolved against
+Relative paths — `output.dir`, `--out`, `--run-dir`, `payline.image`,
+`games.<exe>.reel_strips.path` and each denomination's — are resolved against
 `server/` (`settings.resolve`), never the current working directory, so a server started from
 anywhere writes into the same `server/captured_files/` the command line uses. `server/settings.py`
 keeps a second anchor, `ROOT`, for the two things that genuinely are outside the package: the
@@ -1438,10 +1597,12 @@ built UI at `ui/dist`, and the working directory the capture subprocess needs in
 | [server/payline/embeddings.py](server/payline/embeddings.py) | one vector per cell: the pixel backend and the OpenCLIP one |
 | [server/payline/matcher.py](server/payline/matcher.py) | turning COMPARE into yes or no, three ways, and the agreement check |
 | [server/payline/paylines.py](server/payline/paylines.py) | the rule itself -- pure logic, no pixels |
+| [server/payline/denoms.py](server/payline/denoms.py) | which line set and which paytable a denomination selects, and the one canonical spelling of one |
 | [server/payline/report.py](server/payline/report.py) | the record, the CSVs, and the annotated images |
 | [server/payline/runner.py](server/payline/runner.py) | the two steps over a run folder |
 | [server/payline/cli.py](server/payline/cli.py) | pays / error / no pay |
 | [server/payline/test_paylines.py](server/payline/test_paylines.py) | the rule checked against the spreadsheet's own fixtures |
+| [server/payline/test_denoms.py](server/payline/test_denoms.py) | the denominations: the spelling, every shipped set and paytable, and the refusals |
 | **server/validate** | |
 | [server/validate/ledger.py](server/validate/ledger.py) | the sum, the tolerance, and the verdict — exact `Decimal` |
 | [server/validate/records.py](server/validate/records.py) | reading the two records as exact Decimals |
@@ -1450,7 +1611,10 @@ built UI at `ui/dist`, and the working directory the capture subprocess needs in
 | **server, and not code** | |
 | [server/config.json](server/config.json) | this cabinet: OBS, the i-Deck, output, Tesseract, the server |
 | [server/game_config.json](server/game_config.json) | the games, and `active` naming the one that is running |
-| [server/assets/payline_excel.xlsx](server/assets/) | FortuneOx's reel strips, named by that game's `reel_strips.path` — one sheet per game, not one for the app |
+| [server/denom.json](server/denom.json) | the denomination in play, at the one fixed path the payline audit reads. Written by whatever reads it off the screen; only `denom.text` decides anything |
+| [server/assets/payline_excel.xlsx](server/assets/) | FortuneOx's base reel strips, named by that game's `reel_strips.path` — one sheet per game, not one for the app, and read only when no denomination is configured |
+| [server/assets/paytable_excel_*.xlsx](server/assets/) | one paytable per denomination — `1c`, `2c`, `5c`, `10c`, `1$`, `2$` — named by `games.<exe>.denoms.<denom>.reel_strips.path`. They genuinely differ, which is why no denomination may read another's |
+| [server/assets/Payline_Validation_denoms.xlsx](server/assets/) | where the 40- and 20-line sets came from, sheets `1c&2c` and `5c&10c`. Read once into `game_config.json`'s `payline_sets`; nothing opens it at runtime |
 | `server/captured_files/` | one folder per run — the contract between the stages. Not committed |
 | **ui** | |
 | [ui/src/App.tsx](ui/src/App.tsx) | which audit is showing, and which run |

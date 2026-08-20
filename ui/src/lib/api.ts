@@ -116,6 +116,49 @@ export type PaylineGeometry = {
   inner_margin_frac: number
 }
 
+/**
+ * Which denomination was played, and what it chose. Mirrors `payline/denoms.py`.
+ *
+ * The same reels pay different lines at different denominations — five at $1 and $2, 20 at 5c and
+ * 10c, 40 at 1c and 2c — and each denomination has its own paytable, so this is what says which
+ * rules produced the numbers beside it. It comes from `server/denom.json`'s `denom.text`, at that
+ * one fixed path.
+ *
+ * `denom: null` is not "no answer": it is a reading of the game's *base* line set, because there is
+ * no `denom.json` or the game declares no denominations, and it has to be as visible as a reading at
+ * 1c or "5 lines" looks like the whole paytable.
+ */
+export type PaylineDenom = {
+  /** Canonical spelling — "$1.00", "1$" and "$1" all arrive here as "$1". Null when none applied. */
+  denom: string | null
+  /** Exactly what denom.json's `denom.text` said, before normalising. */
+  text: string | null
+  /** denom.json's own `value`/`unit`/`available`. None of them decide anything; they are the
+   *  reader's account of the same thing, kept so a disagreement is visible after the fact. */
+  value: number | null
+  unit: string | null
+  available: string[]
+  /** Where it was read from, or why there was none. */
+  source: string
+  /** What the *game's* log recorded for this spin, in cents ("1.000", "200.000"). A cross-check
+   *  that never decides — denom.json is the source. Null when the run holds no captured spin. */
+  logged_cents: string | null
+  /** True/false against that log value; null when there was nothing to compare. */
+  agrees_with_log: boolean | null
+  /** Set only when the two disagree — denom.json holds one value for the whole cabinet, so a file
+   *  left behind would otherwise walk 39 lines over a $2.00 spin without saying so. */
+  disagreement: string | null
+  /** The named set in `games.<exe>.payline_sets` this denomination pays. */
+  payline_set: string | null
+  payline_set_label: string | null
+  /** How many lines that set holds. Null when no denomination was configured. */
+  lines: number | null
+  /** Said out loud when the set is knowingly incomplete — a line left out pending a correction. */
+  note: string | null
+  /** The spreadsheet this denomination's reel stops map through. */
+  paytable: string | null
+}
+
 /** A strategy that could not run says so: an omitted row would read as agreement. */
 export type PaylineCrossCheck = Record<string, { pays?: number[]; skipped?: string }>
 
@@ -168,6 +211,9 @@ export type PaylineReelStops = {
   /** Which game's block named that sheet. A reel strip is one game's symbol layout, so "whose
    *  strips were these?" is a question the record has to be able to answer. */
   strips_game?: string | null
+  /** And at which denomination — one game ships a sheet per denom. Null means the game's base
+   *  block was read because no denomination was configured. */
+  strips_denom?: string | null
   /** This sheet's mystery-symbol names, upper-cased -- the ones that abstain rather than deciding
    *  a pair, because they reveal as other art. `[]` is a game that has none. */
   placeholders?: string[]
@@ -186,6 +232,8 @@ export type PaylineResult = {
   image: string
   /** "spin_result of this run", or the configured fallback image it read instead. */
   image_source: string
+  /** Which denomination's rules were applied. Absent on records written before denoms existed. */
+  denom?: PaylineDenom | null
   backend: string
   method: string
   matcher: string

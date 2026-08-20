@@ -53,8 +53,9 @@ src/
 
 Every type in there has a counterpart in Python, and the comments say which:
 `FRAME_STAGES` mirrors `server/frames.py`, `Verdict` mirrors `validate/runner.py`, `PaylineResult`
-mirrors `payline/report.py`. When a record grows a field, both sides change — there is no codegen
-and no schema, so the mirror is kept by hand and by reading those files.
+mirrors `payline/report.py`, `PaylineDenom` mirrors `payline/denoms.py`. When a record grows a
+field, both sides change — there is no codegen and no schema, so the mirror is kept by hand and by
+reading those files.
 
 Two things about it are load-bearing:
 

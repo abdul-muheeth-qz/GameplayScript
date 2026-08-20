@@ -23,6 +23,7 @@ import os
 
 from .. import frames
 from ..settings import resolve
+from . import denoms
 from . import embeddings as emb
 from . import report, telemetry, tiles as tiling
 from .geometry import PaylineError, geometry_for
@@ -46,6 +47,9 @@ DEFAULTS = {
     "save_embeddings": True,
     "image": None,
     "symbol_library": None,
+    # **No `denom_file`, and that is deliberate.** The denomination comes from the captured spin's
+    # own log, in the run folder being audited -- see `denoms.py`. A cabinet-level path could not
+    # follow the spin, and would have read a real $2.00 run on this disk as 1c.
     # The reel-stop checkpoint. **No paths to set here at all**: the stops come from the active
     # game's own log and the strips from its own `reel_strips` block, both in game_config.json, so
     # one `active` line moves them together. `band` null runs from 0.70 up to whatever `thresholds`
@@ -113,6 +117,10 @@ def source_image(run_dir: str, settings: dict) -> tuple[str, str]:
 def build_tiles_for(run_dir: str, cfg: dict | None = None) -> dict:
     """Crop the reel window and cut it into cells. Writes `payline/tiles.json`."""
     settings = settings_for(cfg)
+    # No denom here on purpose: a tile is a cell of the grid, and which lines are walked over those
+    # cells is not a fact about the crop. Resolving one would make this step fail on a bad denom
+    # setting that has nothing to do with cutting tiles, and would put the denom into
+    # `Geometry.describe()`'s comparison in `_tiles_are_current` -- see that docstring.
     geometry = geometry_for(cfg or {})
     image, origin = source_image(run_dir, settings)
 
@@ -172,7 +180,13 @@ def _tiles_are_current(info: dict | None, geometry, image_path: str) -> bool:
 def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
     """Embed the tiles, match them, walk the paylines, and write `payline.json`."""
     settings = settings_for(cfg)
-    geometry = geometry_for(cfg or {})
+    # Which denomination was played, and so which set of lines pays and whose paytable the reel
+    # stops map through. Read out of this run folder's own `spin.json`, so it is this spin's
+    # denomination and not a setting's. Resolved before anything else, because a denomination the
+    # game has no block for is a question about the config that should not cost an embedding pass to
+    # discover.
+    selection = denoms.select(cfg or {}, run_dir, settings)
+    geometry = geometry_for(cfg or {}, selection.lines)
     out_dir = payline_dir(run_dir)
 
     # Resolved first and unconditionally: it is what the cache is checked against, and what raises
@@ -200,7 +214,7 @@ def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
     # `image_path` is what lets the checkpoint pick *this frame's* spin out of the log rather than
     # the newest entry in it.
     matcher, stops_record = build_checkpoint(inner, geometry, cfg or {}, settings, backend,
-                                             image_path)
+                                             image_path, selection)
     results = evaluate_all(geometry, matcher)
 
     # Over the **inner** matcher, not the checkpointed one: this answers "do the vision strategies
@@ -214,7 +228,7 @@ def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
         results, matcher, geometry,
         image=info.get("image"), image_source=info.get("image_source"),
         backend=backend, method=inner.name, tiles_info=info,
-        checks=checks, agree=agreement(checks))
+        checks=checks, agree=agreement(checks), denom=selection.describe())
 
     adjudications = getattr(matcher, "adjudications", [])
     stops_record["adjudications"] = adjudications
@@ -240,6 +254,14 @@ def validate_paylines(run_dir: str, cfg: dict | None = None) -> dict:
         f"symbols in total." if lines else
         f"No line pays: every one of the {len(record['lines'])} lines breaks before its "
         f"second reel matches.")
+    if selection.configured:
+        # Which denomination decided that line count belongs in the sentence, not just in the
+        # record: "3 of 40 lines pay" and "3 of 5" are the same three lines read against different
+        # rules, and the number alone does not say which was applied.
+        record["message"] += (
+            f" Read at {selection.text}, which pays the {selection.set_name} set.")
+    if selection.note:
+        record["message"] += f" {selection.note}"
     if record.get("agreement") is False:
         record["message"] += (" The matching strategies disagree -- recalibrate the "
                               "threshold before trusting this.")

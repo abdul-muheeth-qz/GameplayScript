@@ -46,9 +46,15 @@ REQUIRED_KEYS = ("reels_roi", "reel_bounds", "row_bounds")
 
 
 class Geometry:
-    """One game's reel geometry, validated. Read-only after construction."""
+    """One game's reel geometry, validated. Read-only after construction.
 
-    def __init__(self, process: str, block: dict):
+    `paylines` overrides the block's own line list, which is how a denomination pays 20 or 40 lines
+    over the same reel window (`denoms.select`). It is validated here either way -- the cells of a
+    set resolved out of the config get the same "does that cell exist on this grid" check as the
+    ones written into the geometry block.
+    """
+
+    def __init__(self, process: str, block: dict, paylines=None):
         self.process = process
         self.label = block.get("label", "unnamed")
         self.measured_on = block.get("measured_on")
@@ -77,7 +83,7 @@ class Geometry:
                 f"row_bounds={block.get('row_bounds')!r}, inner_margin_frac="
                 f"{block.get('inner_margin_frac')!r}") from None
 
-        self.paylines = block.get("paylines") 
+        self.paylines = block.get("paylines") if paylines is None else paylines
         self._validate()
 
     @property
@@ -168,7 +174,14 @@ class Geometry:
                         f"E<row><reel>, row 1 at the top and reel 1 at the left")
 
     def describe(self) -> dict:
-        """What the record should say about the geometry a reading came from."""
+        """What the record should say about the geometry a reading came from.
+
+        **The payline set is deliberately not in here.** This is also what `runner._tiles_are_current`
+        compares to decide whether saved tiles can be reused, and a tile is a cell of the grid --
+        which lines are walked over those cells changes nothing about the crop. Putting the denom in
+        would re-cut all fifteen tiles every time the denomination changed, for an identical result.
+        Which denom a verdict was reached at is `payline.json`'s own `denom` block.
+        """
         return {"process": self.process, "label": self.label,
                 "measured_on": self.measured_on,
                 "grid": self.grid_label,
@@ -225,11 +238,14 @@ def _no_block_message(process: str, games_path: str | None = None) -> str:
             f"games[\"{process}\"]")
 
 
-def geometry_for(cfg: dict) -> Geometry:
+def geometry_for(cfg: dict, paylines=None) -> Geometry:
     """The geometry for the active game, off `cfg["game"]` -- where `extract` reads `meter_roi`.
 
     Raises and names the process when there is no block. There is deliberately no fallback: a grid
     read off the wrong fractions is a confident answer about pixels holding something else.
+
+    `paylines` is the denomination's resolved line set (`denoms.select().lines`); None means the
+    block's own, which is the base set every denom shares.
     """
     game = cfg.get("game") or {}
     process = game.get("process")
@@ -243,4 +259,4 @@ def geometry_for(cfg: dict) -> Geometry:
     if not block:
         raise PaylineError(_no_block_message(process))
 
-    return Geometry(process, block)
+    return Geometry(process, block, paylines)

@@ -405,6 +405,21 @@ def classify(events: list[dict]) -> dict:
                   else "take_win" if "take_win" in names else None),
         "reel_stops": reel_stops,
         "final_stops": final_stops,
+        # The denomination this spin was played at, in cents, off the game's own
+        # `[WagerGameApp.UpdateDenom]` line. Lifted out of the events because the payline audit
+        # keys its line set and its paytable off it and should not have to walk the list --
+        # `payline.denoms` reads this, and falls back to the events for folders captured before
+        # this field existed.
+        #
+        # **Read off `events` and not `mine`, which is the one place in this function that does.**
+        # A denomination is state, not an outcome: the game logs it on every activation as well as
+        # on a change, so on a spin that collected a carried win it lands inside the *previous*
+        # spin's block and is tagged `belongs_to`. Two run folders here are exactly that, and
+        # excluding them would leave the carried-win spins with no denomination at all. A
+        # denomination change reloads the game's scene, so the last value seen is the one in force
+        # when these reels stopped.
+        "denom": next((e["denom"] for e in reversed(events)
+                       if e.get("event") == "denom_changed" and e.get("denom") is not None), None),
     }
     kinds = [k for k, present in (("free spins", summary["free_spins"]),
                                   ("hold and spin", summary["hold_and_spin"]),

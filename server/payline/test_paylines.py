@@ -128,10 +128,16 @@ def test_v_and_inverted_v_paths():
 
 
 def test_geometry_paylines_are_the_five_lines():
-    """The shipped geometry must define the same five lines these fixtures assume."""
-    from .geometry import DEFAULT_PAYLINES
+    """The shipped geometry must define the same five lines these fixtures assume.
 
-    assert [line["cells"] for line in DEFAULT_PAYLINES] == [line["cells"] for line in LINES]
+    Read off `game_config.json` rather than a module constant: `geometry.DEFAULT_PAYLINES` was
+    removed when the lines moved into the config, precisely so nothing could lean on a Python
+    literal that a person then had to keep in step with a JSON one.
+    """
+    from .geometry import configured_games
+
+    shipped = configured_games()["FortuneOx.exe"]["paylines"]
+    assert [line["cells"] for line in shipped] == [line["cells"] for line in LINES]
 
 
 def test_geometry_rejects_an_overlapping_reel():

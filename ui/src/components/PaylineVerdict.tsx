@@ -33,6 +33,8 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
       />
 
       <div className="rounded-sm border border-rule bg-slab p-6 sm:p-8">
+        <Denom result={result} />
+
         <div className="mx-auto flex max-w-xl flex-col items-center gap-6">
           <div className="flex items-baseline gap-8">
             <Figure value={String(result.lines_paying)} of={String(result.lines.length)} label="lines pay" />
@@ -152,6 +154,79 @@ export function PaylineVerdict({ result }: { result: PaylineResult }) {
         </p>
       </div>
     </section>
+  )
+}
+
+/**
+ * Which denomination's rules produced the numbers below it.
+ *
+ * Above the figures rather than in the small print underneath, because it is the one thing that
+ * changes what "N of M lines pay" *means*: the same three paying lines are 3 of 40 at 1c and 3 of 5
+ * at $1, and the count alone does not say which rule set was walked.
+ *
+ * **Both states are shown.** No denomination is not an absence of information — it is a reading of
+ * the game's base five lines, because there is no `denom.json` or the game declares none, and a page
+ * that stayed silent about it would present five lines as though they were the whole paytable. Same
+ * reason the unavailable reel-stop checkpoint is stated rather than hidden.
+ *
+ * **And the disagreement is loud.** `denom.json` holds one value for the whole cabinet while the
+ * game logs one per spin, so a file left behind reads a $2.00 spin as 1c and walks 39 lines over it.
+ * The file still decides — that is the design — but this is the only place a reader would find out,
+ * so it renders in vermilion above everything else rather than as a footnote.
+ */
+function Denom({ result }: { result: PaylineResult }) {
+  const denom = result.denom
+  if (!denom) return null // a record written before denominations existed
+
+  const set = denom.denom !== null
+
+  return (
+    <div className="mb-6 border-b border-rule pb-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+        <h4 className="eyebrow text-xs text-muted-foreground">Denomination</h4>
+        <span className={cn("eyebrow text-[0.6875rem]", set ? "text-numeral" : "text-amber")}>
+          {set ? `${denom.denom} · ${denom.lines} lines` : "none — base lines only"}
+        </span>
+      </div>
+
+      <p className="mt-2 text-[0.6875rem] leading-relaxed text-muted-foreground/80">
+        {set ? (
+          <>
+            {denom.payline_set_label ?? denom.payline_set}
+            {denom.paytable && (
+              <>
+                {" · paytable "}
+                <span className="text-numeral/70">{denom.paytable.split(/[\\/]/).pop()}</span>
+              </>
+            )}
+            <br />
+            {denom.source}
+          </>
+        ) : (
+          denom.source
+        )}
+        {/* Agreement is stated as plainly as disagreement, or a reader cannot tell a checked
+            value from an unchecked one. */}
+        {denom.agrees_with_log === true && (
+          <>
+            {" · "}
+            <span className="text-jade/80">
+              the game's own log agrees ({denom.logged_cents} cents)
+            </span>
+          </>
+        )}
+      </p>
+
+      {denom.disagreement && (
+        <p className="mt-2 border-l-2 border-vermilion pl-3 text-[0.6875rem] leading-relaxed text-vermilion">
+          {denom.disagreement}
+        </p>
+      )}
+
+      {denom.note && (
+        <p className="mt-2 text-[0.6875rem] leading-relaxed text-amber/90">{denom.note}</p>
+      )}
+    </div>
   )
 }
 

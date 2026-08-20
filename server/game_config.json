@@ -1,5 +1,5 @@
 {
-  "active": "HuffNPuffLink.exe",
+  "active": "FortuneOx.exe",
   "games": {
     "HuffNPuffLink.exe": {
       "window_class": "UnityWndClass",
@@ -13,6 +13,7 @@
     "FortuneOx.exe": {
       "window_class": "UnityWndClass",
       "log": "C:\\logs\\Game\\FortuneOx\\Logs\\FortuneOx_Client.log",
+      "reel_stops_log": "C:\\logs\\Game\\FortuneOx\\Logs\\FortuneOx_Server.log",
       "targets": {
         "take_win": [0.0713, 0.9724],
         "gamble": [0.0694, 0.9383]
@@ -21,6 +22,134 @@
       "reel_strips": {
         "path": "assets/payline_excel.xlsx",
         "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+      },
+      "payline_sets": {
+        "5_line": {
+          "label": "the five lines every denomination pays",
+          "lines": [
+            {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
+            {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
+            {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
+            {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
+            {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]}
+          ]
+        },
+        "20_line": {
+          "label": "the 20 lines of the 5c and 10c denominations",
+          "note": "Line 19 of Payline_Validation_denoms.xlsx is omitted: the sheet lists it as E13, E31, E32, E34, E35 -- reels 3, 1, 2, 4, 5 -- and the counter can only walk reels left to right, so it is being corrected in the sheet before it is added here. The ids skip 19 so it can be put back without renumbering anything.",
+          "lines": [
+            {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
+            {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
+            {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
+            {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
+            {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]},
+            {"id": 6, "name": "Rows 2-1-1-1-2", "cells": ["E21", "E12", "E13", "E14", "E25"]},
+            {"id": 7, "name": "Rows 2-3-3-3-2", "cells": ["E21", "E32", "E33", "E34", "E25"]},
+            {"id": 8, "name": "Rows 1-1-2-3-3", "cells": ["E11", "E12", "E23", "E34", "E35"]},
+            {"id": 9, "name": "Rows 3-3-2-1-1", "cells": ["E31", "E32", "E23", "E14", "E15"]},
+            {"id": 10, "name": "Rows 2-1-2-1-2", "cells": ["E21", "E12", "E23", "E14", "E25"]},
+            {"id": 11, "name": "Rows 2-3-2-3-2", "cells": ["E21", "E32", "E23", "E34", "E25"]},
+            {"id": 12, "name": "Rows 1-2-2-2-3", "cells": ["E11", "E22", "E23", "E24", "E35"]},
+            {"id": 13, "name": "Rows 3-2-2-2-1", "cells": ["E31", "E22", "E23", "E24", "E15"]},
+            {"id": 14, "name": "Rows 2-2-1-2-3", "cells": ["E21", "E22", "E13", "E24", "E35"]},
+            {"id": 15, "name": "Rows 2-2-3-2-1", "cells": ["E21", "E22", "E33", "E24", "E15"]},
+            {"id": 16, "name": "Rows 1-2-1-2-1", "cells": ["E11", "E22", "E13", "E24", "E15"]},
+            {"id": 17, "name": "Rows 3-2-3-2-3", "cells": ["E31", "E22", "E33", "E24", "E35"]},
+            {"id": 18, "name": "Rows 1-1-3-1-1", "cells": ["E11", "E12", "E33", "E14", "E15"]},
+            {"id": 19, "name": "Rows 1-1-3-1-1", "cells": ["E31", "E32", "E13", "E34", "E35"]},
+            {"id": 20, "name": "Rows 2-1-3-1-2", "cells": ["E21", "E12", "E33", "E14", "E25"]}
+          ]
+        },
+        "40_line": {
+          "label": "the 40 lines of the 1c and 2c denominations",
+          "note": "Line 19 of Payline_Validation_denoms.xlsx is omitted: the sheet lists it as E13, E31, E32, E34, E35 -- reels 3, 1, 2, 4, 5 -- and the counter can only walk reels left to right, so it is being corrected in the sheet before it is added here. The ids skip 19 so it can be put back without renumbering anything.",
+          "lines": [
+            {"id": 1, "name": "Middle row", "cells": ["E21", "E22", "E23", "E24", "E25"]},
+            {"id": 2, "name": "Top row", "cells": ["E11", "E12", "E13", "E14", "E15"]},
+            {"id": 3, "name": "Bottom row", "cells": ["E31", "E32", "E33", "E34", "E35"]},
+            {"id": 4, "name": "V shape", "cells": ["E11", "E22", "E33", "E24", "E15"]},
+            {"id": 5, "name": "Inverted V shape", "cells": ["E31", "E22", "E13", "E24", "E35"]},
+            {"id": 6, "name": "Rows 2-1-1-1-2", "cells": ["E21", "E12", "E13", "E14", "E25"]},
+            {"id": 7, "name": "Rows 2-3-3-3-2", "cells": ["E21", "E32", "E33", "E34", "E25"]},
+            {"id": 8, "name": "Rows 1-1-2-3-3", "cells": ["E11", "E12", "E23", "E34", "E35"]},
+            {"id": 9, "name": "Rows 3-3-2-1-1", "cells": ["E31", "E32", "E23", "E14", "E15"]},
+            {"id": 10, "name": "Rows 2-1-2-1-2", "cells": ["E21", "E12", "E23", "E14", "E25"]},
+            {"id": 11, "name": "Rows 2-3-2-3-2", "cells": ["E21", "E32", "E23", "E34", "E25"]},
+            {"id": 12, "name": "Rows 1-2-2-2-3", "cells": ["E11", "E22", "E23", "E24", "E35"]},
+            {"id": 13, "name": "Rows 3-2-2-2-1", "cells": ["E31", "E22", "E23", "E24", "E15"]},
+            {"id": 14, "name": "Rows 2-2-1-2-3", "cells": ["E21", "E22", "E13", "E24", "E35"]},
+            {"id": 15, "name": "Rows 2-2-3-2-1", "cells": ["E21", "E22", "E33", "E24", "E15"]},
+            {"id": 16, "name": "Rows 1-2-1-2-1", "cells": ["E11", "E22", "E13", "E24", "E15"]},
+            {"id": 17, "name": "Rows 3-2-3-2-3", "cells": ["E31", "E22", "E33", "E24", "E35"]},
+            {"id": 18, "name": "Rows 1-1-3-1-1", "cells": ["E11", "E12", "E33", "E14", "E15"]},
+            {"id": 19, "name": "Rows 1-1-3-1-1", "cells": ["E31", "E32", "E13", "E34", "E35"]},
+            {"id": 20, "name": "Rows 2-1-3-1-2", "cells": ["E21", "E12", "E33", "E14", "E25"]},
+            {"id": 21, "name": "Rows 2-3-1-3-2", "cells": ["E21", "E32", "E13", "E34", "E25"]},
+            {"id": 22, "name": "Rows 1-3-1-3-1", "cells": ["E11", "E32", "E13", "E34", "E15"]},
+            {"id": 23, "name": "Rows 3-1-3-1-3", "cells": ["E31", "E12", "E33", "E14", "E35"]},
+            {"id": 24, "name": "Rows 1-3-3-3-1", "cells": ["E11", "E32", "E33", "E34", "E15"]},
+            {"id": 25, "name": "Rows 3-1-1-1-3", "cells": ["E31", "E12", "E13", "E14", "E35"]},
+            {"id": 26, "name": "Rows 1-3-2-3-1", "cells": ["E11", "E32", "E23", "E34", "E15"]},
+            {"id": 27, "name": "Rows 3-1-2-1-3", "cells": ["E31", "E12", "E23", "E14", "E35"]},
+            {"id": 28, "name": "Rows 2-2-3-2-2", "cells": ["E21", "E22", "E33", "E24", "E25"]},
+            {"id": 29, "name": "Rows 2-2-1-2-2", "cells": ["E21", "E22", "E13", "E24", "E25"]},
+            {"id": 30, "name": "Rows 1-3-1-2-2", "cells": ["E11", "E32", "E13", "E24", "E25"]},
+            {"id": 31, "name": "Rows 3-1-3-2-2", "cells": ["E31", "E12", "E33", "E24", "E25"]},
+            {"id": 32, "name": "Rows 1-1-1-2-3", "cells": ["E11", "E12", "E13", "E24", "E35"]},
+            {"id": 33, "name": "Rows 3-3-3-2-1", "cells": ["E31", "E32", "E33", "E24", "E15"]},
+            {"id": 34, "name": "Rows 1-2-3-3-3", "cells": ["E11", "E22", "E33", "E34", "E35"]},
+            {"id": 35, "name": "Rows 3-2-1-1-1", "cells": ["E31", "E22", "E13", "E14", "E15"]},
+            {"id": 36, "name": "Rows 2-1-1-2-3", "cells": ["E21", "E12", "E13", "E24", "E35"]},
+            {"id": 37, "name": "Rows 2-3-3-2-1", "cells": ["E21", "E32", "E33", "E24", "E15"]},
+            {"id": 38, "name": "Rows 1-1-2-1-1", "cells": ["E11", "E12", "E23", "E14", "E15"]},
+            {"id": 39, "name": "Rows 3-3-2-3-3", "cells": ["E31", "E32", "E23", "E34", "E35"]},
+            {"id": 40, "name": "Rows 2-1-2-3-2", "cells": ["E21", "E12", "E23", "E34", "E25"]}
+          ]
+        }
+      },
+      "denoms": {
+        "1c": {
+          "paylines": "40_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_1c.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        },
+        "2c": {
+          "paylines": "40_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_2c.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        },
+        "5c": {
+          "paylines": "20_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_5c.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        },
+        "10c": {
+          "paylines": "20_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_10c.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        },
+        "$1.00": {
+          "paylines": "5_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_1$.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        },
+        "$2.00": {
+          "paylines": "5_line",
+          "reel_strips": {
+            "path": "assets/paytable_excel_2$.xlsx",
+            "placeholders": ["Mystery1", "Mystery2", "Mystery (Orb)"]
+          }
+        }
       },
       "payline_geometry": {
         "label": "fortuneox_portrait",

@@ -48,7 +48,8 @@ Three consequences that are load-bearing:
 ## `lib/api.ts` mirrors Python by hand
 
 There is no codegen. Each type names the module it mirrors — `FRAME_STAGES` ↔ `server/frames.py`,
-`Verdict` ↔ `validate/runner.py`, `PaylineResult`/`PaylineReelStops` ↔ `payline/report.py`. Change
+`Verdict` ↔ `validate/runner.py`, `PaylineResult`/`PaylineReelStops` ↔ `payline/report.py`,
+`PaylineDenom` ↔ `payline/denoms.py`. Change
 one side and change the other in the same edit, and read the Python before guessing at a shape.
 
 - **Never assume a fixed pair of frames.** A losing spin captures two and a winning one three — the
@@ -60,6 +61,16 @@ one side and change the other in the same edit, and read the Python before guess
 - **A skipped thing is reported, never omitted.** `PaylineCrossCheck` carries `{skipped: "why"}`
   and `PaylineReelStops.status` can be `"unavailable"`. Don't filter those rows out of a table — a
   missing row reads as agreement, which is the opposite of what happened.
+- **`denom: null` is a statement, not an absence.** It means the game's *base* five lines were
+  walked — there is no `server/denom.json`, or the game declares no denominations — so
+  `PaylineVerdict`'s `Denom` block renders in both states, amber when there is none. A page that
+  stayed silent would present five lines as the whole paytable, when 1c pays forty. Same rule as the
+  unavailable checkpoint, one section up.
+- **`denom.disagreement` renders in vermilion and is not a footnote.** `denom.json` holds one value
+  for the whole cabinet while the game logs one per spin, so a file left behind reads a $2.00 spin as
+  1c and walks 39 lines over it. The file still decides — that is the design — and this is the only
+  place a reader would find out. `agrees_with_log: true` is shown too: agreement stated as plainly as
+  disagreement is what distinguishes a checked value from an unchecked one.
 
 ## The two pages are one step each, and the collapse belongs here
 
